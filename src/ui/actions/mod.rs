@@ -293,8 +293,47 @@ pub(crate) struct ShortcutDefinition {
     pub(crate) command: ShortcutCommand,
     pub(crate) id: &'static str,
     pub(crate) category: ShortcutCategory,
-    pub(crate) default_keys: &'static [&'static str],
+    pub(crate) default_keys: ShortcutDefaults,
     pub(crate) context: Option<&'static str>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ShortcutDefaults {
+    pub(crate) windows_linux: &'static [&'static str],
+    pub(crate) macos: &'static [&'static str],
+}
+
+impl ShortcutDefaults {
+    /// 复用无平台差异的键位，避免把相同数组在两套默认映射中重复维护。
+    pub(crate) const fn shared(keys: &'static [&'static str]) -> Self {
+        Self {
+            windows_linux: keys,
+            macos: keys,
+        }
+    }
+
+    /// 显式保存两套平台键位，使 Windows 不会注册 Cmd/Win 组合，macOS 也不会误收 Ctrl 备选键。
+    pub(crate) const fn platform(
+        windows_linux: &'static [&'static str],
+        macos: &'static [&'static str],
+    ) -> Self {
+        Self {
+            windows_linux,
+            macos,
+        }
+    }
+
+    /// 只暴露当前构建目标的默认键，配置覆盖与冲突检测因此使用同一套平台事实。
+    pub(crate) const fn current(self) -> &'static [&'static str] {
+        #[cfg(target_os = "macos")]
+        {
+            self.macos
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.windows_linux
+        }
+    }
 }
 
 const BLOCK_CONTEXT: Option<&str> = Some("BlockEditor");
@@ -303,18 +342,6 @@ const LEGACY_SELECT_ALL_IDS: &[&str] = &[
     "select_all_source_text",
     "select_focused_block_text_rendered",
 ];
-
-// On macOS cmd-q is the system quit shortcut; Windows/Linux use Alt+F4 (OS-handled).
-#[cfg(target_os = "macos")]
-const QUIT_APPLICATION_DEFAULT_KEYS: &[&str] = &["cmd-q"];
-#[cfg(not(target_os = "macos"))]
-const QUIT_APPLICATION_DEFAULT_KEYS: &[&str] = &[];
-
-// On macOS cmd-w closes the current window; no app-level binding needed on other platforms.
-#[cfg(target_os = "macos")]
-const CLOSE_WINDOW_DEFAULT_KEYS: &[&str] = &["cmd-shift-w"];
-#[cfg(not(target_os = "macos"))]
-const CLOSE_WINDOW_DEFAULT_KEYS: &[&str] = &["ctrl-shift-w"];
 
 mod definitions;
 mod shortcuts;

@@ -2,6 +2,56 @@
 
 use super::*;
 
+/// Resident Markdown 的注册表键可以使用 UI 友好的规范路径，但保存快照必须保留
+/// 文件适配器探测到的真实身份；Windows 下两种 canonical path 表示不同，混用会
+/// 把未发生外部修改的第一次保存误判为 SourceChanged。
+#[test]
+fn resident_disk_open_keeps_runtime_identity_for_first_save() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let path = write_fixture(root.path())?;
+    let service = DocumentService::new();
+    let policy = LoadingPolicy::default();
+    let probe = service.probe_file(&path, policy, |normalized, loading| {
+        crate::document_io::probe_document_with_policy(normalized, loading)
+    })?;
+    let opened = service.open_resident_file(&path, policy, |normalized, _| {
+        crate::document_io::read_resident_text_from_probe(
+            normalized,
+            &probe,
+            policy.effective_limits(),
+        )
+        .map(|opened| ResidentMarkdownSource::from_opened(normalized, opened))
+    })?;
+    let handle = opened.handle();
+    handle
+        .lock()
+        .map_err(|error| test_error(error.to_string()))?
+        .dispatch(DocumentCommand::ApplyTransaction {
+            view_id: DocumentViewInstanceId::new(),
+            transaction_id: gmark_document_runtime::TransactionId(1),
+            transaction: Transaction::new(
+                DocumentRevision(0),
+                vec![SourceEdit::new(0..0, "saved\n")],
+            ),
+            selection_before: SourceSelection::default(),
+            selection_after: SourceSelection::default(),
+        })?;
+    let snapshot = handle
+        .request_save_snapshot()?
+        .ok_or_else(|| test_error("first save request was not started"))?;
+    let current_identity = FileSource::open(&path)?.identity()?;
+
+    assert_eq!(
+        snapshot.identity.canonical_path, current_identity.path,
+        "resident open must not replace the filesystem identity with the registry path"
+    );
+    let saved_identity = snapshot
+        .save_atomic_cancellable(&path, &gmark_paged_document::SearchCancellation::default())?;
+    handle.complete_save(snapshot.revision, saved_identity)?;
+    assert_eq!(std::fs::read_to_string(&path)?, "saved\n# shared\n");
+    Ok(())
+}
+
 fn concurrent_file_open_runs_loader_once_and_shares_handle_and_leases() -> TestResult {
     let root = tempfile::tempdir()?;
     let path = write_fixture(root.path())?;

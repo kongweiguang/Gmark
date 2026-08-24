@@ -28,7 +28,7 @@
   </picture>
 </div>
 
-Gmark 使用 Rust 与 GPUI 构建。文档始终是磁盘上的普通文件：不需要账号，不会为了编辑而上传内容，也不会把 Markdown 转换成专有格式。当前版本为 **v0.2.3**。
+Gmark 使用 Rust 与 GPUI 构建。文档始终是磁盘上的普通文件：不需要账号，不会为了编辑而上传内容，也不会把 Markdown 转换成专有格式。当前版本为 **v0.2.4**。
 
 ## 一份文件，四种视图
 
@@ -151,11 +151,18 @@ Source 内置语言识别覆盖 Rust、JavaScript/TypeScript、JSON/JSONL、Mark
 | 打开文件 | `Ctrl+O` | `Cmd+O` |
 | 打开文件夹 | `Ctrl+Shift+O` | `Cmd+Shift+O` |
 | 快速打开 | `Ctrl+P` | `Cmd+P` |
-| 命令面板 | `Ctrl+Shift+P` | `Cmd+Shift+P` |
+| 查找动作 | `Ctrl+Shift+A` | `Cmd+Shift+A` |
+| 偏好设置 | `Ctrl+Alt+S` | `Cmd+,` |
 | 查找 | `Ctrl+F` | `Cmd+F` |
-| 切换视图 | `Ctrl+Tab` | `Cmd+Tab` |
+| 替换 | `Ctrl+R` | `Cmd+R` |
+| 查找下一项 / 上一项 | `F3` / `Shift+F3` | `Cmd+G` / `Cmd+Shift+G` |
+| 格式化文档 | `Ctrl+Alt+L` | `Cmd+Alt+L` |
+| 段落 / 一级至六级标题 | `Ctrl+0` / `Ctrl+1..6` | `Cmd+0` / `Cmd+1..6` |
+| 切换 Live / Source 视图 | `Ctrl+/` | `Cmd+/` |
+| 上一个 / 下一个标签页 | `Alt+Left` / `Alt+Right` | `Cmd+Shift+[` / `Cmd+Shift+]` |
+| 专注模式 / 打字机模式 | `F8` / `F9` | `F8` / `F9` |
 
-快捷键可以在偏好设置中修改；冲突会在录制时直接提示。
+默认键位优先采用 IntelliJ IDEA 的当前平台映射，Markdown 专属操作采用 Typora 等编辑器的通用习惯；应用只注册当前系统的一套默认键。快捷键可以在偏好设置中修改，冲突会在录制时直接提示。
 
 <details>
 <summary>macOS Gatekeeper 提示</summary>

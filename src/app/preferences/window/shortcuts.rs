@@ -215,6 +215,7 @@ impl PreferencesWindow {
         cx.notify();
     }
 
+    /// 录制并校验当前平台键位；与平台默认值相同的输入不写入冗余用户覆盖。
     pub(super) fn capture_shortcut_key(
         &mut self,
         event: &KeyDownEvent,
@@ -304,6 +305,7 @@ impl PreferencesWindow {
         {
             let defaults = definition
                 .default_keys
+                .current()
                 .iter()
                 .map(|key| key.to_string())
                 .collect::<Vec<_>>();

@@ -28,6 +28,7 @@ async fn ctrl_a_selects_entire_source_document_in_source_mode(cx: &mut TestAppCo
     });
 }
 
+/// Source 编辑历史通过当前平台的 Redo 默认键验收，确保键位契约变化后仍走同一事务历史。
 #[gpui::test]
 async fn source_mode_keyboard_copy_cut_paste_and_history_match_text_editor(
     cx: &mut TestAppContext,
@@ -72,7 +73,12 @@ async fn source_mode_keyboard_copy_cut_paste_and_history_match_text_editor(
         assert_eq!(editor.source_document.text(), " beta");
     });
 
-    visual.simulate_keystrokes("ctrl-y");
+    let redo_shortcut = if cfg!(target_os = "macos") {
+        "cmd-shift-z"
+    } else {
+        "ctrl-shift-z"
+    };
+    visual.simulate_keystrokes(redo_shortcut);
     redraw(visual);
     editor.read_with(visual, |editor, cx| {
         assert_eq!(editor.document.raw_source_text(cx), "gamma\nline beta");

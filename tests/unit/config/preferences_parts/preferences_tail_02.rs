@@ -1,5 +1,6 @@
 // @author kongweiguang
 
+/// 脏状态使用真正的自定义键位作为输入；平台默认组合会被规范化掉，不能代表草稿变化。
 #[gpui::test]
 async fn preferences_dirty_state_tracks_draft_changes(cx: &mut TestAppContext) {
     init_preferences_test_app(cx);
@@ -24,7 +25,7 @@ async fn preferences_dirty_state_tracks_draft_changes(cx: &mut TestAppContext) {
 
             preferences
                 .keybindings
-                .insert("save_document".into(), vec!["ctrl-alt-s".into()]);
+                .insert("save_document".into(), vec!["ctrl-alt-shift-s".into()]);
             assert!(preferences.has_unsaved_changes());
         })
         .expect("preferences window should be updateable");

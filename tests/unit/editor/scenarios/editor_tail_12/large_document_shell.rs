@@ -1,5 +1,6 @@
 // @author kongweiguang
 
+/// 大文件沿用标准编辑壳与当前平台历史键位；测试同时锁定虚拟化、保存和重做后的脏状态。
 #[gpui::test]
 async fn large_document_uses_the_standard_editor_shell(cx: &mut TestAppContext) {
     init_editor_test_app(cx);
@@ -361,7 +362,12 @@ async fn large_document_uses_the_standard_editor_shell(cx: &mut TestAppContext) 
     );
     assert!(visual.update(|window, cx| { large_view.read(cx).host_is_focused_for_test(window) }));
 
-    visual.simulate_keystrokes("ctrl-y");
+    let redo_shortcut = if cfg!(target_os = "macos") {
+        "cmd-shift-z"
+    } else {
+        "ctrl-shift-z"
+    };
+    visual.simulate_keystrokes(redo_shortcut);
     visual.run_until_parked();
     redraw(visual);
     assert!(editor.read_with(visual, |editor, _cx| editor.document_dirty));

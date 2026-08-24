@@ -12,7 +12,13 @@ fn normalize_code_language_input(text: &str) -> String {
 }
 
 impl Block {
+    /// 只为可编辑 Live 块打开语言菜单；Split/Preview 的实体是投影副本，允许它们
+    /// 改语言会制造不写回 SourceDocument 的局部高亮状态。
     pub(crate) fn open_code_language_menu(&mut self, cx: &mut Context<Self>) {
+        if self.is_read_only() {
+            self.code_language_menu_open = false;
+            return;
+        }
         let current = self.code_language_text();
         self.code_language_menu_selected = crate::components::CODE_LANGUAGE_MENU_ITEMS
             .iter()
@@ -22,12 +28,14 @@ impl Block {
         cx.notify();
     }
 
+    /// 切换可编辑代码块的语言菜单；只读投影保留相同代码表面但不创建编辑入口。
     pub(crate) fn toggle_code_language_menu(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.kind().is_code_block() {
+        if self.is_read_only() || !self.kind().is_code_block() {
+            self.code_language_menu_open = false;
             return;
         }
         self.code_language_focus_handle.focus(window);
@@ -39,7 +47,13 @@ impl Block {
         }
     }
 
+    /// 从菜单提交语言变更；在核心命令层再次拒绝只读实体，避免鼠标、键盘或测试
+    /// 绕过渲染层后让 Split 预览与 Live/Source 真值分叉。
     pub(crate) fn select_code_language_menu_item(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.is_read_only() {
+            self.code_language_menu_open = false;
+            return;
+        }
         let Some(language) = crate::components::CODE_LANGUAGE_MENU_ITEMS.get(index) else {
             return;
         };
@@ -65,13 +79,16 @@ impl Block {
         cx.notify();
     }
 
+    /// 只在可编辑语言输入持有焦点且菜单打开时消费导航键；只读预览必须把按键
+    /// 留给文档级滚动和导航。
     pub(crate) fn handle_code_language_menu_key(
         &mut self,
         event: &KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.code_language_focus_handle.is_focused(window) {
+        if self.is_read_only() || !self.code_language_focus_handle.is_focused(window) {
+            self.code_language_menu_open = false;
             return false;
         }
         let modifiers = event.keystroke.modifiers;
@@ -243,6 +260,8 @@ impl Block {
         cx.notify();
     }
 
+    /// 替换 Live 代码块语言文本；只读投影没有事务所有权，因此任何输入路径都必须
+    /// 在这里停止，而不能依赖上层控件是否恰好禁用。
     pub(crate) fn replace_code_language_text_in_range(
         &mut self,
         range: Range<usize>,
@@ -251,7 +270,7 @@ impl Block {
         mark_inserted_text: bool,
         cx: &mut Context<Self>,
     ) {
-        if !self.kind().is_code_block() {
+        if self.is_read_only() || !self.kind().is_code_block() {
             return;
         }
 

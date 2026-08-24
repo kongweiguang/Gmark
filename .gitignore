@@ -18,3 +18,16 @@ __pycache__/
 /.codex
 /docs/*
 AGENTS.md
+
+# BEGIN UPDENG
+# @author kongweiguang
+/.agents/
+/.claude/
+/.codex/
+/.updeng/
+/AGENTS.md
+/CLAUDE.md
+.env
+.env.*
+!.env.example
+# END UPDENG

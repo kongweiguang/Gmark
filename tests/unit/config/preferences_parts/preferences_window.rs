@@ -1,5 +1,7 @@
 // @author kongweiguang
 
+/// 使用未被任一平台默认键占用的组合验证持久化，避免产品默认值调整把有效覆盖
+/// 规范化为空并掩盖偏好存储本身的契约。
 #[test]
 fn saving_preferences_window_persists_selected_language() {
     let root =
@@ -62,7 +64,10 @@ fn saving_preferences_window_persists_selected_language() {
         ThemePalette::Fleet,
         "en-US",
         ImagePasteBehavior::CopyToNamedAssetsFolder,
-        BTreeMap::from([("save_document".to_string(), vec!["ctrl-alt-s".to_string()])]),
+        BTreeMap::from([(
+            "save_document".to_string(),
+            vec!["ctrl-alt-shift-s".to_string()],
+        )]),
         &document_loading,
         &status_bar,
         &dirs,
@@ -92,7 +97,7 @@ fn saving_preferences_window_persists_selected_language() {
     );
     assert_eq!(
         saved.keybindings.get("save_document"),
-        Some(&vec!["ctrl-alt-s".to_string()])
+        Some(&vec!["ctrl-alt-shift-s".to_string()])
     );
     assert_eq!(saved.status_bar.custom_buttons, status_bar.custom_buttons);
     let _ = std::fs::remove_dir_all(root);

@@ -4,6 +4,7 @@
 
 include!("scenarios/editor_head.rs");
 include!("scenarios/editor_fold.rs");
+include!("scenarios/editor_code_language_projection.rs");
 include!("scenarios/editor_tail_20.rs");
 include!("scenarios/editor_tail_18.rs");
 include!("scenarios/editor_tail_19.rs");

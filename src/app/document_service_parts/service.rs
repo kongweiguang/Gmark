@@ -243,7 +243,8 @@ impl DocumentService {
             let mut source = loader(&loader_path, policy)
                 .map_err(|error| ControllerError::open_failed(error.to_string()))?;
             source.loading_limits = policy.effective_limits();
-            source.file_identity.path = normalized_path.clone();
+            // 注册表键负责折叠 Windows 路径别名，文件身份则必须保留探测器返回的
+            // canonical path；把后者改写成 dunce 路径会让首次保存误判为外部修改。
             build_controller(DocumentId::new(), source, false)
         });
         self.finish_open(key, result)

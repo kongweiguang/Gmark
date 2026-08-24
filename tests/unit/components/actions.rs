@@ -4,7 +4,36 @@ use super::{
     ShortcutCategory, ShortcutCommand, format_shortcut_for_display, normalize_shortcut_config,
     resolved_shortcut_keys, shortcut_conflict_for, shortcut_definitions,
 };
-use std::collections::BTreeMap;
+use gpui::Keystroke;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// 将静态键位转换为运行时比较形式，保持断言只关注产品契约而非分配细节。
+fn owned_keys(keys: &[&str]) -> Vec<String> {
+    keys.iter().map(|key| (*key).to_owned()).collect()
+}
+
+/// 根据当前测试目标选择平台期望值，同时让同一断言明确记录 Windows/Linux 与 macOS 契约。
+fn current_platform_keys(windows_linux: &[&str], macos: &[&str]) -> Vec<String> {
+    if cfg!(target_os = "macos") {
+        owned_keys(macos)
+    } else {
+        owned_keys(windows_linux)
+    }
+}
+
+/// 同时核对两套静态默认值，Windows CI 也能防止 macOS 键位在重构中回退。
+fn assert_platform_defaults(command: ShortcutCommand, windows_linux: &[&str], macos: &[&str]) {
+    let definition = shortcut_definitions()
+        .iter()
+        .find(|definition| definition.command == command)
+        .expect("shortcut command should have a definition");
+    assert_eq!(definition.default_keys.windows_linux, windows_linux);
+    assert_eq!(definition.default_keys.macos, macos);
+    assert_eq!(
+        resolved_shortcut_keys(&BTreeMap::new(), command),
+        current_platform_keys(windows_linux, macos)
+    );
+}
 
 #[test]
 fn shortcut_display_formatting_uses_ui_labels() {
@@ -40,49 +69,148 @@ fn shortcut_display_formatting_preserves_unreadable_fallbacks() {
     );
 }
 
+/// 自定义键可以替换默认值，但测试刻意避开 IDEA 已占用的偏好设置组合。
 #[test]
 fn custom_shortcut_replaces_command_defaults() {
     let mut config = BTreeMap::new();
-    config.insert("save_document".to_string(), vec!["ctrl-alt-s".to_string()]);
+    config.insert(
+        "save_document".to_string(),
+        vec!["ctrl-alt-shift-s".to_string()],
+    );
 
     assert_eq!(
         resolved_shortcut_keys(&config, ShortcutCommand::SaveDocument),
-        vec!["ctrl-alt-s".to_string()]
+        vec!["ctrl-alt-shift-s".to_string()]
     );
 }
 
+/// 锁定 IDEA 优先、Typora 补充的两套产品键位，避免只在当前 Windows 构建上验证 macOS。
 #[test]
-fn toggle_view_mode_has_default_shortcuts() {
-    assert_eq!(
-        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::ToggleViewMode),
-        vec!["ctrl-tab".to_string(), "cmd-tab".to_string()]
+fn idea_first_defaults_cover_windows_linux_and_macos() {
+    assert_platform_defaults(ShortcutCommand::SaveDocument, &["ctrl-s"], &["cmd-s"]);
+    assert_platform_defaults(
+        ShortcutCommand::PasteAsPlainText,
+        &["ctrl-alt-shift-v"],
+        &["cmd-alt-shift-v"],
+    );
+    assert_platform_defaults(ShortcutCommand::Redo, &["ctrl-shift-z"], &["cmd-shift-z"]);
+    assert_platform_defaults(
+        ShortcutCommand::FormatDocument,
+        &["ctrl-alt-l"],
+        &["cmd-alt-l"],
+    );
+    assert_platform_defaults(
+        ShortcutCommand::OpenPreferences,
+        &["ctrl-alt-s"],
+        &["cmd-,"],
+    );
+    assert_platform_defaults(
+        ShortcutCommand::CommandPalette,
+        &["ctrl-shift-a"],
+        &["cmd-shift-a"],
+    );
+    assert_platform_defaults(ShortcutCommand::GoToLine, &["ctrl-g"], &["cmd-l"]);
+    assert_platform_defaults(ShortcutCommand::FindInDocument, &["ctrl-f"], &["cmd-f"]);
+    assert_platform_defaults(ShortcutCommand::ReplaceInDocument, &["ctrl-r"], &["cmd-r"]);
+    assert_platform_defaults(ShortcutCommand::FindNext, &["f3"], &["cmd-g"]);
+    assert_platform_defaults(
+        ShortcutCommand::FindPrevious,
+        &["shift-f3"],
+        &["cmd-shift-g"],
+    );
+    assert_platform_defaults(
+        ShortcutCommand::PreviousTab,
+        &["alt-left"],
+        &["cmd-shift-["],
+    );
+    assert_platform_defaults(ShortcutCommand::NextTab, &["alt-right"], &["cmd-shift-]"]);
+    assert_platform_defaults(ShortcutCommand::ToggleViewMode, &["ctrl-/"], &["cmd-/"]);
+    assert_platform_defaults(ShortcutCommand::ToggleWorkspace, &["alt-1"], &["cmd-1"]);
+    assert_platform_defaults(ShortcutCommand::ToggleFocusMode, &["f8"], &["f8"]);
+    assert_platform_defaults(ShortcutCommand::ToggleTypewriterMode, &["f9"], &["f9"]);
+    assert_platform_defaults(ShortcutCommand::SetParagraph, &["ctrl-0"], &["cmd-0"]);
+    assert_platform_defaults(ShortcutCommand::SetHeading1, &["ctrl-1"], &["cmd-1"]);
+    assert_platform_defaults(ShortcutCommand::SetHeading6, &["ctrl-6"], &["cmd-6"]);
+    assert_platform_defaults(
+        ShortcutCommand::CodeSelection,
+        &["ctrl-shift-`"],
+        &["cmd-shift-`"],
+    );
+    assert_platform_defaults(
+        ShortcutCommand::StrikethroughSelection,
+        &["alt-shift-5"],
+        &["cmd-shift-x"],
     );
 }
 
+/// 校验两套默认键都可解析、无平台修饰键串用，并且同一上下文不存在重复占用。
 #[test]
-fn toggle_workspace_has_default_shortcuts() {
-    assert_eq!(
-        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::ToggleWorkspace),
-        vec!["cmd-b".to_string(), "ctrl-b".to_string()]
-    );
+fn platform_defaults_are_valid_and_conflict_free() {
+    for macos in [false, true] {
+        let platform_name = if macos { "macOS" } else { "Windows/Linux" };
+        for definition in shortcut_definitions() {
+            let keys = if macos {
+                definition.default_keys.macos
+            } else {
+                definition.default_keys.windows_linux
+            };
+            if !keys.is_empty() {
+                for key in keys {
+                    assert!(
+                        Keystroke::parse(key).is_ok(),
+                        "{} has invalid {platform_name} key {key}",
+                        definition.id
+                    );
+                }
+                assert_eq!(
+                    keys.iter().collect::<BTreeSet<_>>().len(),
+                    keys.len(),
+                    "{} has duplicate keys",
+                    definition.id
+                );
+            }
+            if macos {
+                assert!(
+                    keys.iter().all(|key| !key.starts_with("ctrl-")),
+                    "{} mixes Windows/Linux Ctrl keys into macOS: {keys:?}",
+                    definition.id
+                );
+            } else {
+                assert!(
+                    keys.iter().all(|key| !key.starts_with("cmd-")),
+                    "{} mixes macOS Cmd keys into Windows/Linux: {keys:?}",
+                    definition.id
+                );
+            }
+        }
+
+        for (index, left) in shortcut_definitions().iter().enumerate() {
+            let left_keys = if macos {
+                left.default_keys.macos
+            } else {
+                left.default_keys.windows_linux
+            };
+            for right in shortcut_definitions().iter().skip(index + 1) {
+                if left.context != right.context {
+                    continue;
+                }
+                let right_keys = if macos {
+                    right.default_keys.macos
+                } else {
+                    right.default_keys.windows_linux
+                };
+                assert!(
+                    !left_keys.iter().any(|key| right_keys.contains(key)),
+                    "{} and {} conflict on {platform_name}: {left_keys:?} / {right_keys:?}",
+                    left.id,
+                    right.id
+                );
+            }
+        }
+    }
 }
 
-#[test]
-fn quick_open_has_default_shortcuts() {
-    assert_eq!(
-        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::QuickOpen),
-        vec!["cmd-p".to_string(), "ctrl-p".to_string()]
-    );
-}
-
-#[test]
-fn command_palette_has_default_shortcuts() {
-    assert_eq!(
-        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::CommandPalette),
-        vec!["cmd-shift-p".to_string(), "ctrl-shift-p".to_string()]
-    );
-}
-
+/// 没有行业惯例的窗格操作保持未绑定，但仍允许用户在偏好设置中显式配置。
 #[test]
 fn pane_commands_are_configurable_without_global_defaults() {
     let commands = [
@@ -107,7 +235,8 @@ fn pane_commands_are_configurable_without_global_defaults() {
             .find(|definition| definition.command == command)
             .expect("pane command should have a shortcut definition");
         assert_eq!(definition.category, ShortcutCategory::Navigation);
-        assert!(definition.default_keys.is_empty());
+        assert!(definition.default_keys.windows_linux.is_empty());
+        assert!(definition.default_keys.macos.is_empty());
         let mut config = BTreeMap::new();
         config.insert(
             definition.id.to_owned(),
@@ -120,101 +249,44 @@ fn pane_commands_are_configurable_without_global_defaults() {
     }
 }
 
+/// 链接、复制 Markdown 与打开目录沿用 Markdown/桌面编辑器的成熟组合。
 #[test]
-fn link_selection_has_standard_shortcuts() {
-    assert_eq!(
-        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::LinkSelection),
-        vec!["cmd-k".to_string(), "ctrl-k".to_string()]
+fn common_markdown_and_file_shortcuts_are_default() {
+    assert_platform_defaults(ShortcutCommand::LinkSelection, &["ctrl-k"], &["cmd-k"]);
+    assert_platform_defaults(
+        ShortcutCommand::CopyAsMarkdown,
+        &["ctrl-shift-c"],
+        &["cmd-shift-c"],
+    );
+    assert_platform_defaults(
+        ShortcutCommand::OpenFolder,
+        &["ctrl-shift-o"],
+        &["cmd-shift-o"],
+    );
+    assert_platform_defaults(
+        ShortcutCommand::NewTab,
+        &["ctrl-n", "ctrl-t"],
+        &["cmd-n", "cmd-t"],
+    );
+    assert_platform_defaults(
+        ShortcutCommand::ReopenClosedTab,
+        &["ctrl-shift-t"],
+        &["cmd-shift-t"],
     );
 }
 
-#[test]
-fn strikethrough_selection_has_standard_shortcuts() {
-    assert_eq!(
-        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::StrikethroughSelection),
-        vec!["cmd-shift-x".to_string(), "ctrl-shift-x".to_string()]
-    );
-}
-
-#[test]
-fn open_folder_has_default_shortcuts() {
-    assert_eq!(
-        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::OpenFolder),
-        vec!["cmd-shift-o".to_string(), "ctrl-shift-o".to_string()]
-    );
-}
-
-#[test]
-fn focus_and_typewriter_modes_have_independent_shortcuts() {
-    assert_eq!(
-        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::ToggleFocusMode),
-        vec!["cmd-shift-f".to_string(), "ctrl-shift-f".to_string()]
-    );
-    assert_eq!(
-        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::ToggleTypewriterMode),
-        vec!["cmd-alt-t".to_string(), "ctrl-alt-t".to_string()]
-    );
-}
-
-#[test]
-fn tab_lifecycle_has_standard_shortcuts() {
-    assert_eq!(
-        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::NewTab),
-        vec![
-            "cmd-n".to_string(),
-            "ctrl-n".to_string(),
-            "cmd-t".to_string(),
-            "ctrl-t".to_string()
-        ]
-    );
-    assert_eq!(
-        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::NewWindow),
-        vec!["cmd-shift-n".to_string(), "ctrl-shift-n".to_string()]
-    );
-    assert_eq!(
-        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::CloseTab),
-        vec!["cmd-w".to_string(), "ctrl-w".to_string()]
-    );
-    assert_eq!(
-        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::ReopenClosedTab),
-        vec!["cmd-shift-t".to_string(), "ctrl-shift-t".to_string()]
-    );
-    assert_eq!(
-        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::PreviousTab),
-        vec!["cmd-pageup".to_string(), "ctrl-pageup".to_string()]
-    );
-    assert_eq!(
-        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::NextTab),
-        vec!["cmd-pagedown".to_string(), "ctrl-pagedown".to_string()]
-    );
-}
-
-#[test]
-fn typora_compatible_edit_and_preferences_shortcuts_are_default() {
-    assert_eq!(
-        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::CopyAsMarkdown),
-        vec!["cmd-shift-c".to_string(), "ctrl-shift-c".to_string()]
-    );
-    assert_eq!(
-        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::PasteAsPlainText),
-        vec!["cmd-shift-v".to_string(), "ctrl-shift-v".to_string()]
-    );
-    assert_eq!(
-        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::OpenPreferences),
-        vec!["cmd-,".to_string(), "ctrl-,".to_string()]
-    );
-}
-
+/// 全选使用平台主修饰键，并且不会与同上下文的默认动作冲突。
 #[test]
 fn select_all_has_default_shortcuts() {
+    let keys = current_platform_keys(&["ctrl-a"], &["cmd-a"]);
     assert_eq!(
         resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::SelectAll),
-        vec!["cmd-a".to_string(), "ctrl-a".to_string()]
+        keys
     );
     assert!(
         shortcut_conflict_for(
             ShortcutCommand::SelectAll,
-            &["cmd-a".to_string(), "ctrl-a".to_string()],
+            &current_platform_keys(&["ctrl-a"], &["cmd-a"]),
             &BTreeMap::new()
         )
         .is_none()
@@ -273,55 +345,35 @@ fn legacy_split_select_all_shortcut_config_maps_to_unified_command() {
     assert!(!normalized.contains_key("select_focused_block_text_rendered"));
 }
 
+/// 退出遵循 macOS 的 Cmd+Q；Windows/Linux 继续交给系统 Alt+F4，不抢占应用级组合。
 #[test]
 fn close_and_quit_defaults_are_platform_specific() {
-    #[cfg(target_os = "macos")]
-    {
-        assert_eq!(
-            resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::CloseWindow),
-            vec!["cmd-shift-w".to_string()]
-        );
-        assert_eq!(
-            resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::QuitApplication),
-            vec!["cmd-q".to_string()]
-        );
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        assert_eq!(
-            resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::CloseWindow),
-            vec!["ctrl-shift-w".to_string()]
-        );
-        assert!(
-            resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::QuitApplication).is_empty()
-        );
-    }
+    assert_platform_defaults(
+        ShortcutCommand::CloseWindow,
+        &["ctrl-shift-w"],
+        &["cmd-shift-w"],
+    );
+    assert_platform_defaults(ShortcutCommand::QuitApplication, &[], &["cmd-q"]);
 }
 
+/// 单词、块和选择移动使用各平台原生导航修饰键，而不是同时注册 Ctrl 与 Alt。
 #[test]
-fn word_and_block_shortcuts_have_ctrl_and_alt_defaults() {
-    assert_eq!(
-        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::WordMoveLeft),
-        vec!["ctrl-left".to_string(), "alt-left".to_string()]
+fn word_and_block_shortcuts_follow_platform_navigation() {
+    assert_platform_defaults(ShortcutCommand::WordMoveLeft, &["ctrl-left"], &["alt-left"]);
+    assert_platform_defaults(
+        ShortcutCommand::WordDeleteBack,
+        &["ctrl-backspace"],
+        &["alt-backspace"],
     );
-    assert_eq!(
-        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::WordDeleteBack),
-        vec!["ctrl-backspace".to_string(), "alt-backspace".to_string()]
-    );
-    assert_eq!(
-        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::BlockUp),
-        vec!["ctrl-up".to_string(), "alt-up".to_string()]
-    );
-    assert_eq!(
-        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::WordSelectRight),
-        vec![
-            "ctrl-shift-right".to_string(),
-            "alt-shift-right".to_string()
-        ]
+    assert_platform_defaults(ShortcutCommand::BlockUp, &["ctrl-up"], &["alt-up"]);
+    assert_platform_defaults(
+        ShortcutCommand::WordSelectRight,
+        &["ctrl-shift-right"],
+        &["alt-shift-right"],
     );
 }
 
+/// 页滚动保持物理键一致，文档首尾跳转则使用各平台主导航组合。
 #[test]
 fn page_navigation_shortcuts_have_defaults() {
     assert_eq!(
@@ -332,14 +384,8 @@ fn page_navigation_shortcuts_have_defaults() {
         resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::PageDown),
         vec!["pagedown".to_string()]
     );
-    assert_eq!(
-        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::JumpToTop),
-        vec!["ctrl-home".to_string(), "cmd-up".to_string()]
-    );
-    assert_eq!(
-        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::JumpToBottom),
-        vec!["ctrl-end".to_string(), "cmd-down".to_string()]
-    );
+    assert_platform_defaults(ShortcutCommand::JumpToTop, &["ctrl-home"], &["cmd-up"]);
+    assert_platform_defaults(ShortcutCommand::JumpToBottom, &["ctrl-end"], &["cmd-down"]);
 }
 
 #[test]
@@ -353,24 +399,29 @@ fn invalid_or_empty_shortcuts_fall_back_to_defaults() {
     assert!(!normalized.contains_key("open_file"));
 }
 
+/// 自定义键与同上下文命令冲突时回退到当前平台默认值，避免静默覆盖剪切。
 #[test]
 fn conflicting_custom_shortcut_falls_back_to_default() {
     let mut config = BTreeMap::new();
-    config.insert("copy".to_string(), vec!["ctrl-x".to_string()]);
+    config.insert(
+        "copy".to_string(),
+        current_platform_keys(&["ctrl-x"], &["cmd-x"]),
+    );
 
     let normalized = normalize_shortcut_config(&config);
     assert!(!normalized.contains_key("copy"));
     assert_eq!(
         resolved_shortcut_keys(&config, ShortcutCommand::Copy),
-        vec!["cmd-c".to_string(), "ctrl-c".to_string()]
+        current_platform_keys(&["ctrl-c"], &["cmd-c"])
     );
 }
 
+/// 偏好设置录制阶段应在写盘前指出当前平台的剪切冲突。
 #[test]
 fn detects_shortcut_conflicts_for_preferences_drafts() {
     let conflict = shortcut_conflict_for(
         ShortcutCommand::Copy,
-        &["ctrl-x".to_string()],
+        &current_platform_keys(&["ctrl-x"], &["cmd-x"]),
         &BTreeMap::new(),
     )
     .expect("copy should conflict with cut");

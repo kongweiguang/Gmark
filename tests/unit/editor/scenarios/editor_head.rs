@@ -620,6 +620,14 @@ async fn document_find_replace_is_unicode_safe_undoable_and_bounded(cx: &mut Tes
         editor.undo_document(cx);
         assert_eq!(editor.source_document.text(), "alpha beta alpha");
     });
+    let escape_event = KeyDownEvent {
+        keystroke: Keystroke::parse("escape").expect("valid escape keystroke"),
+        is_held: false,
+    };
+    editor.update_in(visual_cx, |editor, window, cx| {
+        assert!(editor.handle_find_panel_key(&escape_event, window, cx));
+        assert!(editor.find_panel.is_none());
+    });
 
     let large_source = (0..10_000)
         .map(|index| format!("needle paragraph {index}"))

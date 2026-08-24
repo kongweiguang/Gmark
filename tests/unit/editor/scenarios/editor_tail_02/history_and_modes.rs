@@ -115,21 +115,27 @@ async fn toggle_view_mode_ends_stale_code_block_pointer_selection(cx: &mut TestA
     });
 }
 
+/// 视图切换必须由当前平台产品键位触发，避免继续把已移除的 Ctrl+Tab 当作契约。
 #[gpui::test]
-async fn ctrl_tab_toggles_view_mode(cx: &mut TestAppContext) {
+async fn platform_toggle_shortcut_toggles_view_mode(cx: &mut TestAppContext) {
     init_editor_test_app(cx);
     let (editor, cx) =
         cx.add_window_view(|_window, cx| Editor::from_markdown(cx, "alpha".to_string(), None));
+    let toggle_shortcut = if cfg!(target_os = "macos") {
+        "cmd-/"
+    } else {
+        "ctrl-/"
+    };
 
     redraw(cx);
-    cx.simulate_keystrokes("ctrl-tab");
+    cx.simulate_keystrokes(toggle_shortcut);
     redraw(cx);
 
     editor.update(cx, |editor, _cx| {
         assert!(matches!(editor.view_mode, ViewMode::Source));
     });
 
-    cx.simulate_keystrokes("ctrl-tab");
+    cx.simulate_keystrokes(toggle_shortcut);
     redraw(cx);
 
     editor.update(cx, |editor, _cx| {

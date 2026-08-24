@@ -110,9 +110,11 @@ fn display_shortcut_key(key: &str) -> String {
     }
 }
 
+/// 只实例化当前系统的默认键，避免冲突检测和运行时绑定混入另一平台组合。
 fn default_keys(definition: ShortcutDefinition) -> Vec<String> {
     definition
         .default_keys
+        .current()
         .iter()
         .map(|key| key.to_string())
         .collect()

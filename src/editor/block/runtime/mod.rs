@@ -568,6 +568,8 @@ impl Block {
         self.read_only
     }
 
+    /// 切换投影可编辑性，并同步清理所有可能跨模式残留的瞬态编辑状态；尤其是
+    /// 代码语言菜单不能在 Live 实体转为 Preview 后继续接受局部修改。
     pub(crate) fn set_read_only(&mut self, read_only: bool) {
         if self.read_only == read_only {
             return;
@@ -575,6 +577,7 @@ impl Block {
         self.read_only = read_only;
         self.is_selecting = false;
         self.code_language_is_selecting = false;
+        self.code_language_menu_open = false;
         self.marked_range = None;
         self.code_language_marked_range = None;
         self.math_marked_range = None;

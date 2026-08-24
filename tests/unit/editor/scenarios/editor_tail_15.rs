@@ -608,6 +608,47 @@ async fn disabled_spellcheck_clears_existing_diagnostics_without_scheduling(
 }
 
 #[gpui::test]
+/// 模拟指纹预检完成后磁盘又发生变化：原子写的 SourceChanged 必须进入版本比较
+/// 对话框，不能显示无恢复动作的系统级保存失败。
+async fn save_identity_race_opens_external_conflict_recovery(cx: &mut TestAppContext) {
+    init_editor_test_app(cx);
+    let path = temp_markdown_path("save-identity-race");
+    fs::write(&path, "base").unwrap();
+    let editor_path = path.clone();
+    let (editor, visual_cx) = cx.add_window_view(move |_window, cx| {
+        Editor::from_markdown(cx, "base".to_owned(), Some(editor_path))
+    });
+    redraw(visual_cx);
+
+    fs::write(&path, "external edit").unwrap();
+    let saved = visual_cx.update(|window, cx| {
+        editor.update(cx, |editor, cx| {
+            // 指纹已经观察到新文件，但共享 Controller 仍持有打开时身份，精确复现
+            // 外部更新落在预检与原子替换之间的竞态窗口。
+            editor.saved_file_fingerprint = crate::recovery::fingerprint_file(&path).ok();
+            editor.sync_source_document_from_projection("local edit");
+            editor.set_document_dirty_for_test(true);
+            editor.save_to_existing_path(&path, window, cx)
+        })
+    });
+
+    editor.read_with(visual_cx, |editor, _cx| {
+        assert!(!saved);
+        assert!(editor.external_file_conflict);
+        assert!(editor.document_dirty);
+        assert!(editor.show_external_conflict_dialog);
+        let preview = editor
+            .external_conflict_preview
+            .as_ref()
+            .expect("race conflict comparison");
+        assert_eq!(preview.local_line, "local edit");
+        assert_eq!(preview.disk_line, "external edit");
+    });
+    assert_eq!(fs::read_to_string(&path).unwrap(), "external edit");
+    let _ = fs::remove_file(path);
+}
+
+#[gpui::test]
 async fn save_blocks_external_file_overwrite_and_keeps_document_dirty(cx: &mut TestAppContext) {
     init_editor_test_app(cx);
     let path = temp_markdown_path("external-save-conflict");

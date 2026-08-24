@@ -2,8 +2,8 @@
 1 ICON "assets/icon/gmark.ico"
 
 1 VERSIONINFO
-FILEVERSION 0,2,3,0
-PRODUCTVERSION 0,2,3,0
+FILEVERSION 0,2,4,0
+PRODUCTVERSION 0,2,4,0
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0x0L
 FILEOS 0x40004L
@@ -16,12 +16,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "kongweiguang\0"
             VALUE "FileDescription", "Gmark Markdown Editor\0"
-            VALUE "FileVersion", "0.2.3\0"
+            VALUE "FileVersion", "0.2.4\0"
             VALUE "InternalName", "gmark\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 kongweiguang\0"
             VALUE "OriginalFilename", "gmark.exe\0"
             VALUE "ProductName", "Gmark\0"
-            VALUE "ProductVersion", "0.2.3\0"
+            VALUE "ProductVersion", "0.2.4\0"
         END
     END
     BLOCK "VarFileInfo"

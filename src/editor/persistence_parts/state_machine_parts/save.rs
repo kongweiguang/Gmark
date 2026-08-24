@@ -4,6 +4,22 @@
 
 use super::*;
 
+/// 构造保存竞态下的磁盘对比快照；二次身份校验失败仍是可恢复冲突，不能降级成
+/// 只有“确定”按钮的通用错误，否则用户既无法比较版本，也可能在重试时误覆盖新文件。
+fn existing_save_conflict_preview(path: &Path, local: &str) -> ExternalConflictPreview {
+    let (disk, disk_bytes, disk_error) = match std::fs::read(path) {
+        Ok(bytes) => (
+            String::from_utf8_lossy(&bytes).into_owned(),
+            bytes.len(),
+            None,
+        ),
+        Err(error) => (String::new(), 0, Some(error.to_string())),
+    };
+    build_external_conflict_preview(path, local, &disk, disk_bytes, disk_error)
+}
+
+/// 在后台写入不可变快照，并把预检与原子替换之间发生的 SourceChanged 统一映射
+/// 到冲突恢复流程；只有可能已经跨过替换边界的 Persist 才属于不确定失败。
 fn write_existing_snapshot(
     snapshot: gmark_document_runtime::DocumentSaveSnapshot,
     source_format: gmark_document::SourceFormatSnapshot,
@@ -31,17 +47,9 @@ fn write_existing_snapshot(
             .map(|current| current != expected)
             .unwrap_or(true)
     {
-        let (disk, disk_bytes, disk_error) = match std::fs::read(path) {
-            Ok(bytes) => (
-                String::from_utf8_lossy(&bytes).into_owned(),
-                bytes.len(),
-                None,
-            ),
-            Err(error) => (String::new(), 0, Some(error.to_string())),
-        };
         return ExistingSaveOutcome::Conflict {
             revision,
-            preview: build_external_conflict_preview(path, &source, &disk, disk_bytes, disk_error),
+            preview: existing_save_conflict_preview(path, &source),
         };
     }
 
@@ -73,14 +81,16 @@ fn write_existing_snapshot(
             revision,
             identity,
         },
+        Err(gmark_paged_document::PagedDocumentError::SourceChanged) => {
+            ExistingSaveOutcome::Conflict {
+                revision,
+                preview: existing_save_conflict_preview(path, &source),
+            }
+        }
         Err(error) => ExistingSaveOutcome::Failed {
             revision,
             detail: error.to_string(),
-            target_may_have_changed: matches!(
-                &error,
-                gmark_paged_document::PagedDocumentError::SourceChanged
-                    | gmark_paged_document::PagedDocumentError::Persist { .. }
-            ),
+            target_may_have_changed: error.target_may_have_changed(),
         },
     }
 }
@@ -325,6 +335,8 @@ impl Editor {
         }
     }
 
+    /// 同步保存用于测试与显式阻塞入口；它与后台保存共享冲突语义，确保
+    /// SourceChanged 始终回到可比较、可恢复的外部修改流程。
     pub(in crate::editor) fn save_to_existing_path(
         &mut self,
         path: &Path,
@@ -395,11 +407,19 @@ impl Editor {
                 true
             }
             Err(err) => {
-                let target_may_have_changed = matches!(
+                if matches!(
                     &err,
                     gmark_paged_document::PagedDocumentError::SourceChanged
-                        | gmark_paged_document::PagedDocumentError::Persist { .. }
-                );
+                ) {
+                    let _ = self.source_document.try_save_failed(
+                        saved_revision,
+                        gmark_document_runtime::SaveFailureCode::Conflict,
+                    );
+                    self.external_file_conflict = true;
+                    self.present_external_file_conflict(path, window, cx);
+                    return false;
+                }
+                let target_may_have_changed = err.target_may_have_changed();
                 let code = if target_may_have_changed {
                     gmark_document_runtime::SaveFailureCode::Uncertain
                 } else {
