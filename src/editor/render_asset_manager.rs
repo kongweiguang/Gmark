@@ -298,6 +298,83 @@ pub(crate) fn decode_local_image(
     AssetValue::from_png(Arc::<[u8]>::from(encoded.into_inner()))
 }
 
+/// Decode a local SVG by rasterizing it with `resvg` into a bounded PNG
+/// payload the render cache presents like any other local image. The `image`
+/// crate used by [`decode_local_image`] ships no SVG decoder, so without this
+/// path markdown-embedded `![](…svg)` images would always fail to render.
+pub(crate) fn decode_local_svg(
+    path: &Path,
+    target_pixels: (u32, u32),
+) -> Result<AssetValue, AssetError> {
+    let metadata =
+        std::fs::metadata(path).map_err(|error| AssetError::Decode(error.to_string()))?;
+    if metadata.len() > super::svg_raster::MAX_SVG_SOURCE_BYTES as u64 {
+        return Err(AssetError::TooLarge {
+            bytes: usize::try_from(metadata.len()).unwrap_or(usize::MAX),
+            limit: super::svg_raster::MAX_SVG_SOURCE_BYTES,
+        });
+    }
+    let file = std::fs::File::open(path).map_err(|error| AssetError::Decode(error.to_string()))?;
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(metadata.len())
+            .unwrap_or(super::svg_raster::MAX_SVG_SOURCE_BYTES)
+            .min(super::svg_raster::MAX_SVG_SOURCE_BYTES),
+    );
+    file.take((super::svg_raster::MAX_SVG_SOURCE_BYTES as u64).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| AssetError::Decode(error.to_string()))?;
+    if bytes.len() > super::svg_raster::MAX_SVG_SOURCE_BYTES {
+        return Err(AssetError::TooLarge {
+            bytes: bytes.len(),
+            limit: super::svg_raster::MAX_SVG_SOURCE_BYTES,
+        });
+    }
+
+    let tree = super::svg_raster::parse_restricted_svg(&bytes)
+        .map_err(|error| AssetError::Decode(error.to_string()))?;
+    let size = tree.size();
+    let svg_width = size.width();
+    let svg_height = size.height();
+    let raster_size = super::svg_raster::fit_svg_raster_size(
+        svg_width,
+        svg_height,
+        target_pixels,
+        MAX_IMAGE_SIDE,
+        (MAX_IMAGE_BYTES / 4) as u64,
+    )
+    .map_err(|error| AssetError::Decode(error.to_string()))?;
+
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(raster_size.width, raster_size.height)
+        .ok_or_else(|| {
+            AssetError::Decode("SVG raster dimensions exceed the renderer limit".to_owned())
+        })?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(raster_size.scale, raster_size.scale),
+        &mut pixmap.as_mut(),
+    );
+    let mut raster =
+        image::RgbaImage::from_raw(raster_size.width, raster_size.height, pixmap.take())
+            .ok_or_else(|| {
+                AssetError::Decode("SVG renderer returned an invalid pixel buffer".to_owned())
+            })?;
+    // tiny-skia writes premultiplied RGBA; PNG and the `image` crate expect
+    // straight alpha, so un-premultiply before encoding.
+    for pixel in raster.as_flat_samples_mut().samples.chunks_exact_mut(4) {
+        if pixel[3] > 0 {
+            let alpha = f32::from(pixel[3]) / 255.0;
+            for channel in &mut pixel[..3] {
+                *channel = (f32::from(*channel) / alpha).min(255.0) as u8;
+            }
+        }
+    }
+    let mut encoded = Cursor::new(Vec::new());
+    raster
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .map_err(|error| AssetError::Decode(error.to_string()))?;
+    AssetValue::from_png(Arc::<[u8]>::from(encoded.into_inner()))
+}
+
 impl std::error::Error for AssetError {}
 
 /// Bounded LRU manager shared by render providers.

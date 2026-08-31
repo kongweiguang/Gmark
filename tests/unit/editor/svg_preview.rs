@@ -1,22 +1,31 @@
 // @author kongweiguang
 
-use super::{SVG_PREVIEW_MAX_EDGE, SVG_PREVIEW_MAX_PIXELS, svg_preview_raster_scale};
+use super::{SVG_PREVIEW_MAX_EDGE, SVG_PREVIEW_MAX_PIXELS, svg_preview_raster_size};
 
+/// 验证常规 SVG 保持 2x 清晰度，超大 SVG 则服从共享硬预算。
 #[test]
 fn svg_preview_keeps_regular_documents_crisp_without_unbounded_rasters() {
-    assert_eq!(svg_preview_raster_scale(800.0, 400.0).unwrap(), 2.0);
+    assert_eq!(
+        svg_preview_raster_size(800.0, 400.0)
+            .expect("regular preview size")
+            .scale,
+        2.0
+    );
 
-    let scale = svg_preview_raster_scale(100_000.0, 50_000.0).unwrap();
-    assert!(100_000.0 * scale <= SVG_PREVIEW_MAX_EDGE as f32 + f32::EPSILON);
-    assert!(100_000.0 * 50_000.0 * scale * scale <= SVG_PREVIEW_MAX_PIXELS as f32 + 1.0);
+    let size = svg_preview_raster_size(100_000.0, 50_000.0).expect("bounded preview size");
+    assert!(size.width <= SVG_PREVIEW_MAX_EDGE);
+    assert!(size.height <= SVG_PREVIEW_MAX_EDGE);
+    assert!(u64::from(size.width) * u64::from(size.height) <= SVG_PREVIEW_MAX_PIXELS);
 }
 
+/// 验证非法维度在进入 tiny-skia 分配前被拒绝。
 #[test]
 fn svg_preview_rejects_zero_or_non_finite_dimensions() {
-    assert!(svg_preview_raster_scale(0.0, 100.0).is_err());
-    assert!(svg_preview_raster_scale(f32::INFINITY, 100.0).is_err());
+    assert!(svg_preview_raster_size(0.0, 100.0).is_err());
+    assert!(svg_preview_raster_size(f32::INFINITY, 100.0).is_err());
 }
 
+/// 验证 SVG 文档的 Preview/Split 入口保持可见，Source 仍为唯一可编辑表面。
 #[gpui::test]
 async fn svg_document_renders_in_preview_and_split_while_source_remains_editable(
     cx: &mut gpui::TestAppContext,

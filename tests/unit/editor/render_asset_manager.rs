@@ -210,3 +210,75 @@ fn clear_releases_all_payloads_for_application_shutdown() {
     assert_eq!(manager.resident_bytes(), 0);
     assert!(manager.entry(&key).is_none());
 }
+
+/// 为文件边界测试写入最小 SVG，避免生产解码器依赖内存专用入口。
+fn write_svg(path: &std::path::Path, body: &str) {
+    let mut file = std::fs::File::create(path).expect("temp svg");
+    file.write_all(body.as_bytes()).expect("write svg");
+}
+
+/// 验证本地 Markdown SVG 能生成 GPUI 可直接复用的缓存帧。
+#[test]
+fn svg_images_rasterize_into_a_renderable_payload() {
+    let mut path = std::env::temp_dir();
+    path.push(format!("gmark-svg-image-{}.svg", std::process::id()));
+    write_svg(
+        &path,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 8 4\">\
+         <rect width=\"8\" height=\"4\" fill=\"#0080ff\"/></svg>",
+    );
+    let result = decode_local_svg(&path, (8, 4));
+    let _ = std::fs::remove_file(path);
+    let value = result.expect("svg decodes");
+    assert!(value.render_image().is_some());
+}
+
+/// 验证损坏 SVG 以可恢复错误结束，不污染缓存或触发 panic。
+#[test]
+fn invalid_svg_fails_with_decode_error() {
+    let mut path = std::env::temp_dir();
+    path.push(format!("gmark-corrupt-svg-{}.svg", std::process::id()));
+    write_svg(&path, "not an svg");
+    let result = decode_local_svg(&path, (8, 4));
+    let _ = std::fs::remove_file(path);
+    assert!(matches!(result, Err(AssetError::Decode(_))));
+}
+
+/// 验证 Markdown SVG 同时服从目标宽高，避免窄布局产生过量光栅数据。
+#[test]
+fn svg_images_respect_both_target_axes() {
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "gmark-svg-target-bounds-{}.svg",
+        std::process::id()
+    ));
+    write_svg(
+        &path,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\">\
+         <rect width=\"100\" height=\"100\" fill=\"#0080ff\"/></svg>",
+    );
+    let value = decode_local_svg(&path, (320, 40)).expect("svg decodes");
+    let _ = std::fs::remove_file(path);
+    let raster = image::load_from_memory(&value.bytes).expect("generated PNG decodes");
+    assert!(raster.width() <= 320);
+    assert!(raster.height() <= 40);
+}
+
+/// 验证 SVG 源文件在读取与 XML 解析前执行独立上限，避免大文本占满后台 worker。
+#[test]
+fn oversized_svg_source_is_rejected_before_parsing() {
+    let mut path = std::env::temp_dir();
+    path.push(format!("gmark-svg-source-limit-{}.svg", std::process::id()));
+    let file = std::fs::File::create(&path).expect("create sparse SVG");
+    file.set_len((super::super::svg_raster::MAX_SVG_SOURCE_BYTES + 1) as u64)
+        .expect("set sparse SVG length");
+    let result = decode_local_svg(&path, (8, 4));
+    let _ = std::fs::remove_file(path);
+    assert!(matches!(
+        result,
+        Err(AssetError::TooLarge {
+            limit: super::super::svg_raster::MAX_SVG_SOURCE_BYTES,
+            ..
+        })
+    ));
+}

@@ -2,12 +2,10 @@
 
 //! 可编辑 SVG 文档的有界派生预览。
 
-use std::hash::{Hash, Hasher};
-use std::sync::LazyLock;
-
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
 use image::Frame;
 use smallvec::smallvec;
+use std::hash::{Hash, Hasher};
 
 use super::*;
 use crate::i18n::I18nStrings;
@@ -46,27 +44,16 @@ impl Asset for SvgPreviewAssetLoader {
     ) -> impl Future<Output = Self::Output> + Send + 'static {
         async move {
             let result = (|| -> Result<Arc<RenderImage>> {
-                static FONT_DB: LazyLock<Arc<resvg::usvg::fontdb::Database>> =
-                    LazyLock::new(|| {
-                        let mut database = resvg::usvg::fontdb::Database::new();
-                        database.load_system_fonts();
-                        Arc::new(database)
-                    });
-                let options = resvg::usvg::Options {
-                    fontdb: Arc::clone(&FONT_DB),
-                    ..resvg::usvg::Options::default()
-                };
-                let tree = resvg::usvg::Tree::from_data(&source.0, &options)
+                let tree = super::svg_raster::parse_restricted_svg(&source.0)
                     .context("failed to parse SVG preview")?;
                 let size = tree.size();
-                let scale = svg_preview_raster_scale(size.width(), size.height())?;
-                let width = (size.width() * scale).round().max(1.0) as u32;
-                let height = (size.height() * scale).round().max(1.0) as u32;
-                let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
-                    .context("SVG preview dimensions exceed the renderer limit")?;
+                let raster_size = svg_preview_raster_size(size.width(), size.height())?;
+                let mut pixmap =
+                    resvg::tiny_skia::Pixmap::new(raster_size.width, raster_size.height)
+                        .context("SVG preview dimensions exceed the renderer limit")?;
                 resvg::render(
                     &tree,
-                    resvg::tiny_skia::Transform::from_scale(scale, scale),
+                    resvg::tiny_skia::Transform::from_scale(raster_size.scale, raster_size.scale),
                     &mut pixmap.as_mut(),
                 );
                 let mut buffer =
@@ -89,18 +76,18 @@ impl Asset for SvgPreviewAssetLoader {
     }
 }
 
-pub(super) fn svg_preview_raster_scale(width: f32, height: f32) -> Result<f32> {
-    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
-        bail!("SVG dimensions must be finite and non-zero");
-    }
-    let edge_scale =
-        (SVG_PREVIEW_MAX_EDGE as f32 / width).min(SVG_PREVIEW_MAX_EDGE as f32 / height);
-    let pixel_scale = (SVG_PREVIEW_MAX_PIXELS as f32 / (width * height)).sqrt();
-    let scale = SVG_PREVIEW_QUALITY_SCALE.min(edge_scale).min(pixel_scale);
-    if !scale.is_finite() || scale <= 0.0 {
-        bail!("SVG dimensions exceed the bounded preview budget");
-    }
-    Ok(scale)
+/// 为独立 SVG 文档计算清晰但有界的预览尺寸，避免高 DPI 质量目标突破硬预算。
+pub(super) fn svg_preview_raster_size(
+    width: f32,
+    height: f32,
+) -> Result<super::svg_raster::SvgRasterSize> {
+    super::svg_raster::bounded_svg_raster_size(
+        width,
+        height,
+        f64::from(SVG_PREVIEW_QUALITY_SCALE),
+        SVG_PREVIEW_MAX_EDGE,
+        SVG_PREVIEW_MAX_PIXELS,
+    )
 }
 
 impl Editor {

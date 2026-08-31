@@ -68,6 +68,7 @@ mod source_mapping;
 mod source_tools;
 mod status_bar;
 mod svg_preview;
+mod svg_raster;
 mod system_file;
 mod table_edit;
 mod table_fragment;

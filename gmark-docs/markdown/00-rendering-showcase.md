@@ -29,6 +29,10 @@ Gmark 支持从一级到六级标题，并保留原始 Markdown 源码。普通�
 
 ![Gmark 图标](../../assets/icon/gmark-icon-256.png "Gmark icon")
 
+本地 SVG 使用同一套标准图片语法；Gmark 会在目标布局和内存预算内安全光栅化：
+
+![Gmark SVG 渲染样本](../data/svg/sample.svg "本地 SVG 图片"){width=60%}
+
 链接可以带标题。Gmark 资源卡片使用链接标题声明资源类型，例如下面的 JSON 文件仍然是普通文件引用：
 
 [查看示例配置](../../assets/custom-language.example.jsonc "gmark:resource")
@@ -60,7 +64,7 @@ Gmark 支持从一级到六级标题，并保留原始 Markdown 源码。普通�
 - [x] 标题和段落
 - [x] 表格与任务列表
 - [ ] 深色主题下检查公式
-- [ ] 窄窗口下检查 Mermaid
+- [ ] 窄窗口下检查 Mermaid 与 SVG 图片
 
 ## 4. 引用与 Callout
 
