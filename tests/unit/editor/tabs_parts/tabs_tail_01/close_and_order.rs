@@ -86,9 +86,38 @@ async fn window_close_save_advances_to_next_dirty_tab(cx: &mut gpui::TestAppCont
     });
 }
 
+/// 窗口级放弃覆盖活动与后台 Tab，并以磁盘不可再恢复作为完成条件。
 #[gpui::test]
 async fn window_close_discard_clears_every_dirty_tab_in_one_action(cx: &mut gpui::TestAppContext) {
     init_test_app(cx);
+    let recovery_dir = tempfile::tempdir().expect("inactive recovery fixture");
+    let mut recovery_journal = crate::recovery::RecoveryJournal::create(
+        recovery_dir.path(),
+        Some(PathBuf::from("first.md")),
+        "base".to_owned(),
+    )
+    .expect("create inactive recovery journal");
+    recovery_journal
+        .record_formatted(
+            "first dirty",
+            SourceDocument::new("first dirty").source_format(),
+            crate::recovery::RecoverySelection {
+                start: 0,
+                end: 0,
+                reversed: false,
+                anchor_affinity: None,
+                head_affinity: None,
+            },
+            "rendered",
+        )
+        .expect("persist inactive recovery journal");
+    assert_eq!(
+        crate::recovery::load_recovery_documents(recovery_dir.path())
+            .expect("load recovery fixture before discard")
+            .len(),
+        1,
+        "fixture must contain one durable recovery document"
+    );
     let (editor, visual) = cx.add_window_view(|_window, cx| {
         super::Editor::from_markdown(cx, "first dirty".to_owned(), None)
     });
@@ -96,13 +125,15 @@ async fn window_close_discard_clears_every_dirty_tab_in_one_action(cx: &mut gpui
         editor.set_document_dirty_for_test(true);
         add_inactive_tab(editor, "second dirty", "second.md");
         add_inactive_tab(editor, "third dirty", "third.md");
-        for record in &editor.tabs.records[1..] {
-            record
-                .snapshot
-                .as_ref()
-                .unwrap()
-                .source_document
-                .set_dirty_for_test(true);
+        editor.recovery_journal = Some(std::sync::Arc::new(std::sync::Mutex::new(
+            recovery_journal,
+        )));
+        assert!(editor.switch_to_tab_index(1, cx));
+        editor.set_document_dirty_for_test(true);
+        for record in &editor.tabs.records {
+            if let Some(snapshot) = record.snapshot.as_ref() {
+                snapshot.source_document.set_dirty_for_test(true);
+            }
         }
 
         assert!(editor.discard_all_document_changes_for_window_close(cx));
@@ -114,6 +145,13 @@ async fn window_close_discard_clears_every_dirty_tab_in_one_action(cx: &mut gpui
                 .is_none_or(|snapshot| !snapshot.source_document.is_dirty())
         }));
     });
+    assert_eq!(
+        crate::recovery::load_recovery_documents(recovery_dir.path())
+            .expect("load recovery fixture after discard")
+            .len(),
+        0,
+        "window discard must consume inactive tab recovery journals"
+    );
 }
 
 #[gpui::test]

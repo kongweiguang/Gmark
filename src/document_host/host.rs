@@ -101,7 +101,8 @@ use session::build_document_session;
 use session::verify_saved_session_readback;
 use session::{
     build_document_session_from_prepared, build_paged_session, derived_views_enabled,
-    modifier_horizontal_wheel_delta, recovery_view_id, session_plan, structure_input_for_session,
+    modifier_horizontal_wheel_delta, recovery_view_id, runtime_recovery_dirs, session_plan,
+    structure_input_for_session,
 };
 
 #[path = "projections.rs"]

@@ -108,6 +108,7 @@ async fn stale_json_graph_edit_is_rejected_and_can_reload_current_value(cx: &mut
     );
 }
 
+/// 普通结构化编辑场景只验证内存行为，不得借测试进程身份写入真实用户恢复目录。
 #[gpui::test]
 async fn json_graph_edit_in_split_updates_source_without_closing_split(cx: &mut TestAppContext) {
     init_editor_test_app(cx);
@@ -130,6 +131,10 @@ async fn json_graph_edit_in_split_updates_source_without_closing_split(cx: &mut 
     let large_view = editor
         .read_with(visual, |editor, _cx| editor.document_host.clone())
         .expect("JSON SourceBacked view");
+    assert!(
+        !large_view.read_with(visual, |view, _cx| view.has_recovery_journal_for_test()),
+        "ordinary unit scenarios must not attach durable recovery to the user's profile"
+    );
     visual.update(|window, cx| {
         large_view.update(cx, |view, cx| {
             view.begin_json_graph_node_edit_for_test("node:$/nested#0", window, cx)

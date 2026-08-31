@@ -12,6 +12,9 @@ impl DocumentHost {
     /// source, and journal I/O stay on the background executor; a second pane
     /// only observes the in-flight generation and reuses its result.
     pub(crate) fn start_shared_recovery(&mut self, cx: &mut Context<Self>) {
+        let Some(recovery_dirs) = runtime_recovery_dirs() else {
+            return;
+        };
         self.coordinator.recovery_enabled = true;
         let Some(document) = self.document.as_ref() else {
             return;
@@ -25,14 +28,6 @@ impl DocumentHost {
         };
         let snapshot = match document.save_snapshot() {
             Ok(snapshot) => snapshot,
-            Err(error) => {
-                recovery.fail_setup(generation, error.to_string());
-                self.coordinator.recovery_error = Some(error.to_string().into());
-                return;
-            }
-        };
-        let recovery_dirs = match gmark_config::AppDirs::from_system() {
-            Ok(dirs) => dirs,
             Err(error) => {
                 recovery.fail_setup(generation, error.to_string());
                 self.coordinator.recovery_error = Some(error.to_string().into());

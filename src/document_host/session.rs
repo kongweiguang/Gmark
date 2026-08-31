@@ -17,6 +17,25 @@ thread_local! {
 
 const RECOVERY_SUPPRESSION_MARKER: &[u8] = b"gmark-recovery-suppressed-v1\n";
 
+/// 普通 crate 单测不应自动绑定用户配置目录；恢复协议测试必须显式提供临时目录，
+/// 才能同时验证持久化语义并避免测试夹具在下次真实启动时被恢复成用户 Tab。
+pub(super) fn runtime_recovery_dirs() -> Option<gmark_config::AppDirs> {
+    #[cfg(test)]
+    {
+        None
+    }
+    #[cfg(not(test))]
+    {
+        match gmark_config::AppDirs::from_system() {
+            Ok(dirs) => Some(dirs),
+            Err(error) => {
+                eprintln!("recovery persistence disabled: {error:#}");
+                None
+            }
+        }
+    }
+}
+
 pub(super) fn session_plan(
     profile: &gmark_document_core::DocumentProfile,
     probe: &OpenProbe,

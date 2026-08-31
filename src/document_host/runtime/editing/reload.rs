@@ -70,13 +70,7 @@ impl DocumentHost {
             configured_loading
         };
         let loading_limits = loading.effective_limits();
-        let recovery_dirs = match gmark_config::AppDirs::from_system() {
-            Ok(dirs) => Some(dirs),
-            Err(error) => {
-                eprintln!("recovery persistence disabled: {error:#}");
-                None
-            }
-        };
+        let recovery_dirs = runtime_recovery_dirs();
         if recovery_dirs.is_some() {
             self.coordinator.recovery_enabled = true;
         }

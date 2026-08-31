@@ -487,6 +487,20 @@ impl ClosedTabSnapshot {
 }
 
 impl DocumentTabSnapshot {
+    /// 窗口级放弃必须同步消费非活动 Tab 的 journal；否则正文虽已回滚，旧日志仍会
+    /// 在下次启动时复活。这里使用回滚后的快照 checkpoint，并把失败交给关闭流程阻断。
+    pub(super) fn checkpoint_recovery_journal(&self) -> anyhow::Result<()> {
+        let Some(journal) = self.recovery_journal.as_ref() else {
+            return Ok(());
+        };
+        let source = self.source_document.text();
+        let source_format = self.source_document.source_format();
+        journal
+            .lock()
+            .map_err(|_| anyhow::anyhow!("inactive tab recovery journal lock poisoned"))?
+            .checkpoint_formatted(self.file_path.clone(), source, source_format)
+    }
+
     /// Build a lightweight tab snapshot around a service-owned shared view.
     /// The session remains the sole body owner; this value only carries the
     /// presentation metadata needed by `install_tab_snapshot`.

@@ -430,8 +430,19 @@ impl Editor {
                 document_host.update(cx, |host, cx| host.discard_unsaved_changes(cx));
                 snapshot.document_dirty = document_host.read(cx).is_dirty();
             } else if snapshot.source_document.lease_count() == 1 {
-                if let Err(error) = snapshot.source_document.try_discard_changes() {
-                    eprintln!("failed to discard inactive shared document changes: {error}");
+                match snapshot.source_document.try_discard_changes() {
+                    Ok(_) => {
+                        if let Err(error) = snapshot.checkpoint_recovery_journal() {
+                            eprintln!(
+                                "failed to checkpoint inactive tab recovery journal: {error}"
+                            );
+                            all_clean = false;
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("failed to discard inactive shared document changes: {error}");
+                        all_clean = false;
+                    }
                 }
                 snapshot.document_dirty = snapshot.source_document.try_is_dirty().unwrap_or(true);
             } else {
