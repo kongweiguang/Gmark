@@ -320,10 +320,17 @@ impl Editor {
                 let task = cx.spawn(async move |this: WeakEntity<Editor>, cx| {
                     let result = cx
                         .background_spawn(async move {
-                            render_asset_manager::decode_local_image(
-                                &canonical,
-                                (pixel_width, pixel_height),
-                            )
+                            if crate::document_io::is_svg_path(&canonical) {
+                                render_asset_manager::decode_local_svg(
+                                    &canonical,
+                                    (pixel_width, pixel_height),
+                                )
+                            } else {
+                                render_asset_manager::decode_local_image(
+                                    &canonical,
+                                    (pixel_width, pixel_height),
+                                )
+                            }
                         })
                         .await;
                     let _ = this.update(cx, |editor, cx| {

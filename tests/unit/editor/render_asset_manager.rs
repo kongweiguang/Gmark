@@ -210,3 +210,33 @@ fn clear_releases_all_payloads_for_application_shutdown() {
     assert_eq!(manager.resident_bytes(), 0);
     assert!(manager.entry(&key).is_none());
 }
+
+fn write_svg(path: &std::path::Path, body: &str) {
+    let mut file = std::fs::File::create(path).expect("temp svg");
+    file.write_all(body.as_bytes()).expect("write svg");
+}
+
+#[test]
+fn svg_images_rasterize_into_a_renderable_payload() {
+    let mut path = std::env::temp_dir();
+    path.push(format!("gmark-svg-image-{}.svg", std::process::id()));
+    write_svg(
+        &path,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 8 4\">\
+         <rect width=\"8\" height=\"4\" fill=\"#0080ff\"/></svg>",
+    );
+    let result = decode_local_svg(&path, (8, 4));
+    let _ = std::fs::remove_file(path);
+    let value = result.expect("svg decodes");
+    assert!(value.render_image().is_some());
+}
+
+#[test]
+fn invalid_svg_fails_with_decode_error() {
+    let mut path = std::env::temp_dir();
+    path.push(format!("gmark-corrupt-svg-{}.svg", std::process::id()));
+    write_svg(&path, "not an svg");
+    let result = decode_local_svg(&path, (8, 4));
+    let _ = std::fs::remove_file(path);
+    assert!(matches!(result, Err(AssetError::Decode(_))));
+}
