@@ -39,6 +39,46 @@
         assert_eq!(tree.serialize_markdown(), "*a* **b**");
     }
 
+    /// 锁定 Issue #6：标识符内部的下划线必须是普通文本，不能跨越后续标识符形成斜体。
+    #[test]
+    fn intraword_underscores_stay_literal() {
+        let markdown = "On success it returns PAM_SUCCESS, otherwise it returns PAM_AUTH_ERR, PAM_SERVICE_ERR, PAM_BUF_ERR or PAM_PERM_DENIED.";
+        let tree = InlineTextTree::from_markdown(markdown);
+
+        assert_eq!(tree.visible_text(), markdown);
+        assert!(
+            tree.render_cache()
+                .spans()
+                .iter()
+                .all(|span| !span.style.italic && !span.style.bold),
+            "intraword underscores must not create emphasis spans"
+        );
+    }
+
+    /// 覆盖下划线分隔符的相邻边界，防止修复标识符时破坏合法强调或 Unicode 标点。
+    #[test]
+    fn underscore_emphasis_respects_word_and_punctuation_boundaries() {
+        for markdown in ["foo_bar_baz", "foo__bar__baz", "变量_名称", "при_вет"] {
+            let tree = InlineTextTree::from_markdown(markdown);
+            assert_eq!(tree.visible_text(), markdown);
+            assert!(
+                tree.render_cache()
+                    .spans()
+                    .iter()
+                    .all(|span| !span.style.italic && !span.style.bold),
+                "input {markdown:?} must remain literal"
+            );
+        }
+
+        let italic = InlineTextTree::from_markdown("(_word_) 「_强调_」");
+        assert_eq!(italic.visible_text(), "(word) 「强调」");
+        assert_eq!(italic.serialize_markdown(), "(*word*) 「*强调*」");
+
+        let bold = InlineTextTree::from_markdown("__word__");
+        assert_eq!(bold.visible_text(), "word");
+        assert_eq!(bold.serialize_markdown(), "**word**");
+    }
+
     #[test]
     fn emphasis_delimiters_surrounded_by_spaces_stay_literal() {
         let tree = InlineTextTree::from_markdown("* a * _ b _");

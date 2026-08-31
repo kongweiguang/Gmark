@@ -4164,7 +4164,7 @@ dependencies = [
 
 [[package]]
 name = "gmark"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -4252,6 +4252,7 @@ dependencies = [
  "tree-sitter-yaml",
  "uds_windows",
  "unicode-segmentation",
+ "unicode_categories",
  "url",
  "uuid",
  "velopack",

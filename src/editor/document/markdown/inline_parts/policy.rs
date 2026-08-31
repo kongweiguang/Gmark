@@ -1,6 +1,7 @@
 // @author kongweiguang
 
 use super::*;
+use unicode_categories::UnicodeCategories;
 
 /// Whether `delimiter` requires a non-empty body. Emphasis and strikethrough
 /// markers must enclose at least one character; code spans may be empty and
@@ -672,11 +673,25 @@ pub(super) fn clamp_to_char_boundary(text: &str, offset: usize) -> usize {
     boundary
 }
 
-pub(super) fn can_open_emphasis(tokens: &[CharToken], index: usize, len: usize) -> bool {
-    tokens
-        .get(index + len)
-        .map(|token| !token.ch.is_whitespace())
-        .unwrap_or(false)
+/// 为 `_` 应用 CommonMark 左右侧规则，避免标识符内部下划线被当作格式标记。
+/// 其它扩展标记保留旧判定，防止修复标准下划线时改变 GMark 已有组合语法。
+pub(super) fn can_open_emphasis(
+    tokens: &[CharToken],
+    index: usize,
+    len: usize,
+    marker: char,
+) -> bool {
+    if marker != '_' {
+        return tokens
+            .get(index + len)
+            .is_some_and(|token| !token.ch.is_whitespace());
+    }
+    if index > 0 && tokens[index - 1].ch == marker {
+        return false;
+    }
+
+    let flanking = delimiter_flanking(tokens, index, len);
+    flanking.left && (!flanking.right || flanking.before_is_punctuation)
 }
 
 pub(super) fn can_open_script(tokens: &[CharToken], index: usize, marker: char) -> bool {
@@ -695,6 +710,65 @@ pub(super) fn can_open_script(tokens: &[CharToken], index: usize, marker: char) 
             .is_some_and(|token| token.ch.is_ascii_alphanumeric())
 }
 
-pub(super) fn can_close_emphasis(tokens: &[CharToken], index: usize) -> bool {
-    index > 0 && !tokens[index - 1].ch.is_whitespace()
+/// 为 `_` 应用 CommonMark 右侧规则；其它标记继续使用旧闭合语义。
+pub(super) fn can_close_emphasis(
+    tokens: &[CharToken],
+    index: usize,
+    len: usize,
+    marker: char,
+) -> bool {
+    if marker != '_' {
+        return index > 0 && !tokens[index - 1].ch.is_whitespace();
+    }
+    if index > 0 && tokens[index - 1].ch == marker {
+        return false;
+    }
+
+    let flanking = delimiter_flanking(tokens, index, len);
+    flanking.right && (!flanking.left || flanking.after_is_punctuation)
+}
+
+/// 统一关闭判断，但仅让 Markdown 强调采用新规则，保留高亮、上下标和 HTML 扩展的既有语义。
+pub(super) fn can_close_delimiter(
+    tokens: &[CharToken],
+    index: usize,
+    delimiter: Delimiter,
+) -> bool {
+    match delimiter {
+        Delimiter::BoldMarkdown { marker } => can_close_emphasis(tokens, index, 2, marker),
+        Delimiter::ItalicMarkdown { marker } => can_close_emphasis(tokens, index, 1, marker),
+        _ => index > 0 && !tokens[index - 1].ch.is_whitespace(),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DelimiterFlanking {
+    left: bool,
+    right: bool,
+    before_is_punctuation: bool,
+    after_is_punctuation: bool,
+}
+
+/// 只读取分隔符两侧字符并计算左右侧属性，确保 Unicode 标点和符号与 CommonMark 一致处理。
+fn delimiter_flanking(tokens: &[CharToken], index: usize, len: usize) -> DelimiterFlanking {
+    let before = index.checked_sub(1).and_then(|offset| tokens.get(offset));
+    let after = tokens.get(index + len);
+    let before_is_whitespace = before.is_none_or(|token| token.ch.is_whitespace());
+    let after_is_whitespace = after.is_none_or(|token| token.ch.is_whitespace());
+    let before_is_punctuation = before.is_some_and(|token| markdown_punctuation(token.ch));
+    let after_is_punctuation = after.is_some_and(|token| markdown_punctuation(token.ch));
+
+    DelimiterFlanking {
+        left: !after_is_whitespace
+            && (!after_is_punctuation || before_is_whitespace || before_is_punctuation),
+        right: !before_is_whitespace
+            && (!before_is_punctuation || after_is_whitespace || after_is_punctuation),
+        before_is_punctuation,
+        after_is_punctuation,
+    }
+}
+
+/// CommonMark 把 Unicode Punctuation 与 Symbol 类别都视作标点，不能只检查 ASCII。
+fn markdown_punctuation(ch: char) -> bool {
+    ch.is_punctuation() || ch.is_symbol()
 }

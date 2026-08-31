@@ -533,6 +533,8 @@ pub(super) fn apply_extra_style_to_fragments(
     }
 }
 
+/// 按稳定优先级识别当前位置的开放分隔符，并把标记种类传给边界策略。
+/// 下划线需要区别于星号应用 CommonMark 词内约束，不能只按字符序列判定。
 pub(super) fn match_open_delimiter(tokens: &[CharToken], index: usize) -> Option<Delimiter> {
     if matches_sequence(tokens, index, "<strong>") {
         Some(Delimiter::BoldHtml)
@@ -542,19 +544,20 @@ pub(super) fn match_open_delimiter(tokens: &[CharToken], index: usize) -> Option
         Some(Delimiter::Underline)
     } else if matches_sequence(tokens, index, "~~") {
         Some(Delimiter::StrikethroughMarkdown)
-    } else if is_double_equals_delimiter(tokens, index) && can_open_emphasis(tokens, index, 2) {
+    } else if is_double_equals_delimiter(tokens, index) && can_open_emphasis(tokens, index, 2, '=')
+    {
         Some(Delimiter::HighlightMarkdown)
     } else if matches_sequence(tokens, index, "^") && can_open_script(tokens, index, '^') {
         Some(Delimiter::SuperscriptMarkdown)
     } else if is_single_tilde_delimiter(tokens, index) && can_open_script(tokens, index, '~') {
         Some(Delimiter::SubscriptMarkdown)
-    } else if matches_sequence(tokens, index, "**") && can_open_emphasis(tokens, index, 2) {
+    } else if matches_sequence(tokens, index, "**") && can_open_emphasis(tokens, index, 2, '*') {
         Some(Delimiter::BoldMarkdown { marker: '*' })
-    } else if matches_sequence(tokens, index, "__") && can_open_emphasis(tokens, index, 2) {
+    } else if matches_sequence(tokens, index, "__") && can_open_emphasis(tokens, index, 2, '_') {
         Some(Delimiter::BoldMarkdown { marker: '_' })
-    } else if matches_sequence(tokens, index, "*") && can_open_emphasis(tokens, index, 1) {
+    } else if matches_sequence(tokens, index, "*") && can_open_emphasis(tokens, index, 1, '*') {
         Some(Delimiter::ItalicMarkdown { marker: '*' })
-    } else if matches_sequence(tokens, index, "_") && can_open_emphasis(tokens, index, 1) {
+    } else if matches_sequence(tokens, index, "_") && can_open_emphasis(tokens, index, 1, '_') {
         Some(Delimiter::ItalicMarkdown { marker: '_' })
     } else if tokens[index].ch == '`' {
         // Count the run of consecutive backticks.
@@ -585,6 +588,8 @@ pub(super) fn backtick_run_len(tokens: &[CharToken], index: usize) -> usize {
     len
 }
 
+/// 预判开放分隔符是否存在合法闭合点，必须复用实际解析阶段的边界规则。
+/// 这样可避免预判接受、递归解析拒绝后把后续文本错误吞入当前样式范围。
 pub(super) fn has_closing_delimiter(
     tokens: &[CharToken],
     index: usize,
@@ -642,7 +647,7 @@ pub(super) fn has_closing_delimiter(
         } else {
             matches_sequence(tokens, cursor, &close_str)
         };
-        if closes {
+        if closes && can_close_delimiter(tokens, cursor, delimiter) {
             // Emphasis spans must enclose at least one character; a close
             // sitting immediately after the open (e.g. `**` or `*` `*`) is an
             // empty span and is treated as literal text instead.

@@ -296,17 +296,19 @@ pub(super) fn parse_until(
                     tokens[index].ch == '`' && backtick_run_len(tokens, index) == *run_len
                 }
                 Delimiter::SuperscriptMarkdown => {
-                    tokens[index].ch == '^' && can_close_emphasis(tokens, index)
+                    tokens[index].ch == '^' && can_close_delimiter(tokens, index, *end_delim)
                 }
                 Delimiter::SubscriptMarkdown => {
-                    is_single_tilde_delimiter(tokens, index) && can_close_emphasis(tokens, index)
+                    is_single_tilde_delimiter(tokens, index)
+                        && can_close_delimiter(tokens, index, *end_delim)
                 }
                 Delimiter::HighlightMarkdown => {
-                    is_double_equals_delimiter(tokens, index) && can_close_emphasis(tokens, index)
+                    is_double_equals_delimiter(tokens, index)
+                        && can_close_delimiter(tokens, index, *end_delim)
                 }
                 _ => {
                     matches_sequence(tokens, index, &end_delim.close())
-                        && can_close_emphasis(tokens, index)
+                        && can_close_delimiter(tokens, index, *end_delim)
                 }
             };
 
