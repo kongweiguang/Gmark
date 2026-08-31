@@ -47,7 +47,7 @@ def joined_run_scripts(steps: object) -> str:
 def validate_release_contract(
     path: Path, document: dict[str, object], jobs: dict[str, object]
 ) -> None:
-    """锁定不可变发布与签名清单契约，防止失败重跑改变客户端已见版本。"""
+    """锁定不可变发布、统一品牌标题与签名清单，避免重跑产生可见漂移。"""
 
     triggers = document.get("on")
     dispatch = triggers.get("workflow_dispatch") if isinstance(triggers, dict) else None
@@ -56,6 +56,8 @@ def validate_release_contract(
         fail(path, "release workflow requires explicit dispatch inputs")
     if "rerun_failed_release" in inputs:
         fail(path, "same-version release reruns are forbidden; publish a new SemVer or RC")
+    if "release_title" in inputs:
+        fail(path, "release titles are canonical Gmark metadata and must not be caller-controlled")
     test_release = inputs.get("test_release")
     if not isinstance(test_release, dict) or test_release.get("default") is not False:
         fail(path, "test_release must be an explicit false-by-default new prerelease path")
@@ -114,17 +116,25 @@ def validate_release_contract(
             None,
         )
     tag_script = tag_step.get("run") if isinstance(tag_step, dict) else None
+    tag_env = tag_step.get("env") if isinstance(tag_step, dict) else None
+    canonical_release_title = "Gmark ${{ inputs.release_tag }}"
     if (
-        not isinstance(tag_script, str)
+        not isinstance(tag_env, dict)
+        or tag_env.get("RELEASE_TITLE") != canonical_release_title
+        or not isinstance(tag_script, str)
         or 'git fetch --tags origin' not in tag_script
         or 'if git rev-parse -q --verify "refs/tags/$RELEASE_TAG"' not in tag_script
         or "already exists" not in tag_script
         or "tags are immutable" not in tag_script
         or "exit 1" not in tag_script
         or 'git tag -a "$RELEASE_TAG"' not in tag_script
+        or '-m "$RELEASE_TITLE"' not in tag_script
         or 'git push origin "$RELEASE_TAG"' not in tag_script
     ):
-        fail(path, "release tags must fail closed when an existing stable or prerelease tag is found")
+        fail(
+            path,
+            "release tags must use the canonical Gmark title and fail closed when a tag exists",
+        )
 
     publish_step = None
     if isinstance(steps, list):
@@ -137,15 +147,22 @@ def validate_release_contract(
             None,
         )
     publish_script = publish_step.get("run") if isinstance(publish_step, dict) else None
+    publish_env = publish_step.get("env") if isinstance(publish_step, dict) else None
     if (
-        not isinstance(publish_script, str)
+        not isinstance(publish_env, dict)
+        or publish_env.get("RELEASE_TITLE") != canonical_release_title
+        or not isinstance(publish_script, str)
         or 'if gh release view "$RELEASE_TAG"' not in publish_script
         or "already exists" not in publish_script
         or "published releases and assets are immutable" not in publish_script
         or "exit 1" not in publish_script
+        or 'title="$RELEASE_TITLE"' not in publish_script
         or "gh release create" not in publish_script
     ):
-        fail(path, "existing GitHub releases must fail closed without asset replacement")
+        fail(
+            path,
+            "GitHub releases must use the canonical Gmark title and fail closed without asset replacement",
+        )
 
     manifest_step = None
     if isinstance(steps, list):
@@ -163,6 +180,7 @@ def validate_release_contract(
     if (
         not isinstance(manifest_env, dict)
         or manifest_env.get("RELEASE_NOTES") != "${{ inputs.release_notes }}"
+        or manifest_env.get("RELEASE_TITLE") != canonical_release_title
         or not isinstance(manifest_script, str)
         or "--output dist/update-manifest.json" not in manifest_script
         or "--v2-output dist/update-manifest-v2.json" not in manifest_script

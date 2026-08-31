@@ -8,10 +8,6 @@ on:
         description: "Exact release tag, for example v0.1.0"
         required: true
         type: string
-      release_title:
-        description: "Optional release title"
-        required: false
-        type: string
       release_notes:
         description: "Optional Markdown release notes"
         required: false
@@ -58,7 +54,6 @@ jobs:
         shell: bash
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
-          RELEASE_TITLE: ${{ inputs.release_title }}
           RELEASE_CHANNEL: ${{ inputs.channel }}
         run: |
           set -euo pipefail
@@ -353,7 +348,7 @@ jobs:
         env:
           PACKAGE_VERSION: ${{ needs.validate.outputs.version }}
           RELEASE_TAG: ${{ inputs.release_tag }}
-          RELEASE_TITLE: ${{ inputs.release_title }}
+          RELEASE_TITLE: "Gmark ${{ inputs.release_tag }}"
           RELEASE_NOTES: ${{ inputs.release_notes }}
           RELEASE_CHANNEL: ${{ inputs.channel }}
           ROLLOUT_PERCENT: ${{ inputs.rollout_percent }}
@@ -390,7 +385,7 @@ jobs:
         shell: bash
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
-          RELEASE_TITLE: ${{ inputs.release_title }}
+          RELEASE_TITLE: "Gmark ${{ inputs.release_tag }}"
         run: |
           set -euo pipefail
           git fetch --tags origin
@@ -403,14 +398,14 @@ jobs:
           # 只在所有本地产物与签名清单验证完成后创建不可变标签，降低失败时遗留空标签的概率。
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git tag -a "$RELEASE_TAG" -m "${RELEASE_TITLE:-gmark $RELEASE_TAG}" "$current"
+          git tag -a "$RELEASE_TAG" -m "$RELEASE_TITLE" "$current"
           git push origin "$RELEASE_TAG"
       - name: Publish GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
-          RELEASE_TITLE: ${{ inputs.release_title }}
+          RELEASE_TITLE: "Gmark ${{ inputs.release_tag }}"
           USER_NOTES: ${{ inputs.release_notes }}
           TEST_RELEASE: ${{ inputs.test_release }}
         run: |
@@ -433,7 +428,7 @@ jobs:
           gmark is open source under GPL-3.0-or-later.
           EOF
           if [[ -n "$USER_NOTES" ]]; then printf '\n%s\n' "$USER_NOTES" >> "$notes"; fi
-          title="${RELEASE_TITLE:-gmark $RELEASE_TAG}"
+          title="$RELEASE_TITLE"
           prerelease=false
           if [[ "$TEST_RELEASE" == true || "$RELEASE_TAG" == *-* ]]; then prerelease=true; fi
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
