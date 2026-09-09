@@ -290,6 +290,7 @@ impl DocumentTree {
         }
     }
 
+    /// 每个同级列表段独立计数；源码起点只用于段首，后续标记不覆盖自动递增。
     fn sync_block_list(
         blocks: &[Entity<Block>],
         parent_entity: Option<Entity<Block>>,
@@ -305,7 +306,7 @@ impl DocumentTree {
         cx: &mut Context<Editor>,
         snapshot: &mut VisibleTreeSnapshot,
     ) {
-        let mut numbered_list_ordinal = 0;
+        let mut numbered_list_ordinal: Option<usize> = None;
         let mut previous_was_list_item = false;
         for (index, block) in blocks.iter().enumerate() {
             let entity_id = block.entity_id();
@@ -344,10 +345,14 @@ impl DocumentTree {
                 .map(|child| child.read(cx).record.id)
                 .collect::<Vec<_>>();
             let list_ordinal = if kind.is_numbered_list_item() {
-                numbered_list_ordinal += 1;
-                Some(numbered_list_ordinal)
+                let ordinal = numbered_list_ordinal.map_or_else(
+                    || block.read(cx).record.ordered_list_start.unwrap_or(1),
+                    |previous| previous.saturating_add(1),
+                );
+                numbered_list_ordinal = Some(ordinal);
+                Some(ordinal)
             } else {
-                numbered_list_ordinal = 0;
+                numbered_list_ordinal = None;
                 None
             };
             let is_quote_container = kind.is_quote_container();

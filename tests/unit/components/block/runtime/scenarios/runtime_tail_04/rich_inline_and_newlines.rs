@@ -214,6 +214,7 @@ async fn enter_inside_comment_block_inserts_hard_line_without_splitting(cx: &mut
 }
 
 #[gpui::test]
+/// 块快捷输入不涉及行内闭合符，仍应直接生成任务项。
 async fn paragraph_shortcut_creates_task_item_directly(cx: &mut TestAppContext) {
     let block = cx.new(|cx| Block::with_record(cx, BlockRecord::paragraph(String::new())));
 
@@ -224,6 +225,7 @@ async fn paragraph_shortcut_creates_task_item_directly(cx: &mut TestAppContext) 
             None,
             None,
             None,
+            false,
             false,
             cx,
         );
@@ -236,6 +238,7 @@ async fn paragraph_shortcut_creates_task_item_directly(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
+/// 光标亲和性扩展不能改变有序列表的快捷识别。
 async fn paragraph_shortcut_creates_parenthesized_numbered_list_directly(cx: &mut TestAppContext) {
     let block = cx.new(|cx| Block::with_record(cx, BlockRecord::paragraph(String::new())));
 
@@ -246,6 +249,7 @@ async fn paragraph_shortcut_creates_parenthesized_numbered_list_directly(cx: &mu
             None,
             None,
             None,
+            false,
             false,
             cx,
         );
@@ -258,11 +262,21 @@ async fn paragraph_shortcut_creates_parenthesized_numbered_list_directly(cx: &mu
 }
 
 #[gpui::test]
+/// 两阶段列表转换使用普通光标语义，不模拟行内闭合事件。
 async fn bullet_shortcut_upgrades_to_task_item_after_box_prefix(cx: &mut TestAppContext) {
     let block = cx.new(|cx| Block::with_record(cx, BlockRecord::paragraph(String::new())));
 
     block.update(cx, |block, cx| {
-        block.apply_title_edit(InlineTextTree::plain("- "), 2, None, None, None, false, cx);
+        block.apply_title_edit(
+            InlineTextTree::plain("- "),
+            2,
+            None,
+            None,
+            None,
+            false,
+            false,
+            cx,
+        );
     });
     let kind = block.read_with(cx, |block, _cx| block.kind());
     assert_eq!(kind, BlockKind::BulletedListItem);
@@ -274,6 +288,7 @@ async fn bullet_shortcut_upgrades_to_task_item_after_box_prefix(cx: &mut TestApp
             None,
             None,
             None,
+            false,
             false,
             cx,
         );

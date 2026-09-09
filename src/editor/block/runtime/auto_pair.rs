@@ -92,6 +92,7 @@ impl Block {
     }
 }
 
+/// 反引号按字面输入，避免自动闭合和跳过规则干扰手写代码及任意长度围栏。
 fn auto_pair_edit(
     source: &str,
     selection: Range<usize>,
@@ -147,22 +148,8 @@ fn auto_pair_edit(
         return None;
     }
 
-    // 空段落首个反引号仍创建行内代码对；再次输入时越过自动生成的闭合符。
-    // 光标到达纯反引号行末后必须退回普通输入，否则后续按键会持续被吞掉，
-    // 用户也就无法输入 CommonMark 允许的三个及更长围栏。
-    if input == "`" && source == "``" && selection == (1..1) {
-        return Some(AutoPairEdit::MoveTo(2));
-    }
-    if input == "`"
-        && selection == (source.len()..source.len())
-        && source.len() >= 2
-        && source.bytes().all(|byte| byte == b'`')
-    {
-        return None;
-    }
-
     if collapsed && markdown_closing_marker(input).is_some_and(|marker| next == Some(marker)) {
-        if matches!(input, "*" | "_" | "`") && previous == next && selection.start > 0 {
+        if matches!(input, "*" | "_") && previous == next && selection.start > 0 {
             let marker = input.as_bytes()[0] as char;
             let start = selection.start - marker.len_utf8();
             let end = selection.end + marker.len_utf8();
@@ -176,7 +163,7 @@ fn auto_pair_edit(
     }
 
     match input {
-        "*" | "_" | "`" | "$" => Some(wrap_selection(selection, input, input, selected)),
+        "*" | "_" | "$" => Some(wrap_selection(selection, input, input, selected)),
         "~" if !collapsed => Some(wrap_selection(selection, "~~", "~~", selected)),
         "^" if !collapsed => Some(wrap_selection(selection, "^", "^", selected)),
         _ => None,
@@ -217,16 +204,17 @@ fn closing_normal_marker(input: &str) -> Option<char> {
     }
 }
 
+/// 仅自动配对的标记允许跳过闭合符；手写反引号不得吞掉按键。
 fn markdown_closing_marker(input: &str) -> Option<char> {
     match input {
         "*" => Some('*'),
         "_" => Some('_'),
-        "`" => Some('`'),
         "$" => Some('$'),
         _ => None,
     }
 }
 
+/// 手写反引号逐个删除，不再被当作自动生成的空字符对。
 fn empty_pair_range(
     source: &str,
     cursor: usize,
@@ -244,7 +232,7 @@ fn empty_pair_range(
             ('(', ')') | ('[', ']') | ('{', '}') | ('"', '"') | ('\'', '\'')
         );
     let matches_markdown =
-        markdown && previous == next && matches!(previous, '*' | '_' | '`' | '$' | '~' | '^');
+        markdown && previous == next && matches!(previous, '*' | '_' | '$' | '~' | '^');
     (matches_normal || matches_markdown)
         .then_some(cursor - previous.len_utf8()..cursor + next.len_utf8())
 }

@@ -250,6 +250,7 @@ impl Editor {
         Self::build_blocks_from_lines_internal(cx, region_lines, true)
     }
 
+    /// 复用必须包含列表起点比较，否则只改源码数字时会继续显示旧编号。
     pub(super) fn materialize_prepared_node(
         node: &PreparedBlockNode,
         reusable: &mut HashMap<uuid::Uuid, Entity<super::Block>>,
@@ -264,6 +265,7 @@ impl Editor {
                     && current.html == node.record.html
                     && current.raw_fallback == node.record.raw_fallback
                     && current.resource == node.record.resource
+                    && current.ordered_list_start == node.record.ordered_list_start
             };
             if semantic_matches {
                 return block;

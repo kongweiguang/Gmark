@@ -70,6 +70,7 @@ impl Block {
         self.commit_selection_link_destination(destination, window, cx);
     }
 
+    /// 提交链接目标只改变链接属性，保留正文选区而不模拟闭合符输入。
     fn commit_selection_link_destination(
         &mut self,
         destination: Option<String>,
@@ -88,6 +89,7 @@ impl Block {
                 None,
                 Some(range),
                 Some(self.selection_reversed),
+                false,
                 false,
                 cx,
             );

@@ -308,6 +308,7 @@ impl Block {
         !self.uses_raw_text_editing() && self.record.title.has_source_preserving_links()
     }
 
+    /// 保留链接源码的坐标映射，闭合链接时仍允许光标离开新识别的样式。
     pub(super) fn apply_markdown_space_title_edit(
         &mut self,
         visible_range: Range<usize>,
@@ -373,6 +374,7 @@ impl Block {
                 .as_ref()
                 .and_then(|range| (!range.is_empty()).then_some(false)),
             caret_may_have_closed_span,
+            false,
             cx,
         );
     }

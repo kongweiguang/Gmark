@@ -18,6 +18,8 @@ pub struct BlockRecord {
     pub parent: Option<Uuid>,
     pub content: Vec<Uuid>,
     pub raw_fallback: Option<String>,
+    /// 源码中的有序标记，仅在新列表段起点采用；连续项仍由树按顺序编号。
+    pub(crate) ordered_list_start: Option<usize>,
     /// Parsed standalone resource metadata. The source text remains in the
     /// title so focusing the block still exposes editable Markdown.
     pub resource: Option<ResourceRecord>,
@@ -27,6 +29,7 @@ pub struct BlockRecord {
 }
 
 impl BlockRecord {
+    /// 新建块没有源码起点，交互创建的列表沿用默认编号，导入时再补充起点。
     pub fn new(kind: BlockKind, title: InlineTextTree) -> Self {
         let mut record = Self {
             id: Uuid::new_v4(),
@@ -37,6 +40,7 @@ impl BlockRecord {
             parent: None,
             content: Vec::new(),
             raw_fallback: None,
+            ordered_list_start: None,
             resource: None,
             source_blank: false,
         };

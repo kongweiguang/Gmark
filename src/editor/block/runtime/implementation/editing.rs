@@ -167,10 +167,12 @@ impl Block {
             Some(selection),
             Some(self.selection_reversed),
             false,
+            false,
             cx,
         );
     }
 
+    /// 显式格式命令保留选区方向，不套用键入闭合符时的光标逃逸规则。
     pub(crate) fn clear_inline_formatting(&mut self, cx: &mut Context<Self>) {
         if self.editor_selection_range.is_some() {
             if self.editor_selection_supports_inline_commands {
@@ -196,6 +198,7 @@ impl Block {
             Some(selection),
             Some(self.selection_reversed),
             false,
+            false,
             cx,
         );
     }
@@ -219,6 +222,7 @@ impl Block {
         self.replace_text_in_visible_range(range, &text, Some(selected), false, cx);
     }
 
+    /// 链接切换沿用选区事务，避免使用字符输入的闭合符亲和性。
     pub(crate) fn toggle_inline_link(&mut self, cx: &mut Context<Self>) {
         if self.editor_selection_range.is_some() {
             return;
@@ -238,6 +242,7 @@ impl Block {
             None,
             Some(selection),
             Some(self.selection_reversed),
+            false,
             false,
             cx,
         );

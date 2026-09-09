@@ -196,6 +196,7 @@ impl Block {
             .all(|fragment| fragment.link.as_ref() == Some(first_link))
     }
 
+    /// 链接标签编辑维持既有投影选区，不借用普通标记输入的闭合判断。
     fn apply_link_projection_edit(
         &mut self,
         link_run: &ExpandedLinkRun,
@@ -306,6 +307,7 @@ impl Block {
             selected_clean
                 .as_ref()
                 .and_then(|range| (!range.is_empty()).then_some(false)),
+            false,
             false,
             cx,
         );
@@ -483,6 +485,7 @@ impl Block {
     /// Apply a new title to the block, running shortcut detection and
     /// updating the render cache, cursor, and selection state.  Emits
     /// [`BlockEvent::Changed`] if the kind or title actually changed.
+    /// 标记被解析吸收时需要重建投影，但原有闭合符仍在光标右侧时必须留在样式内。
     pub(in super::super) fn apply_title_edit(
         &mut self,
         next_title: InlineTextTree,
@@ -491,6 +494,7 @@ impl Block {
         selected_range_clean: Option<Range<usize>>,
         selected_range_reversed: Option<bool>,
         caret_may_have_closed_span: bool,
+        caret_before_existing_closer: bool,
         cx: &mut Context<Self>,
     ) {
         let old_kind = self.record.kind.clone();
@@ -531,6 +535,7 @@ impl Block {
         // If the edit closed a span (its delimiters were absorbed), place the
         // caret after the new closing marker so typing continues as plain text.
         if caret_may_have_closed_span
+            && !caret_before_existing_closer
             && next_selected_clean.is_empty()
             && self.projection.as_ref().is_some_and(|projection| {
                 projection.caret_closes_span_at_clean(next_selected_clean.start)
@@ -570,6 +575,7 @@ impl Block {
     /// When the block is in editing-expansion mode (code spans show `` ` ``
     /// delimiters), the `visible_range` is first mapped back to the original
     /// tree's offset space.
+    /// 通过归一化映射识别光标右侧被吸收的已有标记，区分输入正文与输入闭合符。
     pub(crate) fn replace_text_in_visible_range(
         &mut self,
         visible_range: Range<usize>,
@@ -658,6 +664,7 @@ impl Block {
                     selected_range,
                     Some(false),
                     false,
+                    false,
                     cx,
                 );
                 return;
@@ -723,6 +730,16 @@ impl Block {
             .map(|range| range.end)
             .unwrap_or_else(|| result.map_offset(clean_range.start + new_text.len()));
 
+        let inserted_end = clean_range.start + new_text.len();
+        let caret_before_existing_closer = caret_may_have_closed_span
+            && base_title.visible_text()[clean_range.end..]
+                .chars()
+                .next()
+                .is_some_and(|next| {
+                    result.map_offset(inserted_end)
+                        == result.map_offset(inserted_end + next.len_utf8())
+                });
+
         self.apply_title_edit(
             result.tree,
             cursor,
@@ -732,6 +749,7 @@ impl Block {
                 .as_ref()
                 .and_then(|range| (!range.is_empty()).then_some(false)),
             caret_may_have_closed_span,
+            caret_before_existing_closer,
             cx,
         );
     }

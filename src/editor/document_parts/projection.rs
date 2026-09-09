@@ -348,6 +348,7 @@ fn record_from_markdown_value(markdown: &str) -> Option<BlockRecord> {
     BlockRecord::from_markdown_value(block)
 }
 
+/// 后台快速投影也携带源码编号，确保简单列表和复杂 importer 的语义一致。
 pub(super) fn prepare_simple_list_nodes(lines: &[String]) -> Option<Vec<PreparedBlockNode>> {
     let mut nodes = Vec::new();
     let mut index = 0usize;
@@ -355,6 +356,7 @@ pub(super) fn prepare_simple_list_nodes(lines: &[String]) -> Option<Vec<Prepared
         let marker = parse_list_marker(&lines[index])?;
         let item_end = collect_list_item_region(lines, index, marker.indent_columns);
         let mut node = PreparedBlockNode::leaf(native_record(marker.kind, marker.text));
+        node.record.ordered_list_start = marker.ordered_start;
         if item_end > index + 1 {
             let body = &lines[index + 1..item_end];
             if body.iter().any(|line| line.trim().is_empty()) {

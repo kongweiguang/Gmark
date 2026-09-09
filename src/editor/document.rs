@@ -62,6 +62,7 @@ enum HtmlBlockStart {
 #[derive(Clone)]
 struct ListMarker {
     kind: BlockKind,
+    ordered_start: Option<usize>,
     indent_columns: usize,
     content_indent_columns: usize,
     text: String,
@@ -279,6 +280,7 @@ fn dedent_lines(lines: &[String], columns: usize) -> Vec<String> {
         .collect()
 }
 
+/// 保留有序标记的数值供新列表段使用，避免代码块或空行之后一律从 1 开始。
 fn parse_list_marker(line: &str) -> Option<ListMarker> {
     let (indent_columns, indent_bytes) = leading_indent_columns_and_bytes(line);
     let rest = &line[indent_bytes..];
@@ -306,6 +308,7 @@ fn parse_list_marker(line: &str) -> Option<ListMarker> {
             };
         return Some(ListMarker {
             kind,
+            ordered_start: None,
             indent_columns,
             content_indent_columns: display_columns(
                 &line[..indent_bytes + marker.len_utf8() + separator_len],
@@ -317,6 +320,7 @@ fn parse_list_marker(line: &str) -> Option<ListMarker> {
     let (digit_len, marker_len, text) = parse_ordered_list_marker(rest)?;
     Some(ListMarker {
         kind: BlockKind::NumberedListItem,
+        ordered_start: Some(rest[..digit_len].parse().ok()?),
         indent_columns,
         content_indent_columns: display_columns(&line[..indent_bytes + digit_len + marker_len]),
         text: text.to_string(),

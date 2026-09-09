@@ -450,6 +450,7 @@ impl Editor {
         Some(block)
     }
 
+    /// 复杂列表保留源码起点，子块与续行的收集不能把列表标记降成无编号类型。
     pub(super) fn collect_list_blocks(
         cx: &mut Context<Self>,
         lines: &[String],
@@ -464,7 +465,9 @@ impl Editor {
             };
 
             let item_end = collect_list_item_region(lines, index, marker.indent_columns);
-            let block = native_block(cx, marker.kind.clone(), marker.text);
+            let mut record = native_record(marker.kind.clone(), marker.text);
+            record.ordered_list_start = marker.ordered_start;
+            let block = Editor::new_block(cx, record);
             let mut body_index = index + 1;
             let mut pending_blank_lines = 0usize;
             let mut fallback_raw = false;
