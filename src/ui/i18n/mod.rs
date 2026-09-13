@@ -246,6 +246,7 @@ pub struct I18nStrings {
     pub preferences_auto_save_option: String,
     pub preferences_auto_save_off: String,
     pub preferences_auto_save_after_delay: String,
+    pub preferences_show_hidden_files: String,
     pub preferences_document_loading: String,
     pub preferences_document_max_resident_mib: String,
     pub preferences_document_loading_invalid: String,

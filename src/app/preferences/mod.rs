@@ -88,6 +88,7 @@ struct StatusBarSettings {
 /// value back to the preferences file.
 pub struct EditorSettings {
     show_table_headers: bool,
+    show_hidden_files: bool,
     auto_save: AutoSavePreference,
     spell_check: bool,
     auto_pair_brackets: bool,
@@ -142,6 +143,10 @@ impl EditorSettings {
             .as_ref()
             .map(|preferences| preferences.auto_pair_brackets)
             .unwrap_or(true);
+        let show_hidden_files = loaded_preferences
+            .as_ref()
+            .map(|preferences| preferences.show_hidden_files)
+            .unwrap_or(false);
         let auto_pair_markdown = loaded_preferences
             .as_ref()
             .map(|preferences| preferences.auto_pair_markdown)
@@ -157,6 +162,7 @@ impl EditorSettings {
         Self::set_global(
             cx,
             show_table_headers,
+            show_hidden_files,
             auto_save,
             spell_check,
             auto_pair_brackets,
@@ -176,6 +182,7 @@ impl EditorSettings {
     fn set_global(
         cx: &mut App,
         show_table_headers: bool,
+        show_hidden_files: bool,
         auto_save: AutoSavePreference,
         spell_check: bool,
         auto_pair_brackets: bool,
@@ -188,6 +195,7 @@ impl EditorSettings {
     ) {
         cx.set_global(Self {
             show_table_headers,
+            show_hidden_files,
             auto_save,
             spell_check,
             auto_pair_brackets,
@@ -213,6 +221,18 @@ impl EditorSettings {
         cx.try_global::<Self>()
             .map(|settings| settings.show_table_headers)
             .unwrap_or(true)
+    }
+
+    pub(crate) fn show_hidden_files(cx: &App) -> bool {
+        cx.try_global::<Self>()
+            .is_some_and(|settings| settings.show_hidden_files)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_show_hidden_files_for_test(cx: &mut App, show: bool) {
+        cx.update_global::<Self, _>(|settings, _cx| {
+            settings.show_hidden_files = show;
+        });
     }
 
     pub fn set_show_table_headers(cx: &mut App, show_table_headers: bool) {
@@ -262,6 +282,8 @@ impl EditorSettings {
         Self::set_global(
             cx,
             show_table_headers,
+            cx.try_global::<Self>()
+                .is_some_and(|settings| settings.show_hidden_files),
             auto_save,
             spell_check,
             auto_pair_brackets,

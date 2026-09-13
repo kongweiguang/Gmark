@@ -15,6 +15,7 @@ fn saving_preferences_window_persists_selected_language() {
         theme_palette: ThemePalette::Xcode,
         visual_accessibility: Default::default(),
         show_table_headers: true,
+        show_hidden_files: false,
         image_paste_behavior: ImagePasteBehavior::None,
         auto_save: AutoSavePreference::Off,
         spell_check: true,
@@ -49,6 +50,7 @@ fn saving_preferences_window_persists_selected_language() {
     let saved = save_preferences_from_window_with_dirs(
         StartupOpenPreference::LastOpenedFile,
         false,
+        true,
         AutoSavePreference::AfterDelay,
         false,
         false,
@@ -76,6 +78,7 @@ fn saving_preferences_window_persists_selected_language() {
     assert_eq!(saved.default_language_id, "en-US");
     assert_eq!(saved.startup_open, StartupOpenPreference::LastOpenedFile);
     assert!(!saved.auto_check_updates);
+    assert!(saved.show_hidden_files);
     assert_eq!(saved.theme_appearance, ThemeAppearance::Light);
     assert_eq!(saved.theme_palette, ThemePalette::Fleet);
     let text = std::fs::read_to_string(dirs.app_config_file()).expect("config.toml should exist");

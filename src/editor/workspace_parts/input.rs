@@ -391,6 +391,7 @@ impl Editor {
     /// 为当前显式目录启动唯一代次的可取消后台扫描，防止渲染重复启动或卡住窗口。
     pub(super) fn sync_workspace_file_tree(&mut self, cx: &mut Context<Self>) {
         let next_root = self.workspace_root_for_current_file();
+        let show_hidden_files = crate::config::EditorSettings::show_hidden_files(cx);
         if self.workspace.root == next_root
             && self.workspace.file_tree.is_some()
             && self.workspace.file_scan_requested_root.is_none()
@@ -443,6 +444,7 @@ impl Editor {
             .collect::<Vec<_>>();
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.workspace.file_scan_requested_root = Some(root.clone());
+        self.workspace.file_scan_show_hidden_files = show_hidden_files;
         self.workspace.file_scan_cancel = Some(cancelled.clone());
         self.workspace.file_scan_state = WorkspaceScanState::Scanning { generation };
         self.workspace.file_scanning = true;
@@ -451,7 +453,12 @@ impl Editor {
             let worker_cancelled = cancelled.clone();
             let result = cx
                 .background_spawn(async move {
-                    scan_workspace(&scan_root, &pinned_empty_directories, &worker_cancelled)
+                    scan_workspace(
+                        &scan_root,
+                        &pinned_empty_directories,
+                        show_hidden_files,
+                        &worker_cancelled,
+                    )
                 })
                 .await;
             let _ = this.update(cx, |editor, cx| {
@@ -503,6 +510,26 @@ impl Editor {
         }));
         cx.notify();
         cx.refresh_windows();
+    }
+
+    pub(in crate::editor) fn sync_workspace_hidden_file_preference(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        let show_hidden_files = crate::config::EditorSettings::show_hidden_files(cx);
+        if self.workspace.explicit_root.is_none()
+            || self.workspace.file_scan_show_hidden_files == show_hidden_files
+        {
+            return;
+        }
+        self.invalidate_workspace_file_tree();
+        self.sync_workspace_file_tree(cx);
+        self.workspace.search_generation = self.workspace.search_generation.wrapping_add(1);
+        self.workspace.search_task = None;
+        self.workspace.search_results.clear();
+        if self.workspace.active_tab == WorkspaceTab::Search {
+            self.schedule_workspace_search(cx);
+        }
     }
 
     pub(in crate::editor) fn sync_workspace_outline(&mut self, cx: &mut Context<Self>) {
@@ -636,10 +663,13 @@ impl Editor {
         self.workspace.search_running = true;
         let generation = self.workspace.search_generation;
         let options = self.workspace.search_options;
+        let show_hidden_files = self.workspace.file_scan_show_hidden_files;
         self.workspace.search_task = Some(cx.spawn(async move |this: WeakEntity<Self>, cx| {
             cx.background_executor().timer(SEARCH_DEBOUNCE).await;
             let result = cx
-                .background_spawn(async move { search_workspace(&root, &query, options) })
+                .background_spawn(async move {
+                    search_workspace(&root, &query, options, show_hidden_files)
+                })
                 .await;
             let _ = this.update(cx, |editor, cx| {
                 if editor.workspace.search_generation != generation {

@@ -22,6 +22,7 @@ impl Render for Editor {
             return self.render_document_content(window, cx).into_any_element();
         }
         self.drain_pane_events(cx);
+        self.sync_workspace_hidden_file_preference(cx);
         // Keep the existing single-document editor path lazy.  A normal
         // render must not migrate the root session into a pane workspace;
         // migration is performed by split/restore actions only.  Once a

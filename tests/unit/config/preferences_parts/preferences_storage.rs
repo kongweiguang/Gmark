@@ -35,6 +35,7 @@ fn editor_preferences_match_product_defaults() {
     assert_eq!(preferences.editor_content_width, 1200);
     assert!(preferences.auto_pair_brackets);
     assert!(preferences.auto_pair_markdown);
+    assert!(!preferences.show_hidden_files);
     assert!(!preferences.show_tab_bar_actions);
     assert_eq!(
         preferences.resource_insert_behavior(),
@@ -83,6 +84,7 @@ fn partial_or_invalid_preferences_fall_back_by_field() {
     assert_eq!(preferences.image_paste_behavior, ImagePasteBehavior::None);
     assert!(preferences.auto_pair_brackets);
     assert!(preferences.auto_pair_markdown);
+    assert!(!preferences.show_hidden_files);
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -325,6 +327,7 @@ fn saves_and_reads_preferences() {
         theme_palette: ThemePalette::Xcode,
         visual_accessibility: Default::default(),
         show_table_headers: false,
+        show_hidden_files: true,
         image_paste_behavior: ImagePasteBehavior::CopyToAssetsFolder,
         auto_save: AutoSavePreference::AfterDelay,
         spell_check: false,
@@ -358,6 +361,7 @@ fn saves_and_reads_preferences() {
     assert!(text.contains("palette = \"xcode\""));
     assert!(!text.contains("default_theme_id"));
     assert!(text.contains("show_table_headers = false"));
+    assert!(text.contains("show_hidden_files = true"));
     assert!(text.contains("resource_insert_behavior = \"copy_to_assets_folder\""));
     assert!(text.contains("image_paste_behavior = \"copy_to_assets_folder\""));
     assert!(text.contains("auto_save = \"after_delay\""));

@@ -15,6 +15,7 @@ impl PreferencesWindow {
         };
         let startup_open = preferences.startup_open;
         let auto_check_updates = preferences.auto_check_updates;
+        let show_hidden_files = preferences.show_hidden_files;
         let auto_save = preferences.auto_save;
         let spell_check = preferences.spell_check;
         let auto_pair_brackets = preferences.auto_pair_brackets;
@@ -79,6 +80,7 @@ impl PreferencesWindow {
             nav: PreferencesNav::File,
             startup_open,
             auto_check_updates,
+            show_hidden_files,
             auto_save,
             spell_check,
             auto_pair_brackets,
@@ -98,6 +100,7 @@ impl PreferencesWindow {
             document_loading: document_loading.clone(),
             saved_startup_open: startup_open,
             saved_auto_check_updates: auto_check_updates,
+            saved_show_hidden_files: show_hidden_files,
             saved_auto_save: auto_save,
             saved_spell_check: spell_check,
             saved_auto_pair_brackets: auto_pair_brackets,
@@ -194,6 +197,11 @@ impl PreferencesWindow {
                 nav: PreferencesNav::File,
                 category: strings.preferences_nav_file.clone(),
                 label: strings.preferences_spell_check.clone(),
+            },
+            PreferenceSearchItem {
+                nav: PreferencesNav::File,
+                category: strings.preferences_nav_file.clone(),
+                label: strings.preferences_show_hidden_files.clone(),
             },
             PreferenceSearchItem {
                 nav: PreferencesNav::File,
