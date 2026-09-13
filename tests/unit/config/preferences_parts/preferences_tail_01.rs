@@ -23,6 +23,21 @@ async fn preferences_switches_share_stable_mouse_and_keyboard_focus(cx: &mut Tes
             assert!(!preferences.spell_check);
             assert!(preferences.switch_focus_handles[0].is_focused(window));
             assert!(preferences.has_unsaved_changes());
+            preferences.switch_focus_handles[PreferencesSwitch::ShowHiddenFiles.index()]
+                .focus(window);
+            cx.notify();
+        })
+        .unwrap();
+    visual.update(|window, cx| window.draw(cx).clear());
+    visual.simulate_keystrokes("enter");
+    visual.run_until_parked();
+    handle
+        .update(&mut visual, |preferences, window, cx| {
+            assert!(preferences.show_hidden_files);
+            assert!(
+                preferences.switch_focus_handles[PreferencesSwitch::ShowHiddenFiles.index()]
+                    .is_focused(window)
+            );
             preferences.select_nav(PreferencesNav::Editor, cx);
             preferences.switch_focus_handles[PreferencesSwitch::AutoPairBrackets.index()]
                 .focus(window);

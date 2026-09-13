@@ -34,6 +34,7 @@ pub(super) enum PreferencesDropdown {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PreferencesSwitch {
     AutoCheckUpdates,
+    ShowHiddenFiles,
     SpellCheck,
     AutoPairBrackets,
     AutoPairMarkdown,
@@ -78,7 +79,7 @@ impl PreferencesAccessibilityControl {
 }
 
 impl PreferencesSwitch {
-    pub(super) const COUNT: usize = 12;
+    pub(super) const COUNT: usize = 13;
 
     pub(super) fn index(self) -> usize {
         match self {
@@ -94,12 +95,14 @@ impl PreferencesSwitch {
             Self::AutoCheckUpdates => 9,
             Self::CodeFolding => 10,
             Self::FormatOnSave => 11,
+            Self::ShowHiddenFiles => 12,
         }
     }
 
     pub(super) fn id(self) -> &'static str {
         match self {
             Self::AutoCheckUpdates => "preferences-auto-check-updates",
+            Self::ShowHiddenFiles => "preferences-show-hidden-files",
             Self::SpellCheck => "preferences-spell-check",
             Self::AutoPairBrackets => "preferences-auto-pair-brackets",
             Self::AutoPairMarkdown => "preferences-auto-pair-markdown",
@@ -242,6 +245,7 @@ pub(crate) struct PreferencesWindow {
     pub(super) nav: PreferencesNav,
     pub(super) startup_open: StartupOpenPreference,
     pub(super) auto_check_updates: bool,
+    pub(super) show_hidden_files: bool,
     pub(super) auto_save: AutoSavePreference,
     pub(super) spell_check: bool,
     pub(super) auto_pair_brackets: bool,
@@ -262,6 +266,7 @@ pub(crate) struct PreferencesWindow {
     pub(super) visual_accessibility: VisualAccessibilityPreferences,
     pub(super) saved_startup_open: StartupOpenPreference,
     pub(super) saved_auto_check_updates: bool,
+    pub(super) saved_show_hidden_files: bool,
     pub(super) saved_auto_save: AutoSavePreference,
     pub(super) saved_spell_check: bool,
     pub(super) saved_auto_pair_brackets: bool,

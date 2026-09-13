@@ -363,6 +363,8 @@ pub struct AppPreferences {
     pub visual_accessibility: VisualAccessibilityPreferences,
     /// 是否显示表格标题行。
     pub show_table_headers: bool,
+    /// 工作区是否加载隐藏文件和目录。
+    pub show_hidden_files: bool,
     /// 插入资源时的存储策略。
     pub image_paste_behavior: ImagePasteBehavior,
     /// 自动保存策略。
@@ -410,6 +412,7 @@ impl Default for AppPreferences {
             theme_palette: ThemePalette::Xcode,
             visual_accessibility: VisualAccessibilityPreferences::default(),
             show_table_headers: true,
+            show_hidden_files: false,
             image_paste_behavior: ImagePasteBehavior::None,
             auto_save: AutoSavePreference::Off,
             spell_check: true,

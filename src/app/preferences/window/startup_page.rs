@@ -179,6 +179,25 @@ impl PreferencesWindow {
             .child(
                 div()
                     .w_full()
+                    .max_w(px(PREFERENCES_FORM_WIDTH))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(theme.typography.dialog_body_size))
+                            .text_color(theme.colors.dialog_body)
+                            .child(strings.preferences_show_hidden_files.clone()),
+                    )
+                    .child(self.preference_switch(
+                        PreferencesSwitch::ShowHiddenFiles,
+                        self.show_hidden_files,
+                        cx,
+                    )),
+            )
+            .child(
+                div()
+                    .w_full()
                     .pt(px(8.0))
                     .border_t(px(theme.dimensions.dialog_border_width))
                     .border_color(theme.colors.dialog_border)

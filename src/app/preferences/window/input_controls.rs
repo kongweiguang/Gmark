@@ -60,6 +60,7 @@ impl PreferencesWindow {
             PreferencesSwitch::AutoCheckUpdates => {
                 self.auto_check_updates = !self.auto_check_updates
             }
+            PreferencesSwitch::ShowHiddenFiles => self.show_hidden_files = !self.show_hidden_files,
             PreferencesSwitch::SpellCheck => self.spell_check = !self.spell_check,
             PreferencesSwitch::AutoPairBrackets => {
                 self.auto_pair_brackets = !self.auto_pair_brackets

@@ -73,6 +73,11 @@ fn load_builtin_catalog() -> Result<BuiltinCatalog> {
         include_str!("visual_accessibility.json"),
         "visual accessibility",
     )?;
+    merge_builtin_supplement(
+        &mut root,
+        include_str!("workspace_preferences.json"),
+        "workspace preferences",
+    )?;
     let catalogs = root
         .get("catalogs")
         .and_then(Value::as_object)

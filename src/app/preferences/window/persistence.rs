@@ -101,6 +101,7 @@ impl PreferencesWindow {
         let mut preferences = match save_preferences_from_window(
             self.startup_open,
             self.auto_check_updates,
+            self.show_hidden_files,
             self.auto_save,
             self.spell_check,
             self.auto_pair_brackets,
@@ -193,6 +194,7 @@ impl PreferencesWindow {
         install_keybindings(cx, &preferences.keybindings);
         crate::app_menu::install_menus(cx);
         cx.update_global::<EditorSettings, _>(|settings, _cx| {
+            settings.show_hidden_files = preferences.show_hidden_files;
             settings.auto_save = preferences.auto_save;
             settings.spell_check = preferences.spell_check;
             settings.auto_pair_brackets = preferences.auto_pair_brackets;
@@ -228,6 +230,7 @@ impl PreferencesWindow {
         self.focus_handle.focus(window);
         self.saved_startup_open = self.startup_open;
         self.saved_auto_check_updates = self.auto_check_updates;
+        self.saved_show_hidden_files = self.show_hidden_files;
         self.saved_auto_save = self.auto_save;
         self.saved_spell_check = self.spell_check;
         self.saved_auto_pair_brackets = self.auto_pair_brackets;

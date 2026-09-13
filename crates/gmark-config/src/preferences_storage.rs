@@ -38,6 +38,7 @@ struct PreferencesFile {
     accessibility: AccessibilityPreferencesFile,
     editor: EditorPreferencesFile,
     status_bar: StatusBarPreferencesFile,
+    workspace: WorkspacePreferencesFile,
     documents: DocumentsPreferencesFile,
     keybindings: ShortcutConfig,
 }
@@ -103,6 +104,11 @@ struct StatusBarPreferencesFile {
 }
 
 #[derive(Serialize)]
+struct WorkspacePreferencesFile {
+    show_hidden_files: bool,
+}
+
+#[derive(Serialize)]
 struct DocumentsPreferencesFile {
     loading: DocumentLoadingPreferencesFile,
 }
@@ -163,6 +169,9 @@ impl From<&AppPreferences> for PreferencesFile {
                 show_sidebar_toggle: value.status_bar.show_sidebar_toggle,
                 show_mode_switch: value.status_bar.show_mode_switch,
                 custom_buttons: value.status_bar.custom_buttons.clone(),
+            },
+            workspace: WorkspacePreferencesFile {
+                show_hidden_files: value.show_hidden_files,
             },
             documents: DocumentsPreferencesFile {
                 loading: DocumentLoadingPreferencesFile {
@@ -315,6 +324,7 @@ fn preferences_from_toml(value: &toml::Value, fallback_language_id: &str) -> App
         theme_palette,
         visual_accessibility,
         show_table_headers: bool_value(value, "editor", "show_table_headers").unwrap_or(true),
+        show_hidden_files: bool_value(value, "workspace", "show_hidden_files").unwrap_or(false),
         image_paste_behavior,
         auto_save: string_value(value, "editor", "auto_save")
             .map(AutoSavePreference::parse)

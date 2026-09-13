@@ -84,6 +84,7 @@ impl PreferencesWindow {
     pub(super) fn has_unsaved_changes(&self) -> bool {
         self.startup_open != self.saved_startup_open
             || self.auto_check_updates != self.saved_auto_check_updates
+            || self.show_hidden_files != self.saved_show_hidden_files
             || self.auto_save != self.saved_auto_save
             || self.spell_check != self.saved_spell_check
             || self.auto_pair_brackets != self.saved_auto_pair_brackets

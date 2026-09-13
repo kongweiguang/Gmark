@@ -28,6 +28,7 @@ pub(super) fn collect_markdown_paths(node: &WorkspaceTreeNode, paths: &mut Vec<P
 pub(super) fn scan_workspace(
     path: &Path,
     pinned_empty_directories: &[PathBuf],
+    show_hidden_files: bool,
     cancelled: &AtomicBool,
 ) -> Result<WorkspaceScanResult> {
     if cancelled.load(Ordering::Acquire) {
@@ -47,7 +48,7 @@ pub(super) fn scan_workspace(
         children: Vec::new(),
     };
     let walker = ignore::WalkBuilder::new(&root_path)
-        .hidden(false)
+        .hidden(!show_hidden_files)
         .follow_links(false)
         .git_ignore(true)
         .git_exclude(true)
@@ -116,6 +117,9 @@ pub(super) fn scan_workspace(
         let Ok(directory) = dunce::canonicalize(directory) else {
             continue;
         };
+        if !show_hidden_files && workspace_path_is_hidden(&root_path, &directory) {
+            continue;
+        }
         if directory.starts_with(&root_path) && directory.is_dir() {
             let relative_depth = directory
                 .strip_prefix(&root_path)
@@ -171,7 +175,18 @@ pub(super) fn scan_workspace(
 #[cfg(test)]
 pub(super) fn scan_workspace_dir(path: &Path) -> Result<WorkspaceTreeNode> {
     let cancelled = AtomicBool::new(false);
-    Ok(scan_workspace(path, &[], &cancelled)?.tree)
+    Ok(scan_workspace(path, &[], false, &cancelled)?.tree)
+}
+
+pub(super) fn workspace_path_is_hidden(root: &Path, path: &Path) -> bool {
+    path.strip_prefix(root).is_ok_and(|relative| {
+        relative.components().any(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .is_some_and(|name| name.starts_with('.') && name != "." && name != "..")
+        })
+    })
 }
 
 pub(super) fn insert_workspace_file(root: &mut WorkspaceTreeNode, base: &Path, file: &Path) {

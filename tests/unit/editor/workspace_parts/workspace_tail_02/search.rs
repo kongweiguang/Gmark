@@ -33,11 +33,17 @@
         fs::write(root.join("nested").join("more.markdown"), "alpha").unwrap();
         fs::write(root.join("ignored.md"), "alpha").unwrap();
         fs::write(root.join("plain.txt"), "alpha").unwrap();
+        fs::write(root.join(".hidden.md"), "alpha").unwrap();
         fs::write(root.join("legacy.md"), [b'c', b'a', b'f', 0xe9]).unwrap();
 
-        let insensitive = search_workspace(&root, "alpha", WorkspaceSearchOptions::default())
+        let insensitive = search_workspace(&root, "alpha", WorkspaceSearchOptions::default(), false)
             .expect("plain search");
         assert_eq!(insensitive.len(), 4);
+        assert!(
+            insensitive
+                .iter()
+                .all(|result| result.path != root.join(".hidden.md"))
+        );
         assert!(
             insensitive
                 .iter()
@@ -46,6 +52,14 @@
         assert!(insensitive.iter().any(|result| {
             result.relative_path == "notes.md" && result.line == 2 && result.column == 4
         }));
+        let with_hidden =
+            search_workspace(&root, "alpha", WorkspaceSearchOptions::default(), true)
+                .expect("search hidden files");
+        assert!(
+            with_hidden
+                .iter()
+                .any(|result| result.path == root.join(".hidden.md"))
+        );
 
         let case_sensitive = search_workspace(
             &root,
@@ -54,6 +68,7 @@
                 case_sensitive: true,
                 ..WorkspaceSearchOptions::default()
             },
+            false,
         )
         .unwrap();
         assert_eq!(case_sensitive.len(), 1);
@@ -65,6 +80,7 @@
                 whole_word: true,
                 ..WorkspaceSearchOptions::default()
             },
+            false,
         )
         .unwrap();
         assert_eq!(whole_word.len(), 3);
@@ -76,6 +92,7 @@
                 regex: true,
                 ..WorkspaceSearchOptions::default()
             },
+            false,
         )
         .unwrap();
         assert_eq!(regex.len(), 2);
@@ -86,11 +103,13 @@
                 WorkspaceSearchOptions {
                     regex: true,
                     ..WorkspaceSearchOptions::default()
-                }
+                },
+                false,
             )
             .is_err()
         );
-        let legacy = search_workspace(&root, "café", WorkspaceSearchOptions::default()).unwrap();
+        let legacy =
+            search_workspace(&root, "café", WorkspaceSearchOptions::default(), false).unwrap();
         assert_eq!(legacy.len(), 1);
         assert_eq!(legacy[0].relative_path, "legacy.md");
 
@@ -106,7 +125,8 @@
         let oversized = fs::File::create(root.join("oversized.md")).unwrap();
         oversized.set_len(super::SEARCH_MAX_FILE_BYTES + 1).unwrap();
 
-        let results = search_workspace(&root, "hit", WorkspaceSearchOptions::default()).unwrap();
+        let results =
+            search_workspace(&root, "hit", WorkspaceSearchOptions::default(), false).unwrap();
         assert_eq!(results.len(), super::SEARCH_MAX_RESULTS);
         assert!(
             results

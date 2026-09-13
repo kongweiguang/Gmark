@@ -107,6 +107,7 @@ pub(crate) fn import_language_config_and_select(
 pub(crate) fn save_preferences_from_window(
     startup_open: StartupOpenPreference,
     auto_check_updates: bool,
+    show_hidden_files: bool,
     auto_save: AutoSavePreference,
     spell_check: bool,
     auto_pair_brackets: bool,
@@ -130,6 +131,7 @@ pub(crate) fn save_preferences_from_window(
     save_preferences_from_window_with_dirs(
         startup_open,
         auto_check_updates,
+        show_hidden_files,
         auto_save,
         spell_check,
         auto_pair_brackets,
@@ -157,6 +159,7 @@ pub(crate) fn save_preferences_from_window(
 pub(super) fn save_preferences_from_window_with_dirs(
     startup_open: StartupOpenPreference,
     auto_check_updates: bool,
+    show_hidden_files: bool,
     auto_save: AutoSavePreference,
     spell_check: bool,
     auto_pair_brackets: bool,
@@ -181,6 +184,7 @@ pub(super) fn save_preferences_from_window_with_dirs(
         load_or_create_app_preferences_with_dirs_and_locales(dirs, sys_locale::get_locales())?;
     preferences.startup_open = startup_open;
     preferences.auto_check_updates = auto_check_updates;
+    preferences.show_hidden_files = show_hidden_files;
     preferences.auto_save = auto_save;
     preferences.spell_check = spell_check;
     preferences.auto_pair_brackets = auto_pair_brackets;

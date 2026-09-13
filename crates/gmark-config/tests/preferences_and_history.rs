@@ -64,6 +64,7 @@ fn preferences_round_trip_with_stable_toml_keys() -> Result<()> {
             high_contrast: AccessibilityOverride::System,
         },
         show_table_headers: false,
+        show_hidden_files: true,
         image_paste_behavior: ResourceInsertBehavior::CopyToNamedAssetsFolder,
         auto_save: AutoSavePreference::AfterDelay,
         spell_check: false,
@@ -101,6 +102,8 @@ fn preferences_round_trip_with_stable_toml_keys() -> Result<()> {
     assert!(toml.contains("resource_insert_behavior = \"copy_to_named_assets_folder\""));
     assert!(toml.contains("image_paste_behavior = \"copy_to_named_assets_folder\""));
     assert!(toml.contains("[keybindings]"));
+    assert!(toml.contains("[workspace]"));
+    assert!(toml.contains("show_hidden_files = true"));
     assert!(toml.contains("[documents.loading]"));
     assert!(toml.contains("[accessibility]"));
     assert!(toml.contains("reduced_motion = \"enabled\""));

@@ -301,6 +301,7 @@ pub(super) struct WorkspaceState {
     file_scanning: bool,
     file_scan_state: WorkspaceScanState,
     file_scan_requested_root: Option<PathBuf>,
+    file_scan_show_hidden_files: bool,
     file_scan_cancel: Option<Arc<AtomicBool>>,
     quick_open_paths: Vec<PathBuf>,
     outline_tree: Vec<WorkspaceTreeNode>,
@@ -376,7 +377,7 @@ mod tooltip;
 use scanning::{collect_markdown_paths, scan_workspace_dir};
 use scanning::{
     insert_workspace_directory, insert_workspace_file, remove_workspace_path, scan_workspace,
-    sort_workspace_tree, stable_node_hash,
+    sort_workspace_tree, stable_node_hash, workspace_path_is_hidden,
 };
 
 use tooltip::render_workspace_tooltip;
@@ -506,6 +507,9 @@ impl WorkspaceState {
         if self.root.as_deref() != Some(root) {
             return false;
         }
+        if !self.file_scan_show_hidden_files && workspace_path_is_hidden(root, path) {
+            return true;
+        }
         let Some(tree) = self.file_tree.as_mut() else {
             return false;
         };
@@ -578,6 +582,7 @@ fn search_workspace(
     root: &Path,
     query: &str,
     options: WorkspaceSearchOptions,
+    show_hidden_files: bool,
 ) -> Result<Vec<WorkspaceSearchMatch>, String> {
     let source_pattern = if options.regex {
         query.to_owned()
@@ -596,7 +601,7 @@ fn search_workspace(
         .map_err(|error| error.to_string())?;
     let mut results = Vec::new();
     let walker = ignore::WalkBuilder::new(root)
-        .hidden(false)
+        .hidden(!show_hidden_files)
         .follow_links(false)
         .git_ignore(true)
         .git_exclude(true)

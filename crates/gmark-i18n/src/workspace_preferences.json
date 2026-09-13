@@ -1,0 +1,11 @@
+{
+  "author": "kongweiguang",
+  "catalogs": {
+    "en-US": {
+      "preferences_show_hidden_files": "Show Hidden Files"
+    },
+    "zh-CN": {
+      "preferences_show_hidden_files": "显示隐藏文件"
+    }
+  }
+}

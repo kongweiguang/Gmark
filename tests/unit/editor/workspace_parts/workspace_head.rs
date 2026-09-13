@@ -63,6 +63,10 @@
         fs::create_dir_all(root.join("nested")).expect("create dirs");
         fs::write(root.join("a.md"), "a").expect("write md");
         fs::write(root.join("a.txt"), "text").expect("write txt");
+        fs::write(root.join(".secret.md"), "secret").expect("write hidden md");
+        fs::create_dir_all(root.join(".private")).expect("create hidden dir");
+        fs::write(root.join(".private").join("note.md"), "private")
+            .expect("write file in hidden dir");
         fs::write(root.join("ignored.md"), "ignored").expect("write ignored md");
         fs::write(root.join(".gitignore"), "ignored.md\n").expect("write gitignore");
         fs::write(root.join("nested").join("b.md"), "b").expect("write nested md");
@@ -73,7 +77,7 @@
             .iter()
             .map(|node| node.label.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(labels, vec!["nested", ".gitignore", "a.md", "a.txt"]);
+        assert_eq!(labels, vec!["nested", "a.md", "a.txt"]);
         assert!(matches!(
             tree.children[0].kind,
             WorkspaceTreeKind::Directory(_)
@@ -98,6 +102,36 @@
             None
         );
 
+        let cancelled = AtomicBool::new(false);
+        let visible = scan_workspace(&root, &[], true, &cancelled).expect("scan hidden files");
+        let visible_labels = visible
+            .tree
+            .children
+            .iter()
+            .map(|node| node.label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            visible_labels,
+            vec![
+                ".private",
+                "nested",
+                ".gitignore",
+                ".secret.md",
+                "a.md",
+                "a.txt"
+            ]
+        );
+        assert!(
+            visible
+                .quick_open_paths
+                .contains(&canonical_root.join(".secret.md"))
+        );
+        assert!(
+            visible
+                .quick_open_paths
+                .contains(&canonical_root.join(".private").join("note.md"))
+        );
+
         let _ = fs::remove_dir_all(root);
     }
 
@@ -113,7 +147,7 @@
         let canonical_root = dunce::canonicalize(&root).expect("canonical root");
 
         let cancelled = AtomicBool::new(false);
-        let result = scan_workspace(&root, &[], &cancelled).expect("scan workspace");
+        let result = scan_workspace(&root, &[], false, &cancelled).expect("scan workspace");
         assert_eq!(
             result.quick_open_paths,
             vec![
@@ -123,7 +157,7 @@
         );
 
         cancelled.store(true, std::sync::atomic::Ordering::Release);
-        assert!(scan_workspace(&root, &[], &cancelled).is_err());
+        assert!(scan_workspace(&root, &[], false, &cancelled).is_err());
         let _ = fs::remove_dir_all(root);
     }
 
@@ -136,7 +170,7 @@
         let pinned = vec![root.clone(); WORKSPACE_SCAN_MAX_ENTRIES + 1];
         let cancelled = AtomicBool::new(false);
 
-        let error = match scan_workspace(&root, &pinned, &cancelled) {
+        let error = match scan_workspace(&root, &pinned, false, &cancelled) {
             Ok(_) => panic!("pinned limit should reject excess work"),
             Err(error) => error,
         };
@@ -164,6 +198,53 @@
             assert!(editor.workspace.file_scan_task.is_none());
             assert_eq!(editor.workspace.file_scan_state, WorkspaceScanState::Idle);
         });
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    async fn changing_hidden_file_preference_rescans_an_open_workspace(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_workspace_test_app(cx);
+        cx.update(|cx| {
+            crate::config::EditorSettings::init(
+                cx,
+                true,
+                crate::config::AutoSavePreference::Off,
+                true,
+            );
+            crate::config::EditorSettings::set_show_hidden_files_for_test(cx, false);
+        });
+        let root = std::env::temp_dir().join(format!(
+            "gmark-workspace-hidden-refresh-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).expect("create root");
+        fs::write(root.join("visible.md"), "visible").expect("write visible file");
+        fs::write(root.join(".hidden.md"), "hidden").expect("write hidden file");
+        let (editor, visual) = cx.add_window_view(|_window, cx| {
+            super::Editor::from_markdown(cx, "document".to_owned(), None)
+        });
+        editor.update(visual, |editor, cx| {
+            editor.set_explicit_workspace_root(root.clone(), cx);
+        });
+        visual.run_until_parked();
+        editor.update(visual, |editor, _cx| {
+            let tree = editor.workspace.file_tree.as_ref().expect("workspace tree");
+            assert!(tree.children.iter().all(|node| node.label != ".hidden.md"));
+        });
+
+        visual.update(|window, cx| {
+            crate::config::EditorSettings::set_show_hidden_files_for_test(cx, true);
+            cx.refresh_windows();
+            window.draw(cx).clear();
+        });
+        visual.run_until_parked();
+        editor.update(visual, |editor, _cx| {
+            let tree = editor.workspace.file_tree.as_ref().expect("rescanned workspace tree");
+            assert!(tree.children.iter().any(|node| node.label == ".hidden.md"));
+        });
+
         let _ = fs::remove_dir_all(root);
     }
 
