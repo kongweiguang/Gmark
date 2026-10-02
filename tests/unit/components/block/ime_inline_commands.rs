@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use super::*;
 use crate::components::block::InlineFormat;
-use crate::components::{BlockEvent, UndoCaptureKind};
+use crate::components::{BlockEvent, BlockRecord, UndoCaptureKind};
 
 /// A read-only text surface must not alter its Markdown, revision, or undo stream.
 #[gpui::test]
