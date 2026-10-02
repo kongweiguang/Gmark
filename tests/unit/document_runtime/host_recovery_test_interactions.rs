@@ -217,6 +217,18 @@ impl DocumentHost {
         self.search_input.read(cx).display_text().to_owned()
     }
 
+    /// Exposes the real Host field so IME tests can drive its native composition lifecycle.
+    #[cfg(test)]
+    pub(crate) fn search_input_for_test(&self) -> Entity<Block> {
+        self.search_input.clone()
+    }
+
+    /// Lets focus-transition tests verify that navigation receives focus only after IME termination.
+    #[cfg(test)]
+    pub(crate) fn navigation_input_for_test(&self) -> Entity<Block> {
+        self.navigation_input.clone()
+    }
+
     #[cfg(test)]
     pub(crate) fn host_is_focused_for_test(&self, window: &Window) -> bool {
         self.focus_handle.is_focused(window)

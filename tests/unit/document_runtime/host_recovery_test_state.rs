@@ -309,6 +309,7 @@ impl DocumentHost {
         self.source_drag_autoscroll_tick(cx)
     }
 
+    /// Mirrors the production Source callback timing so host actions cannot re-enter an updating Block.
     #[cfg(test)]
     pub(crate) fn begin_line_edit_for_test(
         &mut self,
@@ -346,8 +347,11 @@ impl DocumentHost {
                 );
                 block.set_compact_source_host();
                 block.set_host_action_handler(move |action, window, cx| {
-                    let _ = host.update(cx, |view, cx| {
-                        view.on_line_edit_host_action(action, window, cx)
+                    let host = host.clone();
+                    window.defer(cx, move |window, cx| {
+                        let _ = host.update(cx, |view, cx| {
+                            view.on_line_edit_host_action(action, window, cx)
+                        });
                     });
                 });
                 block
@@ -370,6 +374,7 @@ impl DocumentHost {
         self.active_edit = Some(SourceLineEdit {
             line,
             range: replace_range,
+            base_revision: self.document.as_ref().map_or(0, SharedDocument::revision),
             ending,
             leading_truncated,
             trailing_truncated,

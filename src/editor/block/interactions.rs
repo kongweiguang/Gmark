@@ -637,12 +637,20 @@ impl Block {
         });
     }
 
+    /// 删除候选所属文字前等待原会话终态，并让只读保护覆盖结构降级与合并。
     pub(crate) fn on_delete_back(
         &mut self,
         _: &DeleteBack,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.guard_input_command(
+            crate::components::block::BlockInputCommand::DeleteBack,
+            window,
+            cx,
+        ) {
+            return;
+        }
         if self.kind() == BlockKind::MermaidBlock
             && self.mermaid_view_mode() == MermaidViewMode::Preview
         {
@@ -745,8 +753,12 @@ impl Block {
 
 #[path = "interactions_parts/deletion.rs"]
 mod deletion;
+#[path = "interactions_parts/line_operations.rs"]
+mod line_operations;
 #[path = "interactions_parts/navigation.rs"]
 mod navigation;
+#[path = "interactions_parts/pointer_selection.rs"]
+mod pointer_selection;
 
 #[cfg(test)]
 #[path = "../../../tests/unit/components/block/interactions.rs"]

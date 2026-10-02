@@ -5,6 +5,7 @@
 use super::*;
 
 impl DocumentHost {
+    /// Defers cell actions until the Block update lease ends, so Host callbacks can safely read or refocus the editor.
     pub(super) fn begin_structured_cell_edit(
         &mut self,
         record: Option<u64>,
@@ -20,8 +21,11 @@ impl DocumentHost {
         let host = cx.entity().downgrade();
         self.structured_cell_input.update(cx, move |input, cx| {
             input.set_host_action_handler(move |action, window, cx| {
-                let _ = host.update(cx, |view, cx| {
-                    view.on_structured_cell_host_action(action, window, cx)
+                let host = host.clone();
+                window.defer(cx, move |window, cx| {
+                    let _ = host.update(cx, |view, cx| {
+                        view.on_structured_cell_host_action(action, window, cx)
+                    });
                 });
             });
             let len = input.display_text().len();
@@ -31,6 +35,7 @@ impl DocumentHost {
         cx.notify();
     }
 
+    /// Keeps an in-progress cell edit authoritative before pointer focus moves to another table cell.
     pub(super) fn select_structured_cell(
         &mut self,
         target: StructuredCellEdit,
@@ -38,6 +43,13 @@ impl DocumentHost {
         cx: &mut Context<Self>,
     ) {
         if self.view_mode == DocumentHostViewMode::Source {
+            return;
+        }
+        if self.defer_source_action_for_ime(
+            super::source_ime::DeferredSourceAction::StructuredCellSelect(target),
+            window,
+            cx,
+        ) {
             return;
         }
         if self
@@ -51,24 +63,39 @@ impl DocumentHost {
                 .read(cx)
                 .display_text()
                 .to_owned();
-            self.commit_structured_cell_edit(value, cx);
+            if !self.commit_structured_cell_edit(value, cx) {
+                return;
+            }
         }
         self.structured_selected_cell = Some(target);
-        self.focus_handle.focus(window);
+        self.structured_focus_handle.focus(window);
         cx.notify();
     }
 
+    /// 处理快捷键 action 之后仍到达网格的原始按键，负责进入单元格编辑和取消等路径。
     pub(super) fn on_structured_table_key_down(
         &mut self,
         event: &KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.structured_focus_handle.is_focused(window)
+            && !self
+                .structured_cell_input
+                .read(cx)
+                .focus_handle
+                .is_focused(window)
+        {
+            return;
+        }
         let Some(selected) = self.structured_selected_cell else {
             return;
         };
         match event.keystroke.key.as_str() {
             "enter" => {
+                if self.structured_cell_edit.is_some() {
+                    return;
+                }
                 if let Some(value) = self.structured_cell_value(selected) {
                     self.begin_structured_cell_edit(
                         selected.record,
@@ -81,42 +108,130 @@ impl DocumentHost {
                 }
             }
             "tab" => {
-                let Some(StructuredIndex::Delimited(index)) = self.structured_index.as_ref() else {
-                    return;
-                };
-                let columns = index.column_count().max(1);
-                let slots = columns.saturating_mul(index.record_count() as usize + 1);
-                if slots == 0 {
-                    return;
-                }
-                let current = selected.record.map_or(selected.column, |record| {
-                    columns.saturating_add(record as usize * columns + selected.column)
-                });
-                let next = if event.keystroke.modifiers.shift {
-                    (current + slots - 1) % slots
+                let delta = if event.keystroke.modifiers.shift {
+                    -1
                 } else {
-                    (current + 1) % slots
+                    1
                 };
-                self.structured_selected_cell = Some(if next < columns {
-                    StructuredCellEdit {
-                        record: None,
-                        column: next,
-                    }
-                } else {
-                    StructuredCellEdit {
-                        record: Some(((next - columns) / columns) as u64),
-                        column: (next - columns) % columns,
-                    }
-                });
-                cx.stop_propagation();
-                cx.notify();
+                let _ = self.move_structured_cell_by_tab(delta, window, cx);
             }
             "escape" => {
+                if self.structured_cell_input.read(cx).has_ime_composition() {
+                    return;
+                }
                 self.structured_cell_edit = None;
+                self.structured_focus_handle.focus(window);
                 cx.stop_propagation();
                 cx.notify();
             }
             _ => {}
+        }
+    }
+
+    /// 网格拥有焦点时先接管 Tab，避免外围 Source 行操作消费同一个快捷键。
+    pub(super) fn on_structured_grid_indent(
+        &mut self,
+        _: &IndentBlock,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let _ = self.move_structured_cell_by_tab(1, window, cx);
+    }
+
+    /// 让 Shift+Tab 复用 Tab 的提交和焦点恢复路径，避免两套邻格导航行为分叉。
+    pub(super) fn on_structured_grid_outdent(
+        &mut self,
+        _: &OutdentBlock,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let _ = self.move_structured_cell_by_tab(-1, window, cx);
+    }
+
+    /// 仅在分隔表格拥有焦点时提交并移动选中格；提交失败仍消费 action，以保留当前编辑现场。
+    fn move_structured_cell_by_tab(
+        &mut self,
+        delta: i32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let focused = self.structured_focus_handle.is_focused(window)
+            || self
+                .structured_cell_input
+                .read(cx)
+                .focus_handle
+                .is_focused(window);
+        if !self.is_delimited_document() || !focused {
+            return false;
+        }
+        if self.structured_cell_input.read(cx).has_ime_composition() {
+            return false;
+        }
+        cx.stop_propagation();
+        let Some(selected) = self.structured_selected_cell else {
+            return true;
+        };
+        if self.structured_cell_edit.is_some() {
+            let value = self
+                .structured_cell_input
+                .read(cx)
+                .display_text()
+                .to_owned();
+            if !self.commit_structured_cell_edit(value, cx) {
+                return true;
+            }
+        }
+        let Some(next) = self.adjacent_structured_cell(selected, delta) else {
+            return true;
+        };
+        self.structured_selected_cell = Some(next);
+        self.structured_focus_handle.focus(window);
+        cx.notify();
+        true
+    }
+
+    /// Uses checked row-major offsets so stale selections and oversized indexes cannot wrap into another cell.
+    fn adjacent_structured_cell(
+        &self,
+        current: StructuredCellEdit,
+        delta: i32,
+    ) -> Option<StructuredCellEdit> {
+        let StructuredIndex::Delimited(index) = self.structured_index.as_ref()? else {
+            return None;
+        };
+        let columns = u64::try_from(index.column_count().max(1)).ok()?;
+        let slots = columns.checked_mul(index.record_count().checked_add(1)?)?;
+        let column = u64::try_from(current.column).ok()?;
+        if column >= columns {
+            return None;
+        }
+        let position = match current.record {
+            Some(record) if record < index.record_count() => record
+                .checked_add(1)?
+                .checked_mul(columns)?
+                .checked_add(column)?,
+            Some(_) => return None,
+            None => column,
+        };
+        if position >= slots {
+            return None;
+        }
+        let next = match delta.cmp(&0) {
+            std::cmp::Ordering::Less => position.checked_sub(1).unwrap_or(slots - 1),
+            std::cmp::Ordering::Greater if position + 1 == slots => 0,
+            std::cmp::Ordering::Greater => position + 1,
+            std::cmp::Ordering::Equal => position,
+        };
+        if next < columns {
+            Some(StructuredCellEdit {
+                record: None,
+                column: usize::try_from(next).ok()?,
+            })
+        } else {
+            Some(StructuredCellEdit {
+                record: Some(next / columns - 1),
+                column: usize::try_from(next % columns).ok()?,
+            })
         }
     }
 
@@ -171,7 +286,8 @@ impl DocumentHost {
             .cloned()
     }
 
-    fn on_structured_cell_host_action(
+    /// Commits and advances on cell Tab actions while consuming row commands that have no meaning inside one field.
+    pub(in crate::document_host) fn on_structured_cell_host_action(
         &mut self,
         action: BlockHostAction,
         window: &mut Window,
@@ -179,24 +295,74 @@ impl DocumentHost {
     ) {
         match action {
             BlockHostAction::Submit(value) => {
-                self.commit_structured_cell_edit(value.to_string(), cx);
-                self.focus_handle.focus(window);
+                if self.defer_source_action_for_ime(
+                    super::source_ime::DeferredSourceAction::HostInputSubmit {
+                        input: self.structured_cell_input.clone(),
+                    },
+                    window,
+                    cx,
+                ) {
+                    return;
+                }
+                let confirmed = self
+                    .structured_cell_input
+                    .read(cx)
+                    .display_text()
+                    .to_owned();
+                let value = if confirmed.is_empty() && !value.is_empty() {
+                    value.to_string()
+                } else {
+                    confirmed
+                };
+                if self.commit_structured_cell_edit(value, cx) {
+                    self.structured_focus_handle.focus(window);
+                }
+            }
+            BlockHostAction::LineOperation(operation) => {
+                if self.structured_cell_input.read(cx).has_ime_composition() {
+                    return;
+                }
+                let delta = match operation {
+                    crate::components::LineOperation::Indent => 1,
+                    crate::components::LineOperation::Outdent => -1,
+                    _ => return,
+                };
+                let Some(current) = self.structured_cell_edit else {
+                    return;
+                };
+                let Some(next) = self.adjacent_structured_cell(current, delta) else {
+                    return;
+                };
+                let value = self
+                    .structured_cell_input
+                    .read(cx)
+                    .display_text()
+                    .to_owned();
+                if self.commit_structured_cell_edit(value, cx) {
+                    self.structured_selected_cell = Some(next);
+                    self.structured_focus_handle.focus(window);
+                    cx.notify();
+                }
             }
             BlockHostAction::DismissTransientUi => {
+                if self.structured_cell_input.read(cx).has_ime_composition() {
+                    return;
+                }
                 self.structured_cell_edit = None;
-                self.focus_handle.focus(window);
+                self.structured_focus_handle.focus(window);
                 cx.notify();
             }
             _ => {}
         }
     }
 
-    fn commit_structured_cell_edit(&mut self, value: String, cx: &mut Context<Self>) {
-        let Some(target) = self.structured_cell_edit.take() else {
-            return;
+    /// Retains the edit target until its source transaction succeeds, allowing callers to keep focus on failure.
+    fn commit_structured_cell_edit(&mut self, value: String, cx: &mut Context<Self>) -> bool {
+        let Some(target) = self.structured_cell_edit else {
+            return false;
         };
         let Some(StructuredIndex::Delimited(index)) = self.structured_index.as_ref() else {
-            return;
+            return false;
         };
         let record = if let Some(record) = target.record {
             index
@@ -207,7 +373,7 @@ impl DocumentHost {
             index.read_header().ok().flatten()
         };
         let Some(mut record) = record else {
-            return;
+            return false;
         };
         let baseline_range = record.byte_range.clone();
         for (edited, override_value) in &self.structured_cell_overrides {
@@ -224,17 +390,23 @@ impl DocumentHost {
         record.fields[target.column] = value.clone();
         let current_range = self.current_structured_record_range(&baseline_range);
         let Some(document) = self.document.as_ref() else {
-            return;
+            return false;
         };
-        let terminator = document
-            .read_range(current_range.clone())
-            .ok()
-            .map(|bytes| delimited_record_terminator(&bytes))
-            .unwrap_or("\n");
+        let Ok(current_bytes) = document.read_range(current_range.clone()) else {
+            return false;
+        };
+        let terminator = delimited_record_terminator(&current_bytes);
         let replacement = serialize_delimited_record(&record.fields, index.delimiter(), terminator);
-        if self.replace_delimited_table_source_range(baseline_range.clone(), &replacement, cx) {
-            self.structured_cell_overrides.insert(target, value);
+        if current_bytes == replacement.as_bytes() {
+            self.structured_cell_edit = None;
+            return true;
         }
+        if !self.replace_delimited_table_source_range(baseline_range, &replacement, cx) {
+            return false;
+        }
+        self.structured_cell_edit = None;
+        self.structured_cell_overrides.insert(target, value);
+        true
     }
 
     /// 结构索引中的区间属于本轮连续编辑开始前的基线。后台重建完成前只需累加

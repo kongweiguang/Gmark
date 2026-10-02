@@ -246,6 +246,7 @@ pub(crate) fn shortcut_conflict_for(
     None
 }
 
+/// Converts a configurable command into a GPUI action while preserving its declared focus context.
 fn key_binding_for(
     command: ShortcutCommand,
     key: &str,
@@ -265,6 +266,8 @@ fn key_binding_for(
         ShortcutCommand::WordMoveRight => KeyBinding::new(key, WordMoveRight, context),
         ShortcutCommand::Home => KeyBinding::new(key, Home, context),
         ShortcutCommand::End => KeyBinding::new(key, End, context),
+        ShortcutCommand::MoveToDocumentStart => KeyBinding::new(key, MoveToDocumentStart, context),
+        ShortcutCommand::MoveToDocumentEnd => KeyBinding::new(key, MoveToDocumentEnd, context),
         ShortcutCommand::BlockUp => KeyBinding::new(key, BlockUp, context),
         ShortcutCommand::BlockDown => KeyBinding::new(key, BlockDown, context),
         ShortcutCommand::PageUp => KeyBinding::new(key, PageUp, context),
@@ -273,11 +276,23 @@ fn key_binding_for(
         ShortcutCommand::JumpToBottom => KeyBinding::new(key, JumpToBottom, context),
         ShortcutCommand::SelectLeft => KeyBinding::new(key, SelectLeft, context),
         ShortcutCommand::SelectRight => KeyBinding::new(key, SelectRight, context),
+        ShortcutCommand::SelectUp => KeyBinding::new(key, SelectUp, context),
+        ShortcutCommand::SelectDown => KeyBinding::new(key, SelectDown, context),
+        ShortcutCommand::SelectPageUp => KeyBinding::new(key, SelectPageUp, context),
+        ShortcutCommand::SelectPageDown => KeyBinding::new(key, SelectPageDown, context),
         ShortcutCommand::WordSelectLeft => KeyBinding::new(key, WordSelectLeft, context),
         ShortcutCommand::WordSelectRight => KeyBinding::new(key, WordSelectRight, context),
         ShortcutCommand::SelectHome => KeyBinding::new(key, SelectHome, context),
         ShortcutCommand::SelectEnd => KeyBinding::new(key, SelectEnd, context),
+        ShortcutCommand::SelectToDocumentStart => {
+            KeyBinding::new(key, SelectToDocumentStart, context)
+        }
+        ShortcutCommand::SelectToDocumentEnd => KeyBinding::new(key, SelectToDocumentEnd, context),
         ShortcutCommand::SelectAll => KeyBinding::new(key, SelectAll, context),
+        ShortcutCommand::DuplicateLine => KeyBinding::new(key, DuplicateLine, context),
+        ShortcutCommand::DeleteLine => KeyBinding::new(key, DeleteLine, context),
+        ShortcutCommand::MoveLineUp => KeyBinding::new(key, MoveLineUp, context),
+        ShortcutCommand::MoveLineDown => KeyBinding::new(key, MoveLineDown, context),
         ShortcutCommand::Copy => KeyBinding::new(key, Copy, context),
         ShortcutCommand::CopyAsMarkdown => KeyBinding::new(key, CopyAsMarkdown, context),
         ShortcutCommand::Cut => KeyBinding::new(key, Cut, context),

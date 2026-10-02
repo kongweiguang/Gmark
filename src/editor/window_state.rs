@@ -100,6 +100,7 @@ impl Editor {
         self.toggle_view_mode(cx);
     }
 
+    /// 正文与文档内公式/语言字段共用所属文档事务历史；工具字段不借用正文历史。
     pub(crate) fn on_undo(
         &mut self,
         action: &crate::components::Undo,
@@ -123,9 +124,20 @@ impl Editor {
             });
             return;
         }
+        let Some((surface, _)) = self.focused_document_history_target(window, cx) else {
+            return;
+        };
+        self.active_selection_surface = surface;
+        if !self.document_surface_is_editable_for(surface)
+            || self.defer_action_for_ime(action, window, cx)
+        {
+            return;
+        }
         self.undo_document(cx);
+        self.apply_pending_focus(window, cx);
     }
 
+    /// 正文与文档内公式/语言字段共用所属文档事务历史；工具字段不借用正文历史。
     pub(crate) fn on_redo(
         &mut self,
         action: &crate::components::Redo,
@@ -149,7 +161,17 @@ impl Editor {
             });
             return;
         }
+        let Some((surface, _)) = self.focused_document_history_target(window, cx) else {
+            return;
+        };
+        self.active_selection_surface = surface;
+        if !self.document_surface_is_editable_for(surface)
+            || self.defer_action_for_ime(action, window, cx)
+        {
+            return;
+        }
         self.redo_document(cx);
+        self.apply_pending_focus(window, cx);
     }
 
     pub(crate) fn on_save_document(
@@ -182,6 +204,7 @@ impl Editor {
         self.request_save_document(cx);
     }
 
+    /// 另存为对话框也等待原输入终态，不能在新路径窗口抢走候选焦点。
     pub(crate) fn on_save_document_as(
         &mut self,
         _action: &crate::components::SaveDocumentAs,
@@ -197,25 +220,14 @@ impl Editor {
                 return;
             }
             if let Some(host) = host {
-                let current_path = host.read(cx).path().to_path_buf();
-                let default_dir = current_path
-                    .parent()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_default();
-                let suggested_name = current_path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned());
-                let prompt = cx.prompt_for_new_path(&default_dir, suggested_name.as_deref());
-                let window_handle = window.window_handle();
-                let _ = cx.spawn(async move |_this, cx| {
-                    if let Ok(Ok(Some(path))) = prompt.await {
-                        let _ = host.update(cx, |host, cx| {
-                            host.save_as_path(path, window_handle, cx);
-                        });
-                    }
+                host.update(cx, |host, cx| {
+                    host.on_save_document_as(_action, window, cx);
                 });
                 return;
             }
+        }
+        if self.defer_action_for_ime(_action, window, cx) {
+            return;
         }
         self.request_save_document_as(cx);
     }
@@ -346,12 +358,16 @@ impl Editor {
         self.export_document_via_prompt(crate::export::ExportFormat::Png, window, cx);
     }
 
+    /// 退出申请等待系统组合输入终态，再进入应用级最后租约门禁。
     pub(crate) fn on_quit_application(
         &mut self,
-        _: &crate::components::QuitApplication,
-        _window: &mut Window,
+        action: &crate::components::QuitApplication,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.defer_action_for_ime(action, window, cx) {
+            return;
+        }
         crate::app_menu::request_quit_application(cx);
     }
 
@@ -404,7 +420,16 @@ impl Editor {
         self.set_view_mode(target, cx);
     }
 
+    /// 模式切换会更换输入投影，必须先等待原目标的系统组合输入终态。
     pub(crate) fn set_view_mode(&mut self, target: ViewMode, cx: &mut Context<Self>) {
+        if target != self.view_mode && self.has_active_ime_composition(cx) {
+            let tab = self.tabs.records.get(self.tabs.active).map(|tab| tab.id);
+            self.queue_ime_operation(
+                ime_lifecycle::DeferredImeOperation::Mode { tab, mode: target },
+                cx,
+            );
+            return;
+        }
         // 模式改变会替换内容坐标空间；父编辑器的菜单也不能跨视图继续存在。
         self.dismiss_contextual_overlays(cx);
         if self.is_svg_document() && target == ViewMode::Rendered {

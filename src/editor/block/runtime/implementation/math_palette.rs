@@ -49,6 +49,8 @@ impl Block {
         cx.stop_propagation();
     }
 
+    /// Leaves history shortcuts to the bound Editor action, avoiding a second host dispatch from
+    /// the raw key event and keeping configurable shortcut ownership at the document surface.
     pub(crate) fn on_math_structure_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -70,24 +72,6 @@ impl Block {
             cx.stop_propagation();
             return;
         }
-        if (modifiers.platform || modifiers.control) && !modifiers.alt {
-            match key {
-                "z" if modifiers.shift => {
-                    self.on_host_redo(&crate::components::Redo, window, cx);
-                    return;
-                }
-                "z" => {
-                    self.on_host_undo(&crate::components::Undo, window, cx);
-                    return;
-                }
-                "y" => {
-                    self.on_host_redo(&crate::components::Redo, window, cx);
-                    return;
-                }
-                _ => {}
-            }
-        }
-
         let navigated = if let Some(session) = self.math_edit_session.as_mut() {
             match key {
                 "left" => session

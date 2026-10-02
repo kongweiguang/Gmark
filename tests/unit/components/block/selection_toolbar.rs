@@ -90,6 +90,7 @@ fn overflow_menu_uses_safe_content_space_instead_of_toolbar_side() {
     assert!(available_height >= 174.0);
 }
 
+/// 拖动中的浮层会遮挡命中区域，因此只在手势结束后允许工具栏重新出现。
 #[gpui::test]
 async fn toolbar_supports_safe_cross_block_ranges_and_suppresses_unsafe_content(
     cx: &mut TestAppContext,
@@ -98,6 +99,11 @@ async fn toolbar_supports_safe_cross_block_ranges_and_suppresses_unsafe_content(
     block.update(cx, |block, _cx| {
         block.selected_range = 0..5;
         block.refresh_selection_toolbar();
+        assert!(block.selection_toolbar_visible());
+
+        block.is_selecting = true;
+        assert!(!block.selection_toolbar_visible());
+        block.is_selecting = false;
         assert!(block.selection_toolbar_visible());
 
         block.editor_selection_range = Some(0..5);

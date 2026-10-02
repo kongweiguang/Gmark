@@ -23,6 +23,8 @@ async fn virtualized_cross_block_format_is_one_transaction_and_preserves_unmount
                 entity_id: visible[2].entity.entity_id(),
                 offset: 2,
             },
+            source_anchor: None,
+            source_focus: None,
         });
         assert!(editor.apply_cross_block_inline_command(EditingCommandId::Bold, cx));
         assert!(
@@ -47,6 +49,7 @@ async fn virtualized_cross_block_format_is_one_transaction_and_preserves_unmount
 }
 
 #[gpui::test]
+/// Keeps tables atomic when deletion spans virtual regions and verifies the undo source boundary.
 async fn virtualized_cross_region_delete_treats_table_as_atomic_and_restores_on_undo(
     cx: &mut TestAppContext,
 ) {
@@ -72,6 +75,8 @@ async fn virtualized_cross_region_delete_treats_table_as_atomic_and_restores_on_
                 entity_id: visible[1].entity.entity_id(),
                 offset: 0,
             },
+            source_anchor: None,
+            source_focus: None,
         });
         assert!(editor.replace_cross_block_selection_with_text(
             "",

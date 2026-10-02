@@ -1,7 +1,7 @@
 // @author kongweiguang
 
 use super::super::ResourceTitleDialogState;
-use super::{ContextMenuState, Editor, TableInsertTarget};
+use super::{ContextMenuCommand, ContextMenuState, Editor, TableInsertTarget};
 use gpui::{AppContext, ClickEvent, KeyDownEvent, Keystroke, Point, TestAppContext, px, size};
 
 fn init_context_menu_test_app(cx: &mut TestAppContext) {
@@ -462,23 +462,32 @@ async fn spelling_suggestion_replaces_text_as_undoable_block_edit(cx: &mut TestA
     });
 }
 
+/// Uses the live resource snapshot while checking path canonicalization and undo restoration.
 #[gpui::test]
 async fn resource_title_dialog_canonicalizes_and_participates_in_undo_redo(
     cx: &mut TestAppContext,
 ) {
     init_context_menu_test_app(cx);
-    let editor = cx.new(|cx| {
-        Editor::from_markdown(cx, "[Old](./old.pdf \"gmark:resource\")".to_owned(), None)
-    });
+    let original_source = crate::components::ResourceRecord::from_parts(
+        "Old".to_owned(),
+        r"dir\spec.pdf".to_owned(),
+        None,
+        None,
+    )
+    .to_markdown();
+    let editor = cx.new(|cx| Editor::from_markdown(cx, original_source.clone(), None));
 
     editor.update(cx, |editor, cx| {
         let entity_id = editor.document.first_root().expect("resource").entity_id();
-        let previous = crate::components::ResourceRecord::from_parts(
-            "Old".to_owned(),
-            r"dir\spec.pdf".to_owned(),
-            None,
-            None,
-        );
+        let previous = editor
+            .document
+            .first_root()
+            .expect("resource")
+            .read(cx)
+            .record
+            .resource
+            .clone()
+            .expect("resource metadata");
         let input = cx.new(|cx| {
             let mut input = crate::components::Block::with_record(
                 cx,
@@ -501,14 +510,114 @@ async fn resource_title_dialog_canonicalizes_and_participates_in_undo_redo(
         assert_eq!(editor.undo_history.len(), 1);
 
         editor.undo_document(cx);
-        assert_eq!(
-            editor.source_document.text(),
-            "[Old](./old.pdf \"gmark:resource\")"
-        );
+        assert_eq!(editor.source_document.text(), original_source);
         editor.redo_document(cx);
         assert_eq!(
             editor.source_document.text(),
             "[spec.pdf](dir/spec.pdf \"gmark:resource\")"
+        );
+    });
+}
+
+/// Keeps resource editing commands inert on Preview while leaving the title dialog available to cancel.
+#[gpui::test]
+async fn resource_context_mutations_are_disabled_on_preview_surface(cx: &mut TestAppContext) {
+    init_context_menu_test_app(cx);
+    let (editor, visual) = cx.add_window_view(|_window, cx| {
+        let mut editor =
+            Editor::from_markdown(cx, "[Spec](./spec.pdf \"gmark:resource\")".to_owned(), None);
+        editor.set_view_mode(super::super::ViewMode::Preview, cx);
+        editor
+    });
+
+    editor.update_in(visual, |editor, window, cx| {
+        let block = editor.document.first_root().expect("resource").clone();
+        let entity_id = block.entity_id();
+        editor.context_menu = Some(ContextMenuState::Resource {
+            position: Point {
+                x: px(24.0),
+                y: px(24.0),
+            },
+            entity_id,
+        });
+
+        let model = editor.context_menu_command_model(cx);
+        for command in [
+            ContextMenuCommand::ResourceEditTitle,
+            ContextMenuCommand::ResourceReplace,
+            ContextMenuCommand::ResourceConvertLink,
+            ContextMenuCommand::ResourceDelete,
+            ContextMenuCommand::ResourceRelocate,
+        ] {
+            let entry = model
+                .main
+                .iter()
+                .find(|entry| entry.command == command)
+                .expect("resource command should remain visible");
+            assert!(!entry.enabled, "{command:?} must be disabled on Preview");
+        }
+        assert!(model.main.iter().any(|entry| {
+            entry.command == ContextMenuCommand::ResourceCopyAddress && entry.enabled
+        }));
+
+        let before = (
+            editor.source_document.text().to_owned(),
+            editor.source_document.revision(),
+            editor.undo_history.len(),
+        );
+        let click = ClickEvent::default();
+        editor.edit_resource_title_from_context_menu(&click, window, cx);
+        assert!(editor.resource_title_dialog.is_none());
+        editor.convert_resource_to_link_from_context_menu(&click, window, cx);
+        editor.delete_resource_from_context_menu(&click, window, cx);
+        editor.complete_resource_replacement(
+            entity_id,
+            crate::components::ResourceRecord::from_parts(
+                "Spec".to_owned(),
+                "./spec.pdf".to_owned(),
+                None,
+                None,
+            ),
+            std::path::PathBuf::from("unused.pdf"),
+            cx,
+        );
+        assert!(matches!(
+            editor.context_menu.as_ref(),
+            Some(ContextMenuState::Resource { .. })
+        ));
+
+        let input = cx.new(|cx| {
+            let mut input = crate::components::Block::with_record(
+                cx,
+                crate::components::BlockRecord::paragraph("Updated"),
+            );
+            input.set_source_raw_mode();
+            input
+        });
+        editor.resource_title_dialog = Some(ResourceTitleDialogState {
+            entity_id,
+            previous: crate::components::ResourceRecord::from_parts(
+                "Spec".to_owned(),
+                "./spec.pdf".to_owned(),
+                None,
+                None,
+            ),
+            input: input.clone(),
+        });
+        editor.confirm_resource_title_dialog(cx);
+        assert_eq!(
+            input.read(cx).display_text(),
+            "Updated",
+            "a read-only confirmation must preserve the user's title input"
+        );
+        assert!(editor.resource_title_dialog.is_some());
+        assert_eq!(
+            (
+                editor.source_document.text().to_owned(),
+                editor.source_document.revision(),
+                editor.undo_history.len(),
+            ),
+            before
         );
     });
 }

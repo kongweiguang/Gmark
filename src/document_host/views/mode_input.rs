@@ -6,17 +6,22 @@ use super::json_graph::json_graph_node_matches_query;
 use super::*;
 
 impl DocumentHost {
+    /// Runs search only after text is committed, keeping IME candidate refreshes off the document viewport.
     pub(super) fn on_search_input_event(
         &mut self,
         block: Entity<Block>,
         event: &BlockEvent,
         cx: &mut Context<Self>,
     ) {
-        if block == self.search_input && matches!(event, BlockEvent::Changed) {
+        if block == self.search_input
+            && matches!(event, BlockEvent::Changed)
+            && !block.read(cx).has_ime_composition()
+        {
             self.schedule_search(cx);
         }
     }
 
+    /// Advances search only after IME completion so candidate text cannot move the document viewport.
     pub(super) fn on_search_host_action(
         &mut self,
         action: BlockHostAction,
@@ -24,19 +29,32 @@ impl DocumentHost {
         cx: &mut Context<Self>,
     ) {
         if matches!(&action, BlockHostAction::Submit(_)) {
+            if self.defer_source_action_for_ime(
+                super::source_ime::DeferredSourceAction::HostInputSubmit {
+                    input: self.search_input.clone(),
+                },
+                window,
+                cx,
+            ) {
+                return;
+            }
             self.navigate_search(1, cx);
         } else {
             self.on_line_edit_host_action(action, window, cx);
         }
     }
 
+    /// Ignores transient composition text because it may otherwise switch modes before the user confirms it.
     pub(super) fn on_navigation_input_event(
         &mut self,
         block: Entity<Block>,
         event: &BlockEvent,
         cx: &mut Context<Self>,
     ) {
-        if block != self.navigation_input || !matches!(event, BlockEvent::Changed) {
+        if block != self.navigation_input
+            || !matches!(event, BlockEvent::Changed)
+            || block.read(cx).has_ime_composition()
+        {
             return;
         }
         let input = block.read(cx).display_text().trim().replace(['_', ','], "");
@@ -89,6 +107,7 @@ impl DocumentHost {
         cx.notify();
     }
 
+    /// Submits navigation after the field's IME terminal result has reached the Host.
     pub(super) fn on_navigation_host_action(
         &mut self,
         action: BlockHostAction,
@@ -96,6 +115,15 @@ impl DocumentHost {
         cx: &mut Context<Self>,
     ) {
         if matches!(&action, BlockHostAction::Submit(_)) {
+            if self.defer_source_action_for_ime(
+                super::source_ime::DeferredSourceAction::HostInputSubmit {
+                    input: self.navigation_input.clone(),
+                },
+                window,
+                cx,
+            ) {
+                return;
+            }
             self.navigation_visible = false;
             self.active_edit = None;
             self.focus_handle.focus(window);
@@ -105,13 +133,17 @@ impl DocumentHost {
         }
     }
 
+    /// Rebuilds structured filters only from committed text, so preedit updates do not restart projection work.
     pub(super) fn on_structured_filter_input_event(
         &mut self,
         block: Entity<Block>,
         event: &BlockEvent,
         cx: &mut Context<Self>,
     ) {
-        if block == self.structured_filter_input && matches!(event, BlockEvent::Changed) {
+        if block == self.structured_filter_input
+            && matches!(event, BlockEvent::Changed)
+            && !block.read(cx).has_ime_composition()
+        {
             if self.probe.format == DocumentFormat::Json {
                 let query = block.read(cx).display_text().trim().to_lowercase();
                 if let Some(id) = self.selected_projection_view.clone() {

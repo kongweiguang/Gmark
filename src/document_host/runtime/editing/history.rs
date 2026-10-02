@@ -5,9 +5,15 @@
 use super::*;
 
 impl DocumentHost {
-    /// Publish undo as an ordered recovery command after the Controller change,
-    /// preserving replay semantics without borrowing the live journal.
+    /// Waits for the current Source composition before undo so confirmed input is recorded before history moves.
     pub(crate) fn on_undo(&mut self, _: &Undo, window: &mut Window, cx: &mut Context<Self>) {
+        if self.defer_source_action_for_ime(
+            super::source_ime::DeferredSourceAction::Block(BlockHostAction::Undo),
+            window,
+            cx,
+        ) {
+            return;
+        }
         if self.saving || self.reloading {
             return;
         }
@@ -64,9 +70,15 @@ impl DocumentHost {
         }
     }
 
-    /// Publish redo through the same worker so Paged journals cannot lose a
-    /// command when save/reload work is concurrent with history navigation.
+    /// Waits for the current Source composition before redo so native candidate text never races history.
     pub(crate) fn on_redo(&mut self, _: &Redo, window: &mut Window, cx: &mut Context<Self>) {
+        if self.defer_source_action_for_ime(
+            super::source_ime::DeferredSourceAction::Block(BlockHostAction::Redo),
+            window,
+            cx,
+        ) {
+            return;
+        }
         if self.saving || self.reloading {
             return;
         }

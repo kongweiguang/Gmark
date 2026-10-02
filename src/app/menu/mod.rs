@@ -12,20 +12,20 @@ use gpui::*;
 
 use crate::components::{
     AddLanguageConfig, BlockKind, BoldSelection, CheckForUpdates, CloseTab, CloseWindow,
-    CodeSelection, CommandPalette, Copy, CopyAsMarkdown, Cut, EditingCommandHistory, ExportHtml,
-    ExportImage, ExportPdf, ExportSelection, FindInDocument, FindNext, FindPrevious,
-    FocusStructuredColumns, FocusStructuredFilter, HighlightSelection, InlineMathSelection,
-    InsertResource, InstallCliTool, ItalicSelection, LinkSelection, NewTab, NewWindow, NextTab,
-    NoRecentFiles, NormalizeLineEndingsCr, NormalizeLineEndingsCrLf, NormalizeLineEndingsLf,
-    OpenCrashReports, OpenFile, OpenFolder, OpenPreferences, OpenPrivacyPolicy, OpenRecentFile,
-    OpenSafeSource, Paste, PasteAsPlainText, PreviousTab, QuickOpen, QuitApplication, Redo,
-    ReopenClosedTab, ReplaceInDocument, SaveDocument, SaveDocumentAs, SelectAll, SelectLanguage,
-    SetBulletedList, SetCodeBlock, SetHeading1, SetHeading2, SetHeading3, SetHeading4, SetHeading5,
-    SetHeading6, SetNumberedList, SetParagraph, SetQuote, SetTaskList, ShowAbout, ShowDocumentInfo,
-    ShowDocumentOutline, ShowStructureView, ShowStructuredInspector, StrikethroughSelection,
-    SubscriptSelection, SuperscriptSelection, ToggleDocumentSidebar, ToggleFocusMode,
-    ToggleTypewriterMode, ToggleViewMode, ToggleWorkspace, UnderlineSelection, Undo,
-    UninstallCliTool,
+    CodeSelection, CommandPalette, Copy, CopyAsMarkdown, Cut, DeleteLine, DuplicateLine,
+    EditingCommandHistory, ExportHtml, ExportImage, ExportPdf, ExportSelection, FindInDocument,
+    FindNext, FindPrevious, FocusStructuredColumns, FocusStructuredFilter, HighlightSelection,
+    InlineMathSelection, InsertResource, InstallCliTool, ItalicSelection, LinkSelection,
+    MoveLineDown, MoveLineUp, NewTab, NewWindow, NextTab, NoRecentFiles, NormalizeLineEndingsCr,
+    NormalizeLineEndingsCrLf, NormalizeLineEndingsLf, OpenCrashReports, OpenFile, OpenFolder,
+    OpenPreferences, OpenPrivacyPolicy, OpenRecentFile, OpenSafeSource, Paste, PasteAsPlainText,
+    PreviousTab, QuickOpen, QuitApplication, Redo, ReopenClosedTab, ReplaceInDocument,
+    SaveDocument, SaveDocumentAs, SelectAll, SelectLanguage, SetBulletedList, SetCodeBlock,
+    SetHeading1, SetHeading2, SetHeading3, SetHeading4, SetHeading5, SetHeading6, SetNumberedList,
+    SetParagraph, SetQuote, SetTaskList, ShowAbout, ShowDocumentInfo, ShowDocumentOutline,
+    ShowStructureView, ShowStructuredInspector, StrikethroughSelection, SubscriptSelection,
+    SuperscriptSelection, ToggleDocumentSidebar, ToggleFocusMode, ToggleTypewriterMode,
+    ToggleViewMode, ToggleWorkspace, UnderlineSelection, Undo, UninstallCliTool,
 };
 use crate::config::{
     apply_configured_language, import_language_config_and_select, open_preferences_window,
@@ -69,8 +69,14 @@ pub(crate) fn menu_action_icon(action: &dyn Action) -> Option<&'static str> {
         Some("icon/ui/redo.svg")
     } else if action.is::<Cut>() {
         Some("icon/ui/scissors.svg")
-    } else if action.is::<Copy>() || action.is::<CopyAsMarkdown>() {
+    } else if action.is::<Copy>() || action.is::<CopyAsMarkdown>() || action.is::<DuplicateLine>() {
         Some("icon/ui/copy.svg")
+    } else if action.is::<DeleteLine>() {
+        Some("icon/ui/trash.svg")
+    } else if action.is::<MoveLineUp>() {
+        Some("icon/ui/arrow-up.svg")
+    } else if action.is::<MoveLineDown>() {
+        Some("icon/ui/arrow-down.svg")
     } else if action.is::<Paste>() || action.is::<PasteAsPlainText>() {
         Some("icon/ui/clipboard.svg")
     } else if action.is::<SelectAll>() {

@@ -110,8 +110,9 @@ impl Editor {
         Some(DetachedTab { snapshot })
     }
 
+    /// 异步保存与路径对话框都绑定原标签，完成前不得拆卸其 Controller。
     pub(crate) fn can_switch_tabs(&self) -> bool {
-        self.save_task.is_none() && self.export_task.is_none()
+        self.save_task.is_none() && self.save_prompt_task.is_none() && self.export_task.is_none()
     }
 
     pub(crate) fn capture_active_tab(&mut self, cx: &mut Context<Self>) -> DocumentTabSnapshot {
@@ -263,11 +264,21 @@ impl Editor {
         cx.notify();
     }
 
+    /// 标签安装会拆卸输入实体；候选终态前只记录意图，不抓取带预编辑的快照。
     pub(in crate::editor) fn switch_to_tab_index(
         &mut self,
         target: usize,
         cx: &mut Context<Self>,
     ) -> bool {
+        if target != self.tabs.active && self.has_active_ime_composition(cx) {
+            if let Some(tab) = self.tabs.records.get(target).map(|tab| tab.id) {
+                self.queue_ime_operation(
+                    crate::editor::ime_lifecycle::DeferredImeOperation::SwitchTab(tab),
+                    cx,
+                );
+            }
+            return false;
+        }
         if target == self.tabs.active
             || target >= self.tabs.records.len()
             || !self.can_switch_tabs()

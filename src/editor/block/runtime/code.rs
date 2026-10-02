@@ -262,6 +262,7 @@ impl Block {
 
     /// 替换 Live 代码块语言文本；只读投影没有事务所有权，因此任何输入路径都必须
     /// 在这里停止，而不能依赖上层控件是否恰好禁用。
+    /// Preserves existing keyboard behavior by classifying direct language edits as coalescible.
     pub(crate) fn replace_code_language_text_in_range(
         &mut self,
         range: Range<usize>,
@@ -270,11 +271,31 @@ impl Block {
         mark_inserted_text: bool,
         cx: &mut Context<Self>,
     ) {
+        self.replace_code_language_text_in_range_with_undo(
+            range,
+            new_text,
+            selected_range_relative,
+            mark_inserted_text,
+            UndoCaptureKind::CoalescibleText,
+            cx,
+        );
+    }
+
+    /// Lets IME commits seal one transaction without a second coalescible undo capture.
+    pub(crate) fn replace_code_language_text_in_range_with_undo(
+        &mut self,
+        range: Range<usize>,
+        new_text: &str,
+        selected_range_relative: Option<Range<usize>>,
+        mark_inserted_text: bool,
+        undo_kind: UndoCaptureKind,
+        cx: &mut Context<Self>,
+    ) {
         if self.is_read_only() || !self.kind().is_code_block() {
             return;
         }
 
-        self.prepare_undo_capture(UndoCaptureKind::CoalescibleText, cx);
+        self.prepare_undo_capture(undo_kind, cx);
 
         let current = self.code_language_text().to_string();
         let range = range.start.min(current.len())..range.end.min(current.len());

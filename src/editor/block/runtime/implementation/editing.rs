@@ -123,18 +123,24 @@ impl Block {
     ///
     /// Serializers later translate these flags back to markers on export.
     pub(crate) fn toggle_inline_format(&mut self, format: InlineFormat, cx: &mut Context<Self>) {
+        if self.is_read_only() {
+            return;
+        }
+        let command = match format {
+            InlineFormat::Bold => EditingCommandId::Bold,
+            InlineFormat::Italic => EditingCommandId::Italic,
+            InlineFormat::Strikethrough => EditingCommandId::Strikethrough,
+            InlineFormat::Underline => EditingCommandId::Underline,
+            InlineFormat::Highlight => EditingCommandId::Highlight,
+            InlineFormat::Superscript => EditingCommandId::Superscript,
+            InlineFormat::Subscript => EditingCommandId::Subscript,
+            InlineFormat::Code => EditingCommandId::InlineCode,
+        };
+        if self.defer_inline_command_if_composing(command, cx) {
+            return;
+        }
         if self.editor_selection_range.is_some() {
             if self.editor_selection_supports_inline_commands {
-                let command = match format {
-                    InlineFormat::Bold => EditingCommandId::Bold,
-                    InlineFormat::Italic => EditingCommandId::Italic,
-                    InlineFormat::Strikethrough => EditingCommandId::Strikethrough,
-                    InlineFormat::Underline => EditingCommandId::Underline,
-                    InlineFormat::Highlight => EditingCommandId::Highlight,
-                    InlineFormat::Superscript => EditingCommandId::Superscript,
-                    InlineFormat::Subscript => EditingCommandId::Subscript,
-                    InlineFormat::Code => EditingCommandId::InlineCode,
-                };
                 cx.emit(BlockEvent::RequestEditingCommand { command });
             }
             return;
@@ -174,6 +180,12 @@ impl Block {
 
     /// 显式格式命令保留选区方向，不套用键入闭合符时的光标逃逸规则。
     pub(crate) fn clear_inline_formatting(&mut self, cx: &mut Context<Self>) {
+        if self.is_read_only() {
+            return;
+        }
+        if self.defer_inline_command_if_composing(EditingCommandId::ClearFormatting, cx) {
+            return;
+        }
         if self.editor_selection_range.is_some() {
             if self.editor_selection_supports_inline_commands {
                 cx.emit(BlockEvent::RequestEditingCommand {
@@ -203,11 +215,18 @@ impl Block {
         );
     }
 
+    /// 插入数学命令等待原输入目标结束，避免候选期间替换其暂存范围。
     pub(crate) fn insert_inline_math(&mut self, cx: &mut Context<Self>) {
+        if self.is_read_only() {
+            return;
+        }
+        if self.defer_inline_command_if_composing(EditingCommandId::InlineMath, cx) {
+            return;
+        }
         if self.editor_selection_range.is_some() {
             return;
         }
-        if self.uses_raw_text_editing() || self.is_read_only() {
+        if self.uses_raw_text_editing() {
             return;
         }
         let range = self.selection_clean_range();
@@ -224,6 +243,12 @@ impl Block {
 
     /// 链接切换沿用选区事务，避免使用字符输入的闭合符亲和性。
     pub(crate) fn toggle_inline_link(&mut self, cx: &mut Context<Self>) {
+        if self.is_read_only() {
+            return;
+        }
+        if self.defer_inline_command_if_composing(EditingCommandId::Link, cx) {
+            return;
+        }
         if self.editor_selection_range.is_some() {
             return;
         }
@@ -274,34 +299,85 @@ impl Block {
             .unwrap_or(px(0.0))
     }
 
-    /// Attempt to move the cursor up (direction < 0) or down one visual line
-    /// within the current block.  Returns false if the cursor is already at
-    /// the first or last line, so the editor can transfer focus instead.
-    pub(in super::super) fn move_cursor_vertically(
-        &mut self,
-        direction: i32,
-        preferred_x: Pixels,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let Some(lines) = self.last_layout.as_ref() else {
-            return false;
+    /// Exposes the active visual-column anchor so Editor can preserve it when focus crosses blocks.
+    pub(crate) fn preferred_visual_x(&self) -> Pixels {
+        self.vertical_anchor_x()
+    }
+
+    /// Resolves Home/End against the current wrapped row and keeps CRLF's carriage return out of the text edge.
+    pub(crate) fn current_visual_line_boundary(&self, at_end: bool) -> usize {
+        let text = self.display_text();
+        let ranges = super::element::hard_line_ranges(text);
+        let (line_index, offset_in_line) =
+            super::element::line_index_for_offset(&ranges, self.cursor_offset());
+        let Some(line_range) = ranges.get(line_index) else {
+            return if at_end { text.len() } else { 0 };
+        };
+        let line_text = text.get(line_range.clone()).unwrap_or_default();
+        let fallback_local = if at_end {
+            line_range
+                .len()
+                .saturating_sub(usize::from(line_text.ends_with('\r')))
+        } else {
+            0
+        };
+        let Some(layout) = self
+            .last_layout
+            .as_ref()
+            .and_then(|lines| lines.get(line_index))
+        else {
+            return line_range.start + fallback_local;
+        };
+        let Some(row_range) = super::element::visual_row_range_for_offset(layout, offset_in_line)
+        else {
+            return line_range.start + fallback_local;
         };
 
+        let mut local = if at_end {
+            row_range.end
+        } else {
+            row_range.start
+        }
+        .min(line_range.len());
+        if at_end && local == line_range.len() && line_text.ends_with('\r') {
+            local = local.saturating_sub(1);
+        }
+        let mut target = line_range.start + local;
+        while target > line_range.start && !text.is_char_boundary(target) {
+            target -= 1;
+        }
+        target
+    }
+
+    /// Resolves the next visual-line caret offset without changing selection state.
+    /// Read-only planning lets extending motion preserve its original anchor.
+    fn vertical_cursor_target(&self, direction: i32, preferred_x: Pixels) -> Option<usize> {
+        self.vertical_cursor_target_from(self.cursor_offset(), direction, preferred_x)
+    }
+
+    /// Computes a vertical destination from an uncommitted focus so page movement can commit once.
+    fn vertical_cursor_target_from(
+        &self,
+        source_offset: usize,
+        direction: i32,
+        preferred_x: Pixels,
+    ) -> Option<usize> {
+        if direction == 0 {
+            return None;
+        }
+
+        let lines = self.last_layout.as_ref()?;
         let text = self.display_text();
         let ranges = super::element::hard_line_ranges(text);
         let (current_line_idx, offset_in_line) =
-            super::element::line_index_for_offset(&ranges, self.cursor_offset());
-        let Some(current_layout) = lines.get(current_line_idx) else {
-            return false;
-        };
-        let Some(current_position) = super::element::position_for_offset(
+            super::element::line_index_for_offset(&ranges, source_offset);
+        let current_layout = lines.get(current_line_idx)?;
+        let current_position = super::element::position_for_offset(
             current_layout,
             offset_in_line,
             self.last_line_height,
             true,
-        ) else {
-            return false;
-        };
+        )?;
 
         let current_y =
             super::element::wrapped_line_top(lines, self.last_line_height, current_line_idx)
@@ -312,30 +388,103 @@ impl Block {
             current_y + self.last_line_height + self.last_line_height / 2.0
         };
         if target_y < px(0.0) {
-            return false;
+            return None;
         }
 
         let total_height = lines.iter().fold(px(0.0), |height, line| {
             height + super::element::wrapped_line_height(line, self.last_line_height)
         });
         if target_y >= total_height {
+            return None;
+        }
+
+        let (target_line_idx, target_y_in_line) =
+            super::element::wrapped_line_for_y(lines, self.last_line_height, target_y)?;
+        let target_layout = lines.get(target_line_idx)?;
+        let target_offset_in_line = match target_layout
+            .closest_index_for_position(point(preferred_x, target_y_in_line), self.last_line_height)
+        {
+            Ok(offset) | Err(offset) => offset,
+        };
+        Some(ranges.get(target_line_idx)?.start + target_offset_in_line)
+    }
+
+    /// Moves by several visual rows with one state publication, preserving the same X and selection anchor.
+    pub(crate) fn move_cursor_by_visual_lines(
+        &mut self,
+        direction: i32,
+        line_count: usize,
+        extend_selection: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if direction == 0 || line_count == 0 {
             return false;
         }
 
-        let Some((target_line_idx, target_y_in_line)) =
-            super::element::wrapped_line_for_y(lines, self.last_line_height, target_y)
-        else {
+        let preferred_x = self.vertical_anchor_x();
+        let original_focus = self.cursor_offset();
+        let (anchor, _) = self.selection_anchor_focus();
+        let mut focus = original_focus;
+        for _ in 0..line_count {
+            let Some(next) = self.vertical_cursor_target_from(focus, direction, preferred_x) else {
+                break;
+            };
+            if next == focus {
+                break;
+            }
+            focus = next;
+        }
+        if focus == original_focus {
+            return false;
+        }
+
+        if extend_selection {
+            self.set_selection_from_anchor_focus(anchor, focus);
+            self.vertical_motion_x = Some(preferred_x);
+            self.cursor_blink_epoch = Instant::now();
+            self.sync_collapsed_caret_affinity();
+            cx.emit(BlockEvent::SelectionChanged);
+            cx.notify();
+        } else {
+            self.move_to_with_preferred_x(focus, Some(preferred_x), cx);
+        }
+        true
+    }
+
+    /// Moves one visual line while retaining the horizontal target across short rows.
+    /// A false result leaves state untouched so Editor can transfer focus at block edges.
+    pub(crate) fn move_cursor_vertically(
+        &mut self,
+        direction: i32,
+        preferred_x: Pixels,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(target) = self.vertical_cursor_target(direction, preferred_x) else {
             return false;
         };
-        let target_layout = &lines[target_line_idx];
-        let target_point = point(preferred_x, target_y_in_line);
-        let target_offset_in_line =
-            match target_layout.closest_index_for_position(target_point, self.last_line_height) {
-                Ok(idx) | Err(idx) => idx,
-            };
+        self.move_to_with_preferred_x(target, Some(preferred_x), cx);
+        true
+    }
 
-        let flat_offset = ranges[target_line_idx].start + target_offset_in_line;
-        self.move_to_with_preferred_x(flat_offset, Some(preferred_x), cx);
+    /// Extends selection by one visual line while keeping its source anchor stable.
+    /// Applying only the final range avoids exposing a temporary collapse to Editor subscribers.
+    pub(crate) fn select_cursor_vertically(
+        &mut self,
+        direction: i32,
+        preferred_x: Pixels,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let (anchor, _) = self.selection_anchor_focus();
+        let Some(focus) = self.vertical_cursor_target(direction, preferred_x) else {
+            return false;
+        };
+
+        self.set_selection_from_anchor_focus(anchor, focus);
+        self.vertical_motion_x = Some(preferred_x);
+        self.cursor_blink_epoch = Instant::now();
+        self.sync_collapsed_caret_affinity();
+        cx.emit(BlockEvent::SelectionChanged);
+        cx.notify();
         true
     }
 
@@ -435,7 +584,9 @@ impl Block {
         }
     }
 
+    /// 焦点或模式改变即丢弃手势锚点，迟到 mouse move 不能恢复旧选区。
     pub(crate) fn end_pointer_selection_session(&mut self) -> bool {
+        self.pointer_selection = None;
         let changed = self.is_selecting || self.code_language_is_selecting;
         self.is_selecting = false;
         self.code_language_is_selecting = false;
@@ -565,8 +716,10 @@ impl Block {
             .unwrap_or(expanded)
     }
 
+    /// Hit-tests the virtual text actually laid out, then removes any staged IME splice before returning.
     pub fn index_for_mouse_position(&self, position: Point<Pixels>) -> usize {
-        if self.display_text().is_empty() {
+        let layout_text = self.display_text_with_ime();
+        if layout_text.is_empty() {
             return 0;
         }
 
@@ -579,11 +732,10 @@ impl Block {
             return 0;
         }
         if position.y > bounds.bottom() {
-            return self.visible_len();
+            return self.display_text().len();
         }
 
-        let text = self.display_text();
-        let ranges = super::element::hard_line_ranges(text);
+        let ranges = super::element::hard_line_ranges(layout_text.as_ref());
         let relative_y = position.y - bounds.top();
         let Some((line_idx, y_in_line)) =
             super::element::wrapped_line_for_y(lines, self.last_line_height, relative_y)
@@ -599,7 +751,11 @@ impl Block {
         ) {
             Ok(idx) | Err(idx) => idx,
         };
-        ranges[line_idx].start + offset_in_line
+        ranges
+            .get(line_idx)
+            .map(|range| range.start.saturating_add(offset_in_line))
+            .map(|offset| self.pointer_layout_offset_to_baseline(offset))
+            .unwrap_or_else(|| self.display_text().len())
     }
 
     pub(crate) fn active_range_or_cursor_bounds(&self) -> Option<Bounds<Pixels>> {

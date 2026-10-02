@@ -87,6 +87,7 @@ impl Element for BlockTextElement {
         None
     }
 
+    /// Shapes the owning block's virtual IME text so paint and native range queries share offsets.
     fn request_layout(
         &mut self,
         _id: Option<&GlobalElementId>,
@@ -97,8 +98,8 @@ impl Element for BlockTextElement {
         let theme = cx.global::<ThemeManager>().current_arc();
         let wb = &theme.colors.workbench;
         let input = self.input.read(cx);
-        let shared_text = input.shared_display_text();
-        let is_placeholder = self.is_placeholder;
+        let shared_text = input.display_text_with_ime();
+        let is_placeholder = self.is_placeholder && shared_text.is_empty();
         let show_inline_code_backgrounds = !input.is_source_raw_mode();
         let show_source_line_numbers =
             input.show_source_line_numbers() || input.kind().is_code_block();
@@ -160,7 +161,9 @@ impl Element for BlockTextElement {
         let source_font = style.font();
         let theme_identity = Arc::as_ptr(&theme) as usize;
         let scale_bits = f32::from(window.rem_size()).to_bits();
-        let marked_range = input.marked_range.clone();
+        let marked_range = input
+            .ime_marked_range(&super::BlockImeCompositionOwner::BlockText)
+            .or_else(|| input.marked_range.clone());
         let source_line_number_gutter_width = show_source_line_numbers
             .then(|| source_line_number_gutter_width(source_line_count, font_size))
             .unwrap_or(px(0.0));
@@ -253,6 +256,7 @@ impl Element for BlockTextElement {
         )
     }
 
+    /// Computes selection and caret geometry against the visible candidate text rather than source.
     fn prepaint(
         &mut self,
         _id: Option<&GlobalElementId>,
@@ -265,15 +269,23 @@ impl Element for BlockTextElement {
         let theme = cx.global::<ThemeManager>().current_arc();
         let wb = &theme.colors.workbench;
         let input = self.input.read(cx);
+        let display_text = input.display_text_with_ime();
+        let is_placeholder = self.is_placeholder && display_text.is_empty();
         let editor_selection_range = input
             .editor_selection_range
             .as_ref()
             .filter(|range| !range.is_empty())
             .cloned();
-        let selected_range = editor_selection_range
-            .clone()
+        let ime_selection = input.ime_render_selection(&super::BlockImeCompositionOwner::BlockText);
+        let selected_range = ime_selection
+            .as_ref()
+            .map(|(range, _)| range.clone())
+            .or_else(|| editor_selection_range.clone())
             .unwrap_or_else(|| input.selected_range.clone());
-        let cursor = input.cursor_offset();
+        let cursor = ime_selection
+            .as_ref()
+            .map(|(range, reversed)| if *reversed { range.start } else { range.end })
+            .unwrap_or_else(|| input.cursor_offset());
         let line_height = window.line_height();
         let focused = input.focus_handle.is_focused(window);
         let show_inline_code_backgrounds = !input.is_source_raw_mode();
@@ -337,7 +349,7 @@ impl Element for BlockTextElement {
 
         let (selection_quads, cursor_quad) =
             if (focused || editor_selection_range.is_some()) && !lines.is_empty() {
-                if self.is_placeholder {
+                if is_placeholder {
                     // Placeholder: cursor after the placeholder text
                     let layout = &lines[0];
                     let origin_x = aligned_line_left(layout, text_bounds, text_align);
@@ -356,14 +368,13 @@ impl Element for BlockTextElement {
                     )
                 } else if selected_range.is_empty() {
                     // No selection: just draw the cursor
-                    let text = input.display_text();
                     (
                         vec![],
                         cursor_bounds_for_offset(
                             &lines,
                             text_bounds,
                             line_height,
-                            text,
+                            display_text.as_ref(),
                             cursor,
                             text_align,
                             px(cursor_width),
@@ -371,12 +382,11 @@ impl Element for BlockTextElement {
                         .map(|bounds| fill(bounds, cursor_color)),
                     )
                 } else {
-                    let text = input.display_text();
                     let quads = range_segment_bounds(
                         &lines,
                         text_bounds,
                         line_height,
-                        text,
+                        display_text.as_ref(),
                         selected_range,
                         text_align,
                     )
@@ -390,13 +400,13 @@ impl Element for BlockTextElement {
             };
 
         let active_source_line =
-            (focused && input.is_source_raw_mode() && !self.is_placeholder && !lines.is_empty())
+            (focused && input.is_source_raw_mode() && !is_placeholder && !lines.is_empty())
                 .then(|| {
                     cursor_bounds_for_offset(
                         &lines,
                         text_bounds,
                         line_height,
-                        input.display_text(),
+                        display_text.as_ref(),
                         cursor,
                         text_align,
                         px(cursor_width),
@@ -415,8 +425,8 @@ impl Element for BlockTextElement {
 
         // Compute code-span background quads with rounded corners and padding.
         let mut code_quads = Vec::new();
-        if show_inline_code_backgrounds && !self.is_placeholder {
-            let text = input.display_text();
+        if show_inline_code_backgrounds && !is_placeholder {
+            let text = display_text.as_ref();
             let code_color = theme.colors.code_bg;
             let pad_x = px(theme.dimensions.code_bg_pad_x);
             let pad_y = px(theme.dimensions.code_bg_pad_y);
@@ -425,12 +435,19 @@ impl Element for BlockTextElement {
                 if !span.style.code || span.range.is_empty() {
                     continue;
                 }
+                let visible_range = input.ime_visible_range(
+                    &super::BlockImeCompositionOwner::BlockText,
+                    span.range.clone(),
+                );
+                if visible_range.is_empty() {
+                    continue;
+                }
                 for segment in range_segment_bounds(
                     &lines,
                     text_bounds,
                     line_height,
                     text,
-                    span.range.clone(),
+                    visible_range.clone(),
                     text_align,
                 ) {
                     let quad_bounds = Bounds::from_corners(
@@ -462,6 +479,7 @@ impl Element for BlockTextElement {
         }
     }
 
+    /// Paints block text and consumes only samples matching its current revision and selection.
     fn paint(
         &mut self,
         _id: Option<&GlobalElementId>,
@@ -472,10 +490,11 @@ impl Element for BlockTextElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let (focus_handle, hovering_link) = {
+        let (focus_handle, hovering_link, input_snapshot) = {
             let input = self.input.read(cx);
             let text_bounds = source_text_bounds(bounds, prepaint.source_line_number_gutter_width);
             let hovering_link = !self.is_placeholder
+                && input.ime_composition_owner().is_none()
                 && !input.is_source_raw_mode()
                 && prepaint.hitbox.is_hovered(window)
                 && link_at_position(
@@ -486,7 +505,11 @@ impl Element for BlockTextElement {
                     window.mouse_position(),
                 )
                 .is_some();
-            (input.focus_handle.clone(), hovering_link)
+            (
+                input.focus_handle.clone(),
+                hovering_link,
+                input.input_paint_snapshot(crate::perf::InputPaintSurface::BlockText),
+            )
         };
 
         if hovering_link {
@@ -559,6 +582,13 @@ impl Element for BlockTextElement {
             )
             .ok();
             y_offset += wrapped_line_height(line, line_height);
+        }
+
+        for trace in crate::perf::take_input_to_gpui_paint(self.input.entity_id(), input_snapshot)
+            .into_iter()
+            .flatten()
+        {
+            trace.record_gpui_text_paint();
         }
 
         if focus_handle.is_focused(window)

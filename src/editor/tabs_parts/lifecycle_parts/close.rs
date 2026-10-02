@@ -305,11 +305,21 @@ impl Editor {
         self.tabs.closed.insert(insert_at, closed);
     }
 
+    /// 活动标签关闭必须先收尾候选，dirty 决策只能读取提交后的共享状态。
     pub(in crate::editor) fn request_close_tab_index(
         &mut self,
         index: usize,
         cx: &mut Context<Self>,
     ) {
+        if self.has_active_ime_composition(cx) {
+            if let Some(tab) = self.tabs.records.get(index).map(|tab| tab.id) {
+                self.queue_ime_operation(
+                    crate::editor::ime_lifecycle::DeferredImeOperation::CloseTab(tab),
+                    cx,
+                );
+            }
+            return;
+        }
         if index >= self.tabs.records.len() {
             return;
         }

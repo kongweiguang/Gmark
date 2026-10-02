@@ -2,8 +2,11 @@
 
 use gpui::{AppContext, Bounds, Context, TestAppContext, point, px, size};
 
-use super::{CrossBlockSelection, CrossBlockSelectionEndpoint, Editor};
-use crate::components::{BoldSelection, Cut, EditingCommandId, Undo, UndoCaptureKind};
+use super::{CrossBlockDrag, CrossBlockSelection, CrossBlockSelectionEndpoint, Editor};
+use crate::components::{
+    BoldSelection, Cut, EditingCommandId, PointerSelectionGranularity, PointerSelectionSession,
+    Undo, UndoCaptureKind,
+};
 use crate::i18n::I18nManager;
 use crate::theme::ThemeManager;
 
@@ -20,6 +23,7 @@ fn redraw(cx: &mut gpui::VisualTestContext) {
     cx.run_until_parked();
 }
 
+/// Builds a direction-preserving fixture selection so each case starts from the same endpoint contract.
 fn set_selection(
     editor: &mut Editor,
     start_index: usize,
@@ -40,6 +44,8 @@ fn set_selection(
             entity_id: end,
             offset: end_offset,
         },
+        source_anchor: None,
+        source_focus: None,
     });
     editor.sync_cross_block_selection_visuals(cx);
 }
@@ -90,6 +96,220 @@ fn mouse_down_starts_cross_block_drag_after_clearing_old_selection() {
                 .iter()
                 .all(|visible| visible.entity.read(cx).editor_selection_range.is_none())
         );
+    });
+    cx.quit();
+}
+
+/// Keeps same-block multi-click gestures local so the block owns word expansion.
+#[test]
+fn same_block_multiclick_drag_remains_owned_by_block_selection() {
+    let mut cx = TestAppContext::single();
+    init_editor_test_app(&mut cx);
+    let editor = cx.new(|cx| Editor::from_markdown(cx, "alpha beta gamma".to_string(), None));
+
+    editor.update(&mut cx, |editor, cx| {
+        assign_visible_block_bounds(editor, cx);
+        let block = editor.document.visible_blocks()[0].entity.clone();
+        let block_id = block.entity_id();
+        block.update(cx, |block, _cx| {
+            block.pointer_selection = Some(PointerSelectionSession {
+                anchor_range: 6..10,
+                granularity: PointerSelectionGranularity::Word,
+            });
+            block.selected_range = 6..10;
+            block.is_selecting = true;
+        });
+        editor.cross_block_drag = Some(CrossBlockDrag {
+            anchor: CrossBlockSelectionEndpoint {
+                entity_id: block_id,
+                offset: 8,
+            },
+            source_anchor: None,
+        });
+
+        editor.update_surface_pointer_selection(
+            crate::editor::selection_surface::SelectionSurface::Main,
+            point(px(24.0), px(4.0)),
+            cx,
+        );
+
+        assert!(editor.cross_block_selection.is_none());
+        assert_eq!(block.read(cx).selected_range, 6..10);
+    });
+    cx.quit();
+}
+
+/// Preserves the anchor word when a word-granularity drag reverses into another block.
+#[test]
+fn reverse_cross_block_word_drag_keeps_the_original_word_boundary() {
+    let mut cx = TestAppContext::single();
+    init_editor_test_app(&mut cx);
+    let editor = cx.new(|cx| Editor::from_markdown(cx, "zero one\n\nalpha beta".to_string(), None));
+
+    editor.update(&mut cx, |editor, cx| {
+        assign_visible_block_bounds(editor, cx);
+        let visible = editor.document.visible_blocks().to_vec();
+        let anchor = visible[1].entity.clone();
+        let focus = visible[0].entity.clone();
+        let anchor_id = anchor.entity_id();
+        let focus_id = focus.entity_id();
+        anchor.update(cx, |block, _cx| {
+            block.pointer_selection = Some(PointerSelectionSession {
+                anchor_range: 6..10,
+                granularity: PointerSelectionGranularity::Word,
+            });
+            block.selected_range = 6..10;
+            block.is_selecting = true;
+        });
+        editor.cross_block_drag = Some(CrossBlockDrag {
+            anchor: CrossBlockSelectionEndpoint {
+                entity_id: anchor_id,
+                offset: 8,
+            },
+            source_anchor: editor.cross_block_source_anchor_for_endpoint(
+                crate::editor::selection_surface::SelectionSurface::Main,
+                CrossBlockSelectionEndpoint {
+                    entity_id: anchor_id,
+                    offset: 8,
+                },
+                cx,
+            ),
+        });
+
+        editor.update_surface_pointer_selection(
+            crate::editor::selection_surface::SelectionSurface::Main,
+            point(px(24.0), px(4.0)),
+            cx,
+        );
+
+        let selection = editor
+            .cross_block_selection
+            .expect("cross-block word selection");
+        assert_eq!(
+            (selection.anchor, selection.focus),
+            (
+                CrossBlockSelectionEndpoint {
+                    entity_id: anchor_id,
+                    offset: 10,
+                },
+                CrossBlockSelectionEndpoint {
+                    entity_id: focus_id,
+                    offset: 0,
+                }
+            )
+        );
+        assert!(selection.source_anchor.is_some());
+        assert!(selection.source_focus.is_some());
+        assert_eq!(focus.read(cx).editor_selection_range, Some(0..8));
+        assert_eq!(anchor.read(cx).editor_selection_range, Some(0..10));
+    });
+    cx.quit();
+}
+
+/// Carries an existing focused selection anchor into a cross-block Shift drag.
+#[test]
+fn shift_drag_from_a_local_selection_keeps_its_focused_anchor_across_blocks() {
+    let mut cx = TestAppContext::single();
+    init_editor_test_app(&mut cx);
+    let (editor, visual) = cx.add_window_view(|_window, cx| {
+        Editor::from_markdown(cx, "alpha beta\n\ngamma delta".to_string(), None)
+    });
+    redraw(visual);
+
+    editor.update_in(visual, |editor, window, cx| {
+        assign_visible_block_bounds(editor, cx);
+        let visible = editor.document.visible_blocks().to_vec();
+        let anchor = visible[0].entity.clone();
+        let focus = visible[1].entity.clone();
+        let anchor_id = anchor.entity_id();
+        let focus_id = focus.entity_id();
+        anchor.update(cx, |block, _cx| {
+            block.selected_range = 2..4;
+            block.selection_reversed = false;
+            block.focus_handle.focus(window);
+        });
+
+        editor.begin_surface_cross_block_drag_at_point(
+            crate::editor::selection_surface::SelectionSurface::Main,
+            point(px(0.0), px(36.0)),
+            true,
+            Some(window),
+            cx,
+        );
+        editor.update_surface_pointer_selection(
+            crate::editor::selection_surface::SelectionSurface::Main,
+            point(px(0.0), px(36.0)),
+            cx,
+        );
+
+        let selection = editor
+            .cross_block_selection
+            .expect("shift cross-block selection");
+        assert_eq!(
+            (selection.anchor, selection.focus),
+            (
+                CrossBlockSelectionEndpoint {
+                    entity_id: anchor_id,
+                    offset: 2,
+                },
+                CrossBlockSelectionEndpoint {
+                    entity_id: focus_id,
+                    offset: 0,
+                }
+            )
+        );
+        assert!(selection.source_anchor.is_some());
+        assert!(selection.source_focus.is_some());
+    });
+}
+
+/// Keeps ordinary cross-block Copy visible while retaining Markdown for rich table paste.
+#[test]
+fn cross_block_visible_copy_uses_inline_text_and_table_tsv() {
+    let mut cx = TestAppContext::single();
+    init_editor_test_app(&mut cx);
+    let editor = cx.new(|cx| {
+        Editor::from_markdown(
+            cx,
+            "**bold**\n\n[linked](https://example.test)\n\n```rust\nlet answer = 42;\n```\n\n| label | value |\n| --- | --- |\n| x | 42 |\n\nfinish"
+                .to_owned(),
+            None,
+        )
+    });
+
+    editor.update(&mut cx, |editor, cx| {
+        let visible = editor.document.visible_blocks().to_vec();
+        let last = visible.len() - 1;
+        let end = visible[last].entity.read(cx).visible_len();
+        set_selection(editor, 0, 0, last, end, cx);
+
+        let plain = editor
+            .selected_visible_text_for_target(
+                crate::editor::selection_surface::SelectionSurface::Main,
+                &visible[0].entity,
+                cx,
+            )
+            .expect("the cross-block selection should have visible text");
+        assert_eq!(
+            plain,
+            "bold\n\nlinked\n\nlet answer = 42;\n\nlabel\tvalue\nx\t42\n\nfinish"
+        );
+        assert!(!plain.contains("**"));
+        assert!(!plain.contains("[linked]"));
+
+        let markdown = editor
+            .selected_markdown_text(cx)
+            .expect("the selection should retain Markdown for rich paste");
+        assert!(markdown.contains("**bold**"));
+        assert!(markdown.contains("[linked](https://example.test)"));
+        assert!(markdown.contains("```rust"));
+        assert!(markdown.contains("| label | value |"));
+        let html = crate::adapters::export::render_clipboard_fragment_with_base_dir(
+            &markdown,
+            cx.global::<ThemeManager>().current(),
+            None,
+        );
+        assert!(html.contains("<table"), "rich clipboard HTML: {html:?}");
     });
     cx.quit();
 }
@@ -319,6 +539,44 @@ fn cross_block_cut_writes_markdown_deletes_range_and_undo_restores() {
     });
 }
 
+/// Keeps document content, revision, and undo history intact when native clipboard acceptance fails.
+#[test]
+fn cut_preserves_document_when_native_clipboard_write_fails() {
+    let mut cx = TestAppContext::single();
+    init_editor_test_app(&mut cx);
+    let original = "alpha beta";
+    let (editor, visual) =
+        cx.add_window_view(|_window, cx| Editor::from_markdown(cx, original.to_owned(), None));
+    redraw(visual);
+
+    editor.update_in(visual, |editor, window, cx| {
+        let block = editor.document.visible_blocks()[0].entity.clone();
+        set_selection(editor, 0, 0, 0, 5, cx);
+        editor.focus_block(block.entity_id());
+        block.read(cx).focus_handle.focus(window);
+    });
+    redraw(visual);
+
+    let (source_before, revision_before, history_before) =
+        editor.read_with(visual, |editor, _cx| {
+            (
+                editor.source_document.text().to_owned(),
+                editor.source_document.revision(),
+                editor.undo_history.len(),
+            )
+        });
+    Editor::with_rich_clipboard_write_failure_for_test(|| {
+        visual.dispatch_action(Cut);
+        redraw(visual);
+    });
+
+    editor.read_with(visual, |editor, _cx| {
+        assert_eq!(editor.source_document.text(), source_before);
+        assert_eq!(editor.source_document.revision(), revision_before);
+        assert_eq!(editor.undo_history.len(), history_before);
+    });
+}
+
 const TABLE_DOC: &str = "alpha\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\ngamma";
 
 #[test]
@@ -523,20 +781,4 @@ fn source_selection_with_interior_utf8_offsets_does_not_panic() {
     cx.quit();
 }
 
-#[test]
-fn cross_block_unicode_endpoints_expand_to_complete_characters() {
-    let mut cx = TestAppContext::single();
-    init_editor_test_app(&mut cx);
-    let editor = cx.new(|cx| Editor::from_markdown(cx, "中a\n\n尾b".to_string(), None));
-
-    editor.update(&mut cx, |editor, cx| {
-        set_selection(editor, 0, 1, 1, 1, cx);
-        assert_eq!(
-            editor.cross_block_selected_markdown(cx).as_deref(),
-            Some("中a\n\n尾")
-        );
-        assert!(editor.delete_cross_block_selection(cx));
-        assert_eq!(editor.document.markdown_text(cx), "b");
-    });
-    cx.quit();
-}
+include!("selection_unicode.rs");

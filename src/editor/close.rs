@@ -502,11 +502,15 @@ impl Editor {
         }
     }
 
+    /// 系统关窗同样等待输入法终态，随后重走既有最后租约保存门禁。
     pub(crate) fn on_window_should_close(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.defer_action_for_ime(&crate::components::CloseWindow, window, cx) {
+            return false;
+        }
         self.mark_explicit_window_close(true);
         let should_close = self.evaluate_window_should_close(window, cx);
         if should_close {

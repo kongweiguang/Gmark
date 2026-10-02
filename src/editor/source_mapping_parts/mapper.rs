@@ -524,15 +524,34 @@ impl Editor {
         entity_id: EntityId,
         cx: &App,
     ) -> Option<SourceTargetMapping> {
+        self.build_source_target_mapping_and_range_for_entity(entity_id, cx)?
+            .0
+    }
+
+    /// Resolves one entity and its exact source span from only its resident root or virtual region.
+    pub(in crate::editor) fn build_source_target_mapping_and_range_for_entity(
+        &self,
+        entity_id: EntityId,
+        cx: &App,
+    ) -> Option<(Option<SourceTargetMapping>, Range<usize>)> {
         if let Some((range, roots)) = self
             .virtual_surface
             .as_ref()
             .and_then(|surface| surface.mapping_input_for_entity(entity_id))
         {
-            return self
-                .build_source_target_mappings_for_roots(&roots, range.start, cx)
+            let (mappings, block_ranges) = self
+                .build_source_target_mappings_with_block_ranges_for_roots(&roots, range.start, cx);
+            let mapping = mappings
                 .into_iter()
                 .find(|mapping| mapping.entity.entity_id() == entity_id);
+            // Some text-only targets have an inline mapping but no structural range entry.
+            // Preserve their old lookup behavior while atomic blocks still use exact block spans.
+            let block_range = block_ranges.get(&entity_id).cloned().or_else(|| {
+                mapping
+                    .as_ref()
+                    .map(|mapping| mapping.full_source_range.clone())
+            })?;
+            return Some((mapping, block_range));
         }
         let root_index = self.document.root_index_for_entity(entity_id)?;
         let absolute_start = self.document.cached_root_source_start(root_index)?;
@@ -548,17 +567,36 @@ impl Editor {
             &mut block_ranges,
             cx,
         );
-        mappings
+        let mapping = mappings
             .into_iter()
-            .find(|mapping| mapping.entity.entity_id() == entity_id)
+            .find(|mapping| mapping.entity.entity_id() == entity_id);
+        // Text-only targets can lack structural range entries; atomic blocks rely on block_ranges.
+        let block_range = block_ranges.get(&entity_id).cloned().or_else(|| {
+            mapping
+                .as_ref()
+                .map(|mapping| mapping.full_source_range.clone())
+        })?;
+        Some((mapping, block_range))
     }
 
-    fn build_source_target_mappings_for_roots(
+    /// Keeps callers that need only editable text maps on the same absolute region coordinate system.
+    pub(in crate::editor) fn build_source_target_mappings_for_roots(
         &self,
         roots: &[Entity<Block>],
         absolute_start: usize,
         cx: &App,
     ) -> Vec<SourceTargetMapping> {
+        self.build_source_target_mappings_with_block_ranges_for_roots(roots, absolute_start, cx)
+            .0
+    }
+
+    /// Builds mappings and atomic spans for one mounted region without visiting other document regions.
+    pub(in crate::editor) fn build_source_target_mappings_with_block_ranges_for_roots(
+        &self,
+        roots: &[Entity<Block>],
+        absolute_start: usize,
+        cx: &App,
+    ) -> (Vec<SourceTargetMapping>, HashMap<EntityId, Range<usize>>) {
         let mut mappings = Vec::new();
         let mut block_ranges = HashMap::new();
         let mut absolute = absolute_start;
@@ -573,6 +611,7 @@ impl Editor {
                 )
             });
             if is_empty {
+                block_ranges.insert(block.entity_id(), absolute..absolute);
                 pending_empty_roots += 1;
                 continue;
             }
@@ -598,7 +637,7 @@ impl Editor {
             pending_empty_roots = 0;
             previous_was_list_item = is_list_item;
         }
-        mappings
+        (mappings, block_ranges)
     }
 
     /// Like [`Self::build_source_target_mappings`], but also returns the source

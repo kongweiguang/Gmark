@@ -6,12 +6,14 @@ use gmark_i18n::{
 };
 use std::sync::Arc;
 
+/// Locks catalog cardinality and editing shortcut translations across locales.
 #[test]
 fn builtins_preserve_the_complete_ui_key_set() {
     let english = I18nCatalog::new_with_language_id(BUILTIN_LANGUAGE_EN_US_ID).strings_clone();
     let chinese = I18nCatalog::new_with_language_id(BUILTIN_LANGUAGE_ZH_CN_ID).strings_clone();
 
-    assert_eq!(english.scalars().len(), 425);
+    assert_eq!(english.scalars().len(), 437);
+    assert_eq!(chinese.scalars().len(), 437);
     assert_eq!(
         english.scalars().keys().collect::<Vec<_>>(),
         chinese.scalars().keys().collect::<Vec<_>>()
@@ -215,6 +217,69 @@ fn builtins_preserve_the_complete_ui_key_set() {
         chinese.get("status_bar_shared_views_template"),
         Some("{count} 个视图")
     );
+
+    let editing_shortcuts = [
+        ("preferences_shortcut_delete_line", "Delete line", "删除行"),
+        (
+            "preferences_shortcut_duplicate_line",
+            "Duplicate line",
+            "复制行",
+        ),
+        (
+            "preferences_shortcut_move_line_down",
+            "Move line down",
+            "下移行",
+        ),
+        (
+            "preferences_shortcut_move_line_up",
+            "Move line up",
+            "上移行",
+        ),
+        (
+            "preferences_shortcut_move_to_document_end",
+            "Move caret to document end",
+            "光标移至文档末尾",
+        ),
+        (
+            "preferences_shortcut_move_to_document_start",
+            "Move caret to document start",
+            "光标移至文档开头",
+        ),
+        (
+            "preferences_shortcut_select_down",
+            "Extend selection down",
+            "向下扩展选区",
+        ),
+        (
+            "preferences_shortcut_select_page_down",
+            "Extend selection one page down",
+            "向下扩展一页选区",
+        ),
+        (
+            "preferences_shortcut_select_page_up",
+            "Extend selection one page up",
+            "向上扩展一页选区",
+        ),
+        (
+            "preferences_shortcut_select_to_document_end",
+            "Select to document end",
+            "扩展选区至文档末尾",
+        ),
+        (
+            "preferences_shortcut_select_to_document_start",
+            "Select to document start",
+            "扩展选区至文档开头",
+        ),
+        (
+            "preferences_shortcut_select_up",
+            "Extend selection up",
+            "向上扩展选区",
+        ),
+    ];
+    for (key, expected_english, expected_chinese) in editing_shortcuts {
+        assert_eq!(english.get(key), Some(expected_english));
+        assert_eq!(chinese.get(key), Some(expected_chinese));
+    }
 
     for value in english.scalars().values().chain(chinese.scalars().values()) {
         assert!(!value.trim().is_empty());

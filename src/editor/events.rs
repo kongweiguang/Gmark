@@ -32,6 +32,8 @@ impl Editor {}
 
 #[path = "events_parts/commands.rs"]
 mod commands;
+#[path = "events_parts/focus.rs"]
+mod focus;
 #[path = "input/events/image_insert.rs"]
 mod image_insert;
 #[path = "events_parts/input.rs"]

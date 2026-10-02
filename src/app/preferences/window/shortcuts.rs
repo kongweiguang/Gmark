@@ -20,6 +20,7 @@ impl PreferencesWindow {
         }
     }
 
+    /// Keeps commands recognizable in settings and conflict prompts in each built-in language.
     pub(super) fn shortcut_command_label(
         command: ShortcutCommand,
         strings: &crate::i18n::I18nStrings,
@@ -42,6 +43,12 @@ impl PreferencesWindow {
             ShortcutCommand::WordMoveRight => strings.preferences_shortcut_word_move_right.clone(),
             ShortcutCommand::Home => strings.preferences_shortcut_home.clone(),
             ShortcutCommand::End => strings.preferences_shortcut_end.clone(),
+            ShortcutCommand::MoveToDocumentStart => {
+                strings.preferences_shortcut_move_to_document_start.clone()
+            }
+            ShortcutCommand::MoveToDocumentEnd => {
+                strings.preferences_shortcut_move_to_document_end.clone()
+            }
             ShortcutCommand::BlockUp => strings.preferences_shortcut_block_up.clone(),
             ShortcutCommand::BlockDown => strings.preferences_shortcut_block_down.clone(),
             ShortcutCommand::PageUp => strings.preferences_shortcut_page_up.clone(),
@@ -50,6 +57,12 @@ impl PreferencesWindow {
             ShortcutCommand::JumpToBottom => strings.preferences_shortcut_jump_to_bottom.clone(),
             ShortcutCommand::SelectLeft => strings.preferences_shortcut_select_left.clone(),
             ShortcutCommand::SelectRight => strings.preferences_shortcut_select_right.clone(),
+            ShortcutCommand::SelectUp => strings.preferences_shortcut_select_up.clone(),
+            ShortcutCommand::SelectDown => strings.preferences_shortcut_select_down.clone(),
+            ShortcutCommand::SelectPageUp => strings.preferences_shortcut_select_page_up.clone(),
+            ShortcutCommand::SelectPageDown => {
+                strings.preferences_shortcut_select_page_down.clone()
+            }
             ShortcutCommand::WordSelectLeft => {
                 strings.preferences_shortcut_word_select_left.clone()
             }
@@ -58,7 +71,17 @@ impl PreferencesWindow {
             }
             ShortcutCommand::SelectHome => strings.preferences_shortcut_select_home.clone(),
             ShortcutCommand::SelectEnd => strings.preferences_shortcut_select_end.clone(),
+            ShortcutCommand::SelectToDocumentStart => strings
+                .preferences_shortcut_select_to_document_start
+                .clone(),
+            ShortcutCommand::SelectToDocumentEnd => {
+                strings.preferences_shortcut_select_to_document_end.clone()
+            }
             ShortcutCommand::SelectAll => strings.preferences_shortcut_select_all.clone(),
+            ShortcutCommand::DuplicateLine => strings.preferences_shortcut_duplicate_line.clone(),
+            ShortcutCommand::DeleteLine => strings.preferences_shortcut_delete_line.clone(),
+            ShortcutCommand::MoveLineUp => strings.preferences_shortcut_move_line_up.clone(),
+            ShortcutCommand::MoveLineDown => strings.preferences_shortcut_move_line_down.clone(),
             ShortcutCommand::Copy => strings.preferences_shortcut_copy.clone(),
             ShortcutCommand::CopyAsMarkdown => {
                 strings.preferences_shortcut_copy_as_markdown.clone()

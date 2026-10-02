@@ -200,6 +200,7 @@ fn build_menus_uses_english_fallback_by_default() {
     assert!(menus.iter().all(|menu| menu.name.as_ref() != "Format"));
 }
 
+/// Global menus are built without an editor target, so document-only commands stay contextual.
 #[test]
 fn navigation_keeps_only_global_non_editor_capabilities() {
     let theme_manager = ThemeManager::default();

@@ -13,6 +13,7 @@ use super::{
         compact_menu_panel_height, dialog_actions, dialog_body, dialog_button, dialog_panel,
         dialog_title_with_icon, floating_submenu_x, menu_icon_slot, modal_overlay,
     },
+    selection_surface::SelectionSurface,
     workspace::WorkspaceOperationKind,
 };
 use crate::components::{
@@ -74,6 +75,13 @@ pub(super) enum ContextMenuState {
         position: Point<Pixels>,
         path: std::path::PathBuf,
     },
+    /// Text commands stay bound to the pane and hit target that opened them.
+    Text {
+        position: Point<Pixels>,
+        surface: SelectionSurface,
+        entity_id: EntityId,
+        insert_target: TableInsertTarget,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,6 +128,17 @@ enum ContextMenuCommand {
     TabTogglePin,
     TabClose,
     TabCloseOthers,
+    TextOpenLink,
+    TextCopy,
+    TextCopyAsMarkdown,
+    TextCut,
+    TextPaste,
+    TextSelectAll,
+    TextDuplicateLine,
+    TextDeleteLine,
+    TextMoveLineUp,
+    TextMoveLineDown,
+    TextInsert,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,156 +161,6 @@ pub(super) struct TableInsertDialogState {
 }
 
 impl Editor {
-    fn context_menu_command_model(&self, cx: &App) -> ContextMenuCommandModel {
-        let entry = |command, enabled| ContextMenuCommandEntry { command, enabled };
-        if let Some((_index, _pinned, can_close_others)) = self.tab_context_menu_info() {
-            return ContextMenuCommandModel {
-                main: vec![
-                    entry(ContextMenuCommand::TabTogglePin, true),
-                    entry(ContextMenuCommand::TabClose, true),
-                    entry(ContextMenuCommand::TabCloseOthers, can_close_others),
-                ],
-                submenu: Vec::new(),
-            };
-        }
-
-        let Some(menu) = self.context_menu.as_ref() else {
-            return ContextMenuCommandModel::default();
-        };
-        match menu {
-            ContextMenuState::Insert { .. } => ContextMenuCommandModel {
-                main: vec![entry(ContextMenuCommand::OpenInsertSubmenu, true)],
-                submenu: INSERT_COMMANDS
-                    .into_iter()
-                    .map(|command| entry(ContextMenuCommand::Insert(command), true))
-                    .collect(),
-            },
-            ContextMenuState::Spelling { diagnostic, .. } => ContextMenuCommandModel {
-                main: diagnostic
-                    .replacements
-                    .iter()
-                    .enumerate()
-                    .map(|(index, _)| entry(ContextMenuCommand::SpellingSuggestion(index), true))
-                    .collect(),
-                submenu: Vec::new(),
-            },
-            ContextMenuState::Resource { entity_id, .. } => {
-                let Some(_block) = self.focusable_entity_by_id(*entity_id) else {
-                    return ContextMenuCommandModel::default();
-                };
-                let Some(resource) = self.resource_context_record(cx) else {
-                    return ContextMenuCommandModel::default();
-                };
-                let local = resource.local_path().is_some();
-                let missing = matches!(
-                    self.resource_context_status(cx),
-                    Some(ResourceStatus::Missing)
-                );
-                ContextMenuCommandModel {
-                    main: vec![
-                        entry(ContextMenuCommand::ResourceOpen, !resource.is_unsafe_url()),
-                        entry(ContextMenuCommand::ResourceReveal, local),
-                        entry(ContextMenuCommand::ResourceEditTitle, true),
-                        entry(ContextMenuCommand::ResourceReplace, true),
-                        entry(ContextMenuCommand::ResourceCopyAddress, true),
-                        entry(ContextMenuCommand::ResourceConvertLink, true),
-                        entry(ContextMenuCommand::ResourceDelete, true),
-                        entry(ContextMenuCommand::ResourceRelocate, missing),
-                    ],
-                    submenu: Vec::new(),
-                }
-            }
-            ContextMenuState::TableAxis { selection, .. } => {
-                let Some(table) = self
-                    .table_block_by_id(selection.table_block_id, cx)
-                    .and_then(|block| block.read(cx).record.table.clone())
-                else {
-                    return ContextMenuCommandModel::default();
-                };
-                let main = match selection.kind {
-                    TableAxisKind::Column => vec![
-                        entry(ContextMenuCommand::InsertColumnBefore, true),
-                        entry(ContextMenuCommand::InsertColumnAfter, true),
-                        entry(ContextMenuCommand::DuplicateColumn, true),
-                        entry(ContextMenuCommand::AlignColumnLeft, true),
-                        entry(ContextMenuCommand::AlignColumnCenter, true),
-                        entry(ContextMenuCommand::AlignColumnRight, true),
-                        entry(ContextMenuCommand::MoveColumnLeft, selection.index > 0),
-                        entry(
-                            ContextMenuCommand::MoveColumnRight,
-                            selection.index + 1 < table.column_count(),
-                        ),
-                        entry(ContextMenuCommand::DeleteColumn, table.column_count() > 1),
-                        entry(ContextMenuCommand::DeleteTable, true),
-                    ],
-                    TableAxisKind::Row if selection.index == 0 => vec![
-                        entry(ContextMenuCommand::InsertRowBefore, true),
-                        entry(ContextMenuCommand::InsertRowAfter, true),
-                        entry(ContextMenuCommand::DuplicateRow, true),
-                        entry(ContextMenuCommand::ToggleTableHeaders, true),
-                        entry(ContextMenuCommand::MoveRowUp, false),
-                        entry(
-                            ContextMenuCommand::MoveRowDown,
-                            selection.index < table.rows.len(),
-                        ),
-                        entry(ContextMenuCommand::DeleteRow, !table.rows.is_empty()),
-                        entry(ContextMenuCommand::DeleteTable, true),
-                    ],
-                    TableAxisKind::Row => vec![
-                        entry(ContextMenuCommand::InsertRowBefore, true),
-                        entry(ContextMenuCommand::InsertRowAfter, true),
-                        entry(ContextMenuCommand::DuplicateRow, true),
-                        entry(ContextMenuCommand::MoveRowUp, selection.index > 0),
-                        entry(
-                            ContextMenuCommand::MoveRowDown,
-                            selection.index < table.rows.len(),
-                        ),
-                        entry(ContextMenuCommand::DeleteRow, true),
-                        entry(ContextMenuCommand::DeleteTable, true),
-                    ],
-                };
-                ContextMenuCommandModel {
-                    main,
-                    submenu: Vec::new(),
-                }
-            }
-            ContextMenuState::Workspace { .. } => ContextMenuCommandModel {
-                main: vec![
-                    entry(
-                        ContextMenuCommand::WorkspaceOpen,
-                        self.workspace_context_target_is_file(),
-                    ),
-                    entry(ContextMenuCommand::WorkspaceReveal, true),
-                    entry(ContextMenuCommand::WorkspaceCopyPath, true),
-                    entry(
-                        ContextMenuCommand::WorkspaceCopyRelativePath,
-                        !self.workspace_context_target_is_root(),
-                    ),
-                    entry(ContextMenuCommand::WorkspaceNewFile, true),
-                    entry(ContextMenuCommand::WorkspaceNewFolder, true),
-                    entry(
-                        ContextMenuCommand::WorkspaceRename,
-                        !self.workspace_context_target_is_root(),
-                    ),
-                    entry(
-                        ContextMenuCommand::WorkspaceMove,
-                        !self.workspace_context_target_is_root(),
-                    ),
-                    entry(ContextMenuCommand::WorkspaceRefresh, true),
-                    entry(
-                        ContextMenuCommand::WorkspaceUndo,
-                        self.workspace_can_undo_file_operation(),
-                    ),
-                    entry(
-                        ContextMenuCommand::WorkspaceDelete,
-                        !self.workspace_context_target_is_root(),
-                    ),
-                ],
-                submenu: Vec::new(),
-            },
-        }
-    }
-
     fn adjacent_context_menu_entry(
         entries: &[ContextMenuCommandEntry],
         current: Option<usize>,
@@ -352,6 +221,7 @@ impl Editor {
         }
     }
 
+    /// Routes text commands through pane-bound handlers so the menu cannot retarget after focus changes.
     fn execute_context_menu_command(
         &mut self,
         command: ContextMenuCommand,
@@ -480,9 +350,23 @@ impl Editor {
                     self.request_close_other_tabs(index, cx);
                 }
             }
+            command @ (ContextMenuCommand::TextOpenLink
+            | ContextMenuCommand::TextCopy
+            | ContextMenuCommand::TextCopyAsMarkdown
+            | ContextMenuCommand::TextCut
+            | ContextMenuCommand::TextPaste
+            | ContextMenuCommand::TextSelectAll
+            | ContextMenuCommand::TextDuplicateLine
+            | ContextMenuCommand::TextDeleteLine
+            | ContextMenuCommand::TextMoveLineUp
+            | ContextMenuCommand::TextMoveLineDown
+            | ContextMenuCommand::TextInsert) => {
+                self.execute_text_context_menu_command(command, window, cx)
+            }
         }
     }
 
+    /// Keeps keyboard input local to the menu and restores document focus after dismissal.
     pub(super) fn handle_context_menu_key(
         &mut self,
         event: &KeyDownEvent,
@@ -553,12 +437,12 @@ impl Editor {
                     .and_then(|index| model.main.get(index))
                     .filter(|entry| entry.enabled)
                     .map(|entry| entry.command);
-                if command == Some(ContextMenuCommand::OpenInsertSubmenu) {
-                    self.execute_context_menu_command(
-                        ContextMenuCommand::OpenInsertSubmenu,
-                        window,
-                        cx,
-                    );
+                if matches!(
+                    command,
+                    Some(ContextMenuCommand::OpenInsertSubmenu | ContextMenuCommand::TextInsert)
+                ) && let Some(command) = command
+                {
+                    self.execute_context_menu_command(command, window, cx);
                 }
             }
             "enter" => {
@@ -717,6 +601,8 @@ impl Editor {
     }
 }
 
+#[path = "context_menu_parts/command_model.rs"]
+mod command_model;
 #[path = "context_menu_parts/controller.rs"]
 mod controller;
 #[path = "context_menu_parts/menu_view.rs"]
@@ -725,6 +611,8 @@ mod menu_view;
 mod table_axis_view;
 #[path = "context_menu_parts/table_dialog.rs"]
 mod table_dialog;
+#[path = "context_menu_parts/text_menu_view.rs"]
+mod text_menu_view;
 
 #[cfg(test)]
 #[path = "../../tests/unit/editor/context_menu.rs"]

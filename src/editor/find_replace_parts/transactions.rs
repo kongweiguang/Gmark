@@ -3,14 +3,17 @@
 use super::*;
 
 impl Editor {
-    /// 所有替换共享一个 Rope transaction；失败时 projection、dirty 与 undo 均保持不变。
-    pub(super) fn apply_find_edits(
+    /// 替换与常驻批量行命令共用 Rope 事务和投影恢复，失败时不产生部分正文或撤销记录。
+    pub(in crate::editor) fn apply_find_edits(
         &mut self,
         edits: Vec<TextEdit>,
         selection: Range<usize>,
         cx: &mut Context<Self>,
     ) -> bool {
-        if edits.is_empty() || self.view_mode == super::ViewMode::Preview {
+        if edits.is_empty()
+            || !self.document_surface_is_editable()
+            || self.has_active_ime_composition(cx)
+        {
             return false;
         }
         self.finalize_pending_undo_capture(cx);

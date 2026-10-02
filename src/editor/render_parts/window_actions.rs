@@ -82,7 +82,22 @@ impl Editor {
         self.close_guard_installed = true;
     }
 
-    pub(super) fn apply_pending_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// 焦点转移等待原输入目标收尾，避免平台结果被提交到新块。
+    pub(in crate::editor) fn apply_pending_focus(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .pending_focus
+            .and_then(|id| self.focusable_entity_by_id(id))
+            .is_some_and(|block| block.read(cx).focus_handle.is_focused(window))
+        {
+            self.pending_focus = None;
+        }
+        if self.pending_focus.is_some() && self.wait_for_ime_completion(window, cx) {
+            return;
+        }
         if let Some(entity_id) = self.pending_focus.take()
             && let Some(block) = self.focusable_entity_by_id(entity_id)
         {
@@ -184,15 +199,31 @@ impl Editor {
         }));
     }
 
-    pub(super) fn sync_pending_save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// 保存只读取已提交正文；保持 pending 请求直到候选确认为事务或明确取消。
+    pub(in crate::editor) fn sync_pending_save(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.pending_save {
+            if self.wait_for_ime_completion(window, cx) {
+                return;
+            }
             self.pending_save = false;
             self.save_document(window, cx);
         }
     }
 
-    pub(super) fn sync_pending_save_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// 另存为不能在组合输入中途抓取快照，取消输入后仍执行用户保存意图。
+    pub(in crate::editor) fn sync_pending_save_as(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.pending_save_as {
+            if self.wait_for_ime_completion(window, cx) {
+                return;
+            }
             self.pending_save_as = false;
             self.save_document_as(window, cx);
         }

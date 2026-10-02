@@ -16,6 +16,7 @@ impl DocumentHost {
         );
     }
 
+    /// 切换 Host 视图时同步结束 Source 拖选，并清除只属于旧输入目标的编辑焦点。
     pub(super) fn set_view_mode(&mut self, mode: DocumentHostViewMode, cx: &mut Context<Self>) {
         if matches!(
             mode,
@@ -24,6 +25,9 @@ impl DocumentHost {
             && !self.is_delimited_document()
         {
             return;
+        }
+        if self.view_mode != mode {
+            self.end_source_pointer_selection();
         }
         self.active_edit = None;
         self.view_mode = mode;

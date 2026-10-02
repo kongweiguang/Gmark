@@ -28,7 +28,7 @@
   </picture>
 </div>
 
-Gmark 使用 Rust 与 GPUI 构建。文档始终是磁盘上的普通文件：不需要账号，不会为了编辑而上传内容，也不会把 Markdown 转换成专有格式。当前版本为 **v0.2.7**。
+Gmark 使用 Rust 与 GPUI 构建。文档始终是磁盘上的普通文件：不需要账号，不会为了编辑而上传内容，也不会把 Markdown 转换成专有格式。当前版本为 **v0.2.8**。
 
 ## 一份文件，四种视图
 
@@ -156,11 +156,24 @@ Source 内置语言识别覆盖 Rust、JavaScript/TypeScript、JSON/JSONL、Mark
 | 查找 | `Ctrl+F` | `Cmd+F` |
 | 替换 | `Ctrl+R` | `Cmd+R` |
 | 查找下一项 / 上一项 | `F3` / `Shift+F3` | `Cmd+G` / `Cmd+Shift+G` |
+| 显示行首 / 行尾 | `Home` / `End` | `Cmd+Left` / `Cmd+Right` |
+| 按显示行上 / 下移动插入点 | `↑` / `↓` | `↑` / `↓` |
+| 按显示行上 / 下扩展选区 | `Shift+↑` / `Shift+↓` | `Shift+↑` / `Shift+↓` |
+| 移至文档开头 / 结尾 | `Ctrl+Home` / `Ctrl+End` | `Cmd+↑` / `Cmd+↓` |
+| 扩展选区至文档开头 / 结尾 | `Ctrl+Shift+Home` / `Ctrl+Shift+End` | `Cmd+Shift+↑` / `Cmd+Shift+↓` |
+| 上一页 / 下一页并移动插入点 | `PageUp` / `PageDown` | `PageUp` / `PageDown` |
+| 上一页 / 下一页并扩展选区 | `Shift+PageUp` / `Shift+PageDown` | `Shift+PageUp` / `Shift+PageDown` |
+| 选择当前文档全文 | `Ctrl+A` | `Cmd+A` |
+| 复制当前行或所选行 | `Ctrl+D` | `Cmd+D` |
+| 删除当前行或所选行 | `Ctrl+Y` | `Cmd+Y` |
+| 上下移动当前行或所选行 | `Alt+Shift+↑` / `Alt+Shift+↓` | `Alt+Shift+↑` / `Alt+Shift+↓` |
 | 格式化文档 | `Ctrl+Alt+L` | `Cmd+Alt+L` |
 | 段落 / 一级至六级标题 | `Ctrl+0` / `Ctrl+1..6` | `Cmd+0` / `Cmd+1..6` |
 | 切换 Live / Source 视图 | `Ctrl+/` | `Cmd+/` |
 | 上一个 / 下一个标签页 | `Alt+Left` / `Alt+Right` | `Cmd+Shift+[` / `Cmd+Shift+]` |
 | 专注模式 / 打字机模式 | `F8` / `F9` | `F8` / `F9` |
+
+文字选择支持单击定位、拖动选取、双击选词、三击选中段落或源码逻辑行，以及 Shift+点击扩展选区。文字链接可右键打开，也可使用 `Ctrl+点击`（macOS 为 `Cmd+点击`）；普通点击仍用于定位或选择文字。
 
 默认键位优先采用 IntelliJ IDEA 的当前平台映射，Markdown 专属操作采用 Typora 等编辑器的通用习惯；应用只注册当前系统的一套默认键。快捷键可以在偏好设置中修改，冲突会在录制时直接提示。
 

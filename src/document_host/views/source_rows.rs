@@ -1,10 +1,77 @@
 // @author kongweiguang
 
-//! Mounted source-row blocks and pointer editing.
+//! Mounted Source row Blocks and their bounded presentation cache.
 
 use super::*;
 
 impl DocumentHost {
+    /// Rebases an active row across disjoint peer transactions and closes it on overlap or a revision gap.
+    pub(super) fn rebase_active_source_edit(
+        &mut self,
+        view_id: DocumentViewInstanceId,
+        revision: DocumentRevision,
+        mutation: &DocumentMutationMap,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(document) = self.document.clone() else {
+            return;
+        };
+        let Some(active) = self.active_edit.as_ref() else {
+            return;
+        };
+        if revision.0 <= active.base_revision {
+            return;
+        }
+        if view_id == document.view_id() || active.base_revision.checked_add(1) != Some(revision.0)
+        {
+            self.reject_stale_source_edit(cx);
+            return;
+        }
+        let Some(range) = map_disjoint_source_range(active.range.clone(), mutation) else {
+            self.reject_stale_source_edit(cx);
+            return;
+        };
+        let Some(line) = document
+            .line_for_offset(range.start.min(document.len()))
+            .and_then(|line| usize::try_from(line).ok())
+        else {
+            self.reject_stale_source_edit(cx);
+            return;
+        };
+        let previous_line = active.line;
+        let block = active.block.clone();
+        if let Some(active) = self.active_edit.as_mut() {
+            active.range = range;
+            active.base_revision = revision.0;
+            active.line = line;
+        }
+        if previous_line != line {
+            if self
+                .source_row_blocks
+                .get(&previous_line)
+                .is_some_and(|candidate| *candidate == block)
+            {
+                self.source_row_blocks.remove(&previous_line);
+            }
+            self.source_row_blocks.insert(line, block);
+        }
+    }
+
+    /// Removes the stale editor surface so later Block events cannot overwrite the shared revision.
+    pub(super) fn reject_stale_source_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(active) = self.active_edit.take() else {
+            return;
+        };
+        active.block.update(cx, |block, cx| {
+            block.set_read_only(true);
+            cx.notify();
+        });
+        self.source_row_blocks
+            .retain(|_, block| *block != active.block);
+        self.error = Some("源码行已在其他视图修改，正在重新同步。".into());
+        cx.notify();
+    }
+
     /// 空文件只有一个稳定的 `0..0` 行；提前发布这份快照可让首帧直接挂载
     /// 可编辑 Block，避免 uniform_list 等待后台 viewport 任务时吞掉第一次点击。
     pub(super) fn install_empty_source_row(&mut self) {
@@ -36,8 +103,142 @@ impl DocumentHost {
         });
     }
 
-    /// 为可见源码行创建普通 Block 输入面。实体数量受 Source row LRU 同一上限约束，
-    /// 因而字符命中测试、IME 与布局缓存不会随文件行数增长。
+    /// 按 Block 的真实布局逐显示行移动，并在跨 Source 行时沿用当前像素 X 坐标。
+    pub(super) fn move_source_caret_by_visual_lines(
+        &mut self,
+        direction: i32,
+        line_count: usize,
+        extend: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if direction == 0 || line_count == 0 {
+            return false;
+        }
+        let Some(document) = self.document.as_ref() else {
+            return false;
+        };
+        let before = document.source_selection();
+        let Some(mut current_line) = document
+            .line_for_offset(before.head.byte_offset)
+            .and_then(|line| usize::try_from(line).ok())
+        else {
+            return false;
+        };
+        let Some(mut current) = self.source_row_blocks.get(&current_line).cloned() else {
+            return false;
+        };
+        let Some(row) = self.displayed_screen_lines.row(current_line) else {
+            return false;
+        };
+        let mut focus = usize::try_from(
+            before
+                .head
+                .byte_offset
+                .saturating_sub(row.content_range.start),
+        )
+        .unwrap_or_default()
+        .min(current.read(cx).display_text().len());
+        current.update(cx, |block, cx| {
+            block.selected_range = focus..focus;
+            block.selection_reversed = false;
+            cx.notify();
+        });
+        let mut moved = false;
+
+        for _ in 0..line_count {
+            let preferred_x = current.read(cx).preferred_visual_x();
+            let local_move = current.update(cx, |block, cx| {
+                block.move_cursor_by_visual_lines(direction, 1, false, cx)
+            });
+            if local_move {
+                focus = current.read(cx).cursor_offset();
+                moved = true;
+                continue;
+            }
+
+            let next_line = if direction < 0 {
+                current_line.checked_sub(1)
+            } else {
+                current_line
+                    .checked_add(1)
+                    .filter(|line| *line < self.line_count())
+            };
+            let Some(next_line) = next_line else {
+                break;
+            };
+            let Some(next) = self.source_row_blocks.get(&next_line).cloned() else {
+                break;
+            };
+            if self.displayed_screen_lines.row(next_line).is_none() {
+                break;
+            }
+            focus = next
+                .read(cx)
+                .entry_offset_for_vertical_focus(direction < 0, Some(preferred_x));
+            next.update(cx, |block, cx| {
+                block.move_to_with_preferred_x(focus, Some(preferred_x), cx);
+            });
+            current = next;
+            current_line = next_line;
+            moved = true;
+        }
+
+        if !moved {
+            return false;
+        }
+        let Some(row) = self.displayed_screen_lines.row(current_line) else {
+            return false;
+        };
+        let head = SourceAnchor::new(
+            row.content_range
+                .start
+                .saturating_add(focus.min(current.read(cx).display_text().len()) as u64),
+            SourceAffinity::After,
+        );
+        self.active_edit = None;
+        self.focus_handle.focus(window);
+        self.set_source_selection(
+            SourceSelection {
+                anchor: if extend { before.anchor } else { head },
+                head,
+            },
+            cx,
+        );
+        self.sync_source_selection_visuals(cx);
+        cx.emit(DocumentHostEvent::StateChanged);
+        cx.notify();
+        true
+    }
+
+    /// 移动或扩展共享 Source 选区到文档边界，保持锚点方向而不触碰正文。
+    pub(super) fn move_source_caret_to_boundary(
+        &mut self,
+        at_end: bool,
+        extend: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(document) = self.document.as_ref() else {
+            return;
+        };
+        let next = SourceSelection {
+            anchor: if extend {
+                document.source_selection().anchor
+            } else {
+                SourceAnchor::new(
+                    if at_end { document.len() } else { 0 },
+                    SourceAffinity::After,
+                )
+            },
+            head: SourceAnchor::new(
+                if at_end { document.len() } else { 0 },
+                SourceAffinity::After,
+            ),
+        };
+        self.set_source_selection(next, cx);
+    }
+
+    /// 为可见源码行创建有界 Block 输入面；Host 动作延迟到 Block 更新结束，避免回调重入读取同一实体。
     pub(super) fn ensure_source_row_block(
         &mut self,
         line: usize,
@@ -71,8 +272,11 @@ impl DocumentHost {
             block.set_source_syntax_context(syntax_language, syntax_context);
             block.set_source_layout_identity(layout_identity);
             block.set_host_action_handler(move |action, window, cx| {
-                let _ = host.update(cx, |view, cx| {
-                    view.on_line_edit_host_action(action, window, cx)
+                let host = host.clone();
+                window.defer(cx, move |window, cx| {
+                    let _ = host.update(cx, |view, cx| {
+                        view.on_line_edit_host_action(action, window, cx)
+                    });
                 });
             });
             block
@@ -83,6 +287,7 @@ impl DocumentHost {
         Some(block)
     }
 
+    /// Binds a row Block's layout caches to the exact source range and document revision it paints.
     fn source_layout_identity_for_row(&self, line: usize) -> Option<SourceLayoutIdentity> {
         let row = self.displayed_screen_lines.row(line)?;
         Some(SourceLayoutIdentity {
@@ -97,294 +302,30 @@ impl DocumentHost {
             show_line_endings: self.show_line_endings,
         })
     }
-    pub(super) fn activate_source_row_from_pointer(
-        &mut self,
-        line: usize,
-        event: &gpui::MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.saving || self.reloading {
-            return;
-        }
-        let Some(block) = self.source_row_blocks.get(&line).cloned() else {
-            return;
-        };
-        let Some(row) = self.displayed_screen_lines.row(line).cloned() else {
-            return;
-        };
-        let previous = self
-            .document
-            .as_ref()
-            .map(SharedDocument::source_selection)
-            .unwrap_or_default();
-
-        if event.click_count >= 3 {
-            block.update(cx, |block, cx| {
-                block.selected_range = 0..block.display_text().len();
-                block.selection_reversed = false;
-                cx.notify();
-            });
-        } else if event.click_count == 2 {
-            block.update(cx, |block, cx| {
-                let caret = block.selected_range.end.min(block.display_text().len());
-                let word = source_word_range(block.display_text(), caret);
-                block.selected_range = word;
-                block.selection_reversed = false;
-                cx.notify();
-            });
-        }
-
-        let local_selection = source_selection_from_block(block.read(cx), row.content_range.start);
-        let selection = if event.modifiers.shift {
-            SourceSelection {
-                anchor: previous.anchor,
-                head: local_selection.head,
-            }
-        } else {
-            local_selection
-        };
-        self.set_source_selection(selection, cx);
-        self.source_drag_anchor = Some(selection.anchor);
-
-        if block.read(cx).is_read_only() {
-            // provisional 行只承担浏览与选择；不设置 active_edit，避免 Changed 事件
-            // 在 document 尚未安装时被 export.rs 静默丢弃并留下“卡死”焦点。
-            self.active_edit = None;
-            self.focus_handle.focus(window);
-        } else if event.modifiers.shift && self.selection_spans_multiple_lines(selection) {
-            self.active_edit = None;
-            self.focus_handle.focus(window);
-        } else {
-            self.active_edit = Some(SourceLineEdit {
-                line,
-                range: row.replace_range,
-                ending: row.ending,
-                leading_truncated: row.leading_truncated,
-                trailing_truncated: row.trailing_truncated,
-                block: block.clone(),
-            });
-            block.read(cx).focus_handle.focus(window);
-        }
-        self.sync_source_selection_visuals(cx);
-        cx.emit(DocumentHostEvent::StateChanged);
-        cx.notify();
-    }
-
-    pub(super) fn sync_selection_from_active_source_block(
-        &mut self,
-        block: &Entity<Block>,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(active) = self
-            .active_edit
-            .as_ref()
-            .filter(|active| active.block == *block)
-        else {
-            return;
-        };
-        let Some(row) = self.displayed_screen_lines.row(active.line) else {
-            return;
-        };
-        let selection = source_selection_from_block(block.read(cx), row.content_range.start);
-        self.set_source_selection(selection, cx);
-        self.sync_source_selection_visuals(cx);
-        cx.emit(DocumentHostEvent::StateChanged);
-    }
-
-    pub(super) fn on_source_surface_mouse_move(
-        &mut self,
-        event: &gpui::MouseMoveEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !event.dragging() {
-            self.source_drag_anchor = None;
-            self.stop_source_drag_autoscroll();
-            return;
-        }
-        let Some(anchor) = self.source_drag_anchor else {
-            return;
-        };
-        let Some((line, block)) = self.source_block_at_point(event.position, cx) else {
-            return;
-        };
-        let Some(row) = self.displayed_screen_lines.row(line) else {
-            return;
-        };
-        let local = block.read(cx).index_for_mouse_position(event.position);
-        let head = SourceAnchor::new(
-            row.content_range
-                .start
-                .saturating_add(local.min(row.text.len()) as u64),
-            SourceAffinity::After,
-        );
-        self.active_edit = None;
-        self.focus_handle.focus(window);
-        self.set_source_selection(SourceSelection { anchor, head }, cx);
-        self.sync_source_selection_visuals(cx);
-
-        let viewport = self.scroll_handle.0.borrow().base_handle.bounds();
-        if event.position.y <= viewport.top() + px(self.source_row_height * 1.5) {
-            self.start_source_drag_autoscroll(-1, cx);
-        } else if event.position.y >= viewport.bottom() - px(self.source_row_height) {
-            self.start_source_drag_autoscroll(1, cx);
-        } else {
-            self.stop_source_drag_autoscroll();
-        }
-        cx.emit(DocumentHostEvent::StateChanged);
-        cx.notify();
-    }
-
-    pub(super) fn on_source_surface_mouse_up(
-        &mut self,
-        _: &gpui::MouseUpEvent,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) {
-        self.source_drag_anchor = None;
-        self.stop_source_drag_autoscroll();
-    }
-
-    pub(super) fn start_source_drag_autoscroll(&mut self, direction: i8, cx: &mut Context<Self>) {
-        let direction = direction.signum();
-        if direction == 0 || self.source_drag_autoscroll_direction == direction {
-            return;
-        }
-        self.source_drag_autoscroll_direction = direction;
-        self.source_drag_autoscroll_task = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(16))
-                    .await;
-                let keep_running = this
-                    .update(cx, |view, cx| view.source_drag_autoscroll_tick(cx))
-                    .unwrap_or(false);
-                if !keep_running {
-                    break;
-                }
-            }
-        });
-    }
-
-    fn stop_source_drag_autoscroll(&mut self) {
-        self.source_drag_autoscroll_direction = 0;
-        self.source_drag_autoscroll_task = Task::ready(());
-    }
-
-    pub(super) fn source_drag_autoscroll_tick(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(anchor) = self.source_drag_anchor else {
-            self.source_drag_autoscroll_direction = 0;
-            return false;
-        };
-        let direction = self.source_drag_autoscroll_direction;
-        if direction == 0 {
-            return false;
-        }
-        let visible = self.displayed_screen_lines.visible.clone();
-        let target_line = if direction < 0 {
-            visible.start
-        } else {
-            visible.end.saturating_sub(1)
-        };
-        let Some(row) = self.displayed_screen_lines.row(target_line) else {
-            return true;
-        };
-        let head = if direction < 0 {
-            SourceAnchor::new(row.content_range.start, SourceAffinity::Before)
-        } else {
-            SourceAnchor::new(row.content_range.end, SourceAffinity::After)
-        };
-        self.active_edit = None;
-        self.set_source_selection(SourceSelection { anchor, head }, cx);
-        self.sync_source_selection_visuals(cx);
-
-        let next = if direction < 0 {
-            visible.start.saturating_sub(1)
-        } else {
-            visible.end.min(self.line_count().saturating_sub(1))
-        };
-        self.scroll_source_line_strict(next, ScrollStrategy::Top);
-        cx.emit(DocumentHostEvent::StateChanged);
-        cx.notify();
-        true
-    }
 }
 
-fn source_selection_from_block(block: &Block, source_start: u64) -> SourceSelection {
-    let start = SourceAnchor::new(
-        source_start.saturating_add(block.selected_range.start as u64),
-        SourceAffinity::Before,
-    );
-    let end = SourceAnchor::new(
-        source_start.saturating_add(block.selected_range.end as u64),
-        SourceAffinity::After,
-    );
-    if block.selection_reversed {
-        SourceSelection {
-            anchor: end,
-            head: start,
-        }
-    } else {
-        SourceSelection {
-            anchor: start,
-            head: end,
+/// Maps a cached line only when every peer edit is outside its byte range.
+fn map_disjoint_source_range(
+    range: Range<u64>,
+    mutation: &DocumentMutationMap,
+) -> Option<Range<u64>> {
+    for edit in mutation.edits() {
+        let overlaps = if edit.range.is_empty() {
+            edit.range.start >= range.start && edit.range.start <= range.end
+        } else {
+            edit.range.start < range.end && edit.range.end > range.start
+        };
+        if overlaps {
+            return None;
         }
     }
-}
-
-fn source_word_range(text: &str, offset: usize) -> Range<usize> {
-    let offset = offset.min(text.len());
-    let characters = text
-        .char_indices()
-        .map(|(start, ch)| {
-            (
-                start,
-                start + ch.len_utf8(),
-                ch.is_alphanumeric() || ch == '_',
-            )
-        })
-        .collect::<Vec<_>>();
-    if let Some(mut index) = characters
-        .iter()
-        .position(|(start, end, _)| offset >= *start && offset < *end)
-        .or_else(|| {
-            offset.checked_sub(1).and_then(|offset| {
-                characters
-                    .iter()
-                    .position(|(start, end, _)| offset >= *start && offset < *end)
-            })
-        })
-        && characters[index].2
-    {
-        let mut start = characters[index].0;
-        let mut end = characters[index].1;
-        while index > 0 && characters[index - 1].2 {
-            index -= 1;
-            start = characters[index].0;
-        }
-        let mut next = index + 1;
-        while next < characters.len() && characters[next].2 {
-            end = characters[next].1;
-            next += 1;
-        }
-        return start..end;
-    }
-    let (start, end) = if offset < text.len() {
-        let end = text[offset..]
-            .graphemes(true)
-            .next()
-            .map_or(offset, |grapheme| offset + grapheme.len());
-        (offset, end)
-    } else {
-        text[..offset]
-            .grapheme_indices(true)
-            .next_back()
-            .map_or((offset, offset), |(start, grapheme)| {
-                (start, start + grapheme.len())
-            })
-    };
-    start..end
+    let start = mutation
+        .map_anchor(SourceAnchor::new(range.start, SourceAffinity::After))
+        .byte_offset;
+    let end = mutation
+        .map_anchor(SourceAnchor::new(range.end, SourceAffinity::Before))
+        .byte_offset;
+    (start <= end).then_some(start..end)
 }
 
 #[cfg(test)]

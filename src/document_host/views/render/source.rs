@@ -19,6 +19,7 @@ pub(super) struct SourceSurfaceMetrics {
 }
 
 impl DocumentHost {
+    /// Keeps the active native IME row mounted while refreshing Source viewport and layout metrics.
     pub(super) fn prepare_source_surface(
         &mut self,
         window: &mut Window,
@@ -32,7 +33,7 @@ impl DocumentHost {
             self.folding_enabled = folding_enabled;
             if !folding_enabled {
                 self.fold_projection.expand_all();
-                self.source_row_blocks.clear();
+                self.clear_source_row_blocks_except_ime_owner();
             }
         }
         self.fold_projection.set_real_line_count(line_count);

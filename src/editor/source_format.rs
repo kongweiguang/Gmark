@@ -10,7 +10,7 @@ use super::*;
 impl Editor {
     /// Explicitly normalizes on-disk line endings as one non-coalescible undo transaction.
     pub(crate) fn normalize_line_endings(&mut self, ending: LineEnding, cx: &mut Context<Self>) {
-        if self.view_mode == ViewMode::Preview {
+        if !self.document_surface_is_editable() || self.has_active_ime_composition(cx) {
             return;
         }
 

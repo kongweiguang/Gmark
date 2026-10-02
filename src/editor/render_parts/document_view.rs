@@ -584,6 +584,17 @@ impl Editor {
             .track_scroll(&self.scroll_handle)
             .on_hover(cx.listener(Self::on_editor_hover))
             .capture_any_mouse_down(cx.listener(Self::on_editor_capture_mouse_down))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|editor, event, window, cx| {
+                    editor.on_text_context_menu_mouse_down_for_surface(
+                        crate::editor::selection_surface::SelectionSurface::Main,
+                        event,
+                        window,
+                        cx,
+                    );
+                }),
+            )
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_editor_mouse_down))
             .on_mouse_move(cx.listener(Self::on_editor_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_editor_mouse_up))

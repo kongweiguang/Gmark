@@ -336,9 +336,11 @@ impl Editor {
         }
     }
 
-    /// Marks the document dirty and schedules window-title and edited-state
-    /// refresh for the next render frame.
+    /// 提交投影前再次校验实际操作表面，防止迟到命令越过 Preview 的入口保护。
     pub(in crate::editor) fn mark_dirty(&mut self, cx: &mut Context<Self>) {
+        if !self.document_surface_is_editable() {
+            return;
+        }
         if self.virtual_surface.is_some()
             && self.view_mode == ViewMode::Rendered
             && let Some(entity_id) = self.active_entity_id
@@ -350,12 +352,15 @@ impl Editor {
         self.mark_dirty_from_cached_markdown(cx);
     }
 
-    /// 普通块输入只刷新所属根块；调用方必须已完成该输入触发的所有块状态修改。
+    /// 普通块只刷新所属根块；只读表面在实际正文提交边界再次拒写。
     pub(in crate::editor) fn mark_block_dirty(
         &mut self,
         entity_id: EntityId,
         cx: &mut Context<Self>,
     ) {
+        if !self.document_surface_is_editable() {
+            return;
+        }
         if self.virtual_surface.is_some()
             && self.view_mode == ViewMode::Rendered
             && self.mark_virtual_block_dirty(entity_id, cx)
@@ -511,6 +516,7 @@ impl Editor {
         }
     }
 
+    /// Requests native IME completion on deactivation so staged text is not mistaken for committed input.
     pub(crate) fn install_menu_window_activation_observer(
         &mut self,
         window: &mut Window,
@@ -528,6 +534,7 @@ impl Editor {
                     });
                 }
                 if !window_active {
+                    editor.wait_for_ime_completion(window, cx);
                     // 失焦只需关闭瞬时下拉面板，不隐藏一级导航。否则窗口重回前台时
                     // 会看起来像菜单丢失，也与高频浏览路径相冲突。
                     editor.close_menu_panels(cx);
@@ -646,14 +653,22 @@ impl Editor {
         }
     }
 
+    /// 明确用户请求可重试失败的系统完成操作；渲染本身不循环重发。
     pub(crate) fn request_save_document(&mut self, cx: &mut Context<Self>) {
+        if self.queue_document_action_for_ime(&crate::components::SaveDocument, cx) {
+            return;
+        }
         if !self.pending_save {
             self.pending_save = true;
             cx.notify();
         }
     }
 
+    /// 另存为复用同一候选终态边界，并允许用户显式重试。
     pub(crate) fn request_save_document_as(&mut self, cx: &mut Context<Self>) {
+        if self.queue_document_action_for_ime(&crate::components::SaveDocumentAs, cx) {
+            return;
+        }
         if !self.pending_save_as {
             self.pending_save_as = true;
             cx.notify();

@@ -40,6 +40,8 @@ mod context_menu;
 mod diagram_overlay;
 pub(crate) mod document;
 mod document_session;
+mod editing_navigation;
+mod editing_navigation_virtual;
 mod encoding;
 mod events;
 mod export;
@@ -49,7 +51,10 @@ mod focus_modes;
 mod format_menu;
 mod history;
 mod image_preview;
+mod ime_lifecycle;
+mod ime_rebase;
 mod link_completion;
+mod tool_ime;
 pub(crate) use crate::perf;
 mod markdown_render_state;
 pub(crate) mod markdown_view_state;
@@ -62,6 +67,8 @@ pub(crate) mod render;
 pub(crate) mod render_asset_manager;
 mod runtime_context;
 mod selection;
+mod selection_surface;
+mod selection_virtualization;
 pub(crate) mod services;
 mod source_format;
 mod source_mapping;
@@ -75,6 +82,9 @@ mod table_fragment;
 mod table_selection;
 mod tabs;
 pub(crate) use tabs::DetachedTab;
+#[cfg(all(test, target_os = "windows"))]
+#[path = "../../tests/unit/editor/ime_tool_focus.rs"]
+mod ime_tool_focus_tests;
 #[cfg(test)]
 #[path = "../../tests/unit/editor/scenarios.rs"]
 mod tests;
@@ -180,9 +190,16 @@ pub struct Editor {
     pending_scroll_recheck_after_layout: bool,
     pending_save: bool,
     pending_save_as: bool,
+    /// 系统组合输入终态到来之前保留用户动作，不推定候选已提交。
+    pending_ime_operations: std::collections::VecDeque<ime_lifecycle::DeferredImeOperation>,
+    ime_completion_requested: bool,
+    ime_completion_failed: bool,
+    ime_detached_targets: Vec<Entity<Block>>,
     pending_resource_insertion: Option<PendingResourceInsertion>,
     /// 已有路径保存的后台任务；同时只允许一个 writer，后续请求合并到完成后的下一帧。
     save_task: Option<Task<()>>,
+    /// 路径对话框到写入结束保持原标签，防止回调绑定到后来的文档。
+    save_prompt_task: Option<Task<()>>,
     save_queued: bool,
     /// 每次编辑替换 Task 即重置 idle 计时；关闭设置或保存成功会取消。
     auto_save_task: Option<Task<()>>,
@@ -308,6 +325,17 @@ pub struct Editor {
     workspace_link_completion: Option<WorkspaceLinkCompletionState>,
     cross_block_selection: Option<CrossBlockSelection>,
     cross_block_drag: Option<CrossBlockDrag>,
+    /// Split 两侧持有独立选区；命令始终归属于最近操作的文档表面。
+    active_selection_surface: selection_surface::SelectionSurface,
+    split_preview_cross_block_selection: Option<CrossBlockSelection>,
+    split_preview_cross_block_drag: Option<CrossBlockDrag>,
+    split_preview_table_cell_rectangle: Option<table_selection::TableCellRectangle>,
+    split_preview_table_cell_drag_anchor: Option<(EntityId, TableCellPosition)>,
+    selection_autoscroll_task: Option<Task<()>>,
+    /// Prevents a stopped task's late tick from clearing a replacement task on the same surface.
+    selection_autoscroll_generation: u64,
+    selection_autoscroll_pointer: Option<Point<Pixels>>,
+    selection_autoscroll_surface: selection_surface::SelectionSurface,
     rendered_select_all_cycle: Option<RenderedSelectAllCycle>,
     /// 应用图标独立控制一级导航是否展开，不与任一下拉面板的生命周期耦合。
     menu_bar_expanded: bool,
@@ -604,17 +632,27 @@ pub(super) struct CrossBlockSelectionEndpoint {
     pub(super) offset: usize,
 }
 
+/// Canonical source coordinate that is valid only for the revision where it was captured.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct CrossBlockSourceAnchor {
+    pub(super) byte_offset: usize,
+    pub(super) revision: Revision,
+}
+
 /// Editor-level selection spanning two visible block endpoints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct CrossBlockSelection {
     pub(super) anchor: CrossBlockSelectionEndpoint,
     pub(super) focus: CrossBlockSelectionEndpoint,
+    pub(super) source_anchor: Option<CrossBlockSourceAnchor>,
+    pub(super) source_focus: Option<CrossBlockSourceAnchor>,
 }
 
 /// Drag state while creating or extending a cross-block selection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct CrossBlockDrag {
     pub(super) anchor: CrossBlockSelectionEndpoint,
+    pub(super) source_anchor: Option<CrossBlockSourceAnchor>,
 }
 
 /// Short-lived Ctrl/Cmd+A press counter for rendered-mode selection upgrade.

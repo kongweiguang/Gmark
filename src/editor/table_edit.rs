@@ -4,6 +4,9 @@
 
 use super::*;
 
+#[path = "table_edit_parts/write_boundary.rs"]
+mod write_boundary;
+
 impl Editor {
     pub(crate) fn new_table_block(cx: &mut Context<Self>, table: TableData) -> Entity<Block> {
         Self::new_block(cx, BlockRecord::table(table))
@@ -113,11 +116,15 @@ impl Editor {
         }
     }
 
+    /// Prevents mounted preview cells from synchronizing their runtime state into the source table.
     pub(super) fn sync_table_record_from_runtime(
         &mut self,
         table_block: &Entity<Block>,
         cx: &mut Context<Self>,
     ) {
+        if !self.table_block_is_editable(table_block, cx) {
+            return;
+        }
         let Some(runtime) = table_block.read(cx).table_runtime.clone() else {
             return;
         };
@@ -151,11 +158,15 @@ impl Editor {
         });
     }
 
+    /// Rejects direct appends before syncing cells or opening an undo transaction.
     pub(super) fn append_table_column(
         &mut self,
         table_block: &Entity<Block>,
         cx: &mut Context<Self>,
     ) {
+        if !self.table_block_is_editable(table_block, cx) {
+            return;
+        }
         self.sync_table_record_from_runtime(table_block, cx);
 
         let Some(mut table) = table_block.read(cx).record.table.clone() else {
@@ -194,7 +205,11 @@ impl Editor {
         cx.notify();
     }
 
+    /// Rejects direct appends before syncing cells or opening an undo transaction.
     pub(super) fn append_table_row(&mut self, table_block: &Entity<Block>, cx: &mut Context<Self>) {
+        if !self.table_block_is_editable(table_block, cx) {
+            return;
+        }
         self.sync_table_record_from_runtime(table_block, cx);
 
         let Some(mut table) = table_block.read(cx).record.table.clone() else {
@@ -283,6 +298,7 @@ impl Editor {
         }
     }
 
+    /// Keeps column alignment changes behind the table's owning surface write boundary.
     pub(super) fn set_table_column_alignment(
         &mut self,
         table_block: &Entity<Block>,
@@ -290,6 +306,9 @@ impl Editor {
         alignment: TableColumnAlignment,
         cx: &mut Context<Self>,
     ) {
+        if !self.table_block_is_editable(table_block, cx) {
+            return;
+        }
         self.sync_table_record_from_runtime(table_block, cx);
         let Some(mut table) = table_block.read(cx).record.table.clone() else {
             return;
@@ -312,32 +331,6 @@ impl Editor {
         };
         self.set_table_axis_selection(Some(selection), cx);
         self.focus_table_cell_position(table_block, TableCellPosition { row: 0, column }, cx);
-        self.mark_dirty(cx);
-        self.request_active_block_scroll_into_view(cx);
-        if started_local_capture {
-            self.finalize_pending_undo_capture(cx);
-        }
-        cx.notify();
-    }
-
-    fn commit_table_structure_change(
-        &mut self,
-        table_block: &Entity<Block>,
-        table: TableData,
-        selection: TableAxisSelection,
-        focus: TableCellPosition,
-        cx: &mut Context<Self>,
-    ) {
-        let started_local_capture = if self.pending_undo_capture.is_none() {
-            self.prepare_undo_capture(UndoCaptureKind::NonCoalescible, cx);
-            true
-        } else {
-            false
-        };
-        table_block.update(cx, move |block, _cx| block.record.table = Some(table));
-        self.rebuild_table_runtimes(cx);
-        self.set_table_axis_selection(Some(selection), cx);
-        self.focus_table_cell_position(table_block, focus, cx);
         self.mark_dirty(cx);
         self.request_active_block_scroll_into_view(cx);
         if started_local_capture {
@@ -467,6 +460,7 @@ impl Editor {
         );
     }
 
+    /// Prevents row reordering from changing source state through a read-only projection.
     pub(super) fn move_table_row(
         &mut self,
         table_block: &Entity<Block>,
@@ -474,6 +468,9 @@ impl Editor {
         delta: i32,
         cx: &mut Context<Self>,
     ) {
+        if !self.table_block_is_editable(table_block, cx) {
+            return;
+        }
         self.sync_table_record_from_runtime(table_block, cx);
         let Some(mut table) = table_block.read(cx).record.table.clone() else {
             return;
@@ -524,6 +521,7 @@ impl Editor {
         cx.notify();
     }
 
+    /// Prevents column reordering from changing source state through a read-only projection.
     pub(super) fn move_table_column(
         &mut self,
         table_block: &Entity<Block>,
@@ -531,6 +529,9 @@ impl Editor {
         delta: i32,
         cx: &mut Context<Self>,
     ) {
+        if !self.table_block_is_editable(table_block, cx) {
+            return;
+        }
         self.sync_table_record_from_runtime(table_block, cx);
         let Some(mut table) = table_block.read(cx).record.table.clone() else {
             return;
@@ -579,12 +580,16 @@ impl Editor {
         cx.notify();
     }
 
+    /// Rejects row deletion before runtime synchronization or undo capture.
     pub(super) fn delete_table_row(
         &mut self,
         table_block: &Entity<Block>,
         row_index: usize,
         cx: &mut Context<Self>,
     ) {
+        if !self.table_block_is_editable(table_block, cx) {
+            return;
+        }
         self.sync_table_record_from_runtime(table_block, cx);
         let Some(mut table) = table_block.read(cx).record.table.clone() else {
             return;
@@ -640,11 +645,15 @@ impl Editor {
         cx.notify();
     }
 
+    /// Rejects header deletion before runtime synchronization or undo capture.
     pub(super) fn delete_table_header_row(
         &mut self,
         table_block: &Entity<Block>,
         cx: &mut Context<Self>,
     ) {
+        if !self.table_block_is_editable(table_block, cx) {
+            return;
+        }
         self.sync_table_record_from_runtime(table_block, cx);
         let Some(mut table) = table_block.read(cx).record.table.clone() else {
             return;
@@ -675,12 +684,16 @@ impl Editor {
         cx.notify();
     }
 
+    /// Rejects column deletion before runtime synchronization or undo capture.
     pub(super) fn delete_table_column(
         &mut self,
         table_block: &Entity<Block>,
         column: usize,
         cx: &mut Context<Self>,
     ) {
+        if !self.table_block_is_editable(table_block, cx) {
+            return;
+        }
         self.sync_table_record_from_runtime(table_block, cx);
         let Some(mut table) = table_block.read(cx).record.table.clone() else {
             return;
@@ -725,11 +738,15 @@ impl Editor {
     /// Removes the table block entirely, leaving an empty paragraph in its place
     /// so the caret has somewhere to land. Used when deleting the last remaining
     /// row or column, which empties the table.
+    /// The owning surface is checked first so Preview cannot replace source structure.
     pub(super) fn remove_table_block(
         &mut self,
         table_block: &Entity<Block>,
         cx: &mut Context<Self>,
     ) {
+        if !self.table_block_is_editable(table_block, cx) {
+            return;
+        }
         let Some(location) = self.document.find_block_location(table_block.entity_id()) else {
             return;
         };

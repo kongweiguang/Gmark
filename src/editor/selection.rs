@@ -9,38 +9,39 @@ use std::sync::Arc;
 use gpui::*;
 
 use super::{
-    CrossBlockDrag, CrossBlockSelection, CrossBlockSelectionEndpoint, Editor,
-    PreparedSplitProjection, SourceTargetMapping, UndoSelectionSnapshot, ViewMode,
+    CrossBlockDrag, CrossBlockSelection, CrossBlockSelectionEndpoint, CrossBlockSourceAnchor,
+    Editor, PreparedSplitProjection, SourceTargetMapping, UndoSelectionSnapshot, ViewMode,
+    selection_surface::SelectionSurface, selection_virtualization::NormalizedCrossBlockSelection,
 };
-use crate::components::markdown::inline::StyleFlag;
 use crate::components::{
-    Block, BlockKind, Copy, CopyAsMarkdown, Cut, Delete, DeleteBack, EditingCommandId,
-    InlineTextTree, Paste, TableCellPosition, UndoCaptureKind, serialize_table_markdown_lines,
+    Block, BlockKind, Copy, CopyAsMarkdown, Cut, Delete, DeleteBack, InlineTextTree, Paste,
+    TableCellPosition, UndoCaptureKind, serialize_table_markdown_lines,
 };
 use crate::perf;
 
-/// Cross-block selection with endpoints ordered by visible block position.
-#[derive(Clone, Copy)]
-struct NormalizedCrossBlockSelection {
-    start: CrossBlockSelectionEndpoint,
-    end: CrossBlockSelectionEndpoint,
-    start_index: usize,
-    end_index: usize,
-    reversed: bool,
+pub(super) struct CrossBlockInlineTarget {
+    pub(super) entity: Option<Entity<Block>>,
+    pub(super) next_title: InlineTextTree,
+    pub(super) selected_clean_range: Range<usize>,
+    pub(super) source_content_range: Range<usize>,
+    pub(super) replacement: String,
 }
 
-struct CrossBlockInlineTarget {
-    entity: Entity<Block>,
-    next_title: InlineTextTree,
-    source_content_range: Range<usize>,
-    replacement: String,
-}
+#[path = "selection_autoscroll.rs"]
+mod autoscroll;
+#[path = "selection_pointer.rs"]
+mod selection_pointer;
 
 impl Editor {
-    fn clear_cross_block_selection_visuals(&mut self, cx: &mut Context<Self>) -> bool {
+    /// Clears highlight flags only from the projection that owns the selection snapshot.
+    fn clear_cross_block_selection_visuals_for_surface(
+        &mut self,
+        surface: SelectionSurface,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let mut changed = false;
-        for visible in self.document.visible_blocks().to_vec() {
-            visible.entity.update(cx, |block, cx| {
+        for entity in self.selection_surface_entities(surface) {
+            entity.update(cx, |block, cx| {
                 if block.editor_selection_range.take().is_some()
                     || block.editor_selection_supports_inline_commands
                 {
@@ -53,217 +54,109 @@ impl Editor {
         changed
     }
 
+    /// Preserves the established Main API while keeping Split Preview's local selection separate.
     pub(super) fn clear_cross_block_selection(&mut self, cx: &mut Context<Self>) {
-        let had_selection = self.cross_block_selection.take().is_some();
-        self.cross_block_drag = None;
-        let changed_visuals = self.clear_cross_block_selection_visuals(cx);
+        self.clear_cross_block_selection_for_surface(SelectionSurface::Main, cx);
+    }
+
+    /// Ends only the selection owned by one surface, which avoids clearing the other Split pane.
+    pub(super) fn clear_cross_block_selection_for_surface(
+        &mut self,
+        surface: SelectionSurface,
+        cx: &mut Context<Self>,
+    ) {
+        let had_selection = self.cross_block_selection_for_surface(surface).is_some();
+        self.set_cross_block_selection_for_surface(surface, None);
+        self.set_cross_block_drag_for_surface(surface, None);
+        let changed_visuals = self.clear_cross_block_selection_visuals_for_surface(surface, cx);
         let changed = had_selection || changed_visuals;
         if changed {
             cx.notify();
         }
-    }
-
-    fn begin_cross_block_drag_at_point(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        let had_selection = self.cross_block_selection.take().is_some();
-        let changed_visuals = self.clear_cross_block_selection_visuals(cx);
-        let changed = had_selection || changed_visuals;
-        self.cross_block_drag = self
-            .cross_block_endpoint_for_point(position, cx)
-            .map(|anchor| CrossBlockDrag { anchor });
-        if changed {
-            cx.notify();
-        }
-    }
-
-    fn table_cell_at_point(
-        &self,
-        position: Point<Pixels>,
-        cx: &App,
-    ) -> Option<(EntityId, TableCellPosition)> {
-        self.table_cells.values().find_map(|binding| {
-            let bounds = binding.cell.read(cx).last_bounds?;
-            let inside = position.x >= bounds.left()
-                && position.x <= bounds.right()
-                && position.y >= bounds.top()
-                && position.y <= bounds.bottom();
-            inside.then_some((binding.table_block.entity_id(), binding.position))
-        })
-    }
-
-    pub(super) fn on_editor_capture_mouse_down(
-        &mut self,
-        event: &MouseDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if event.button != MouseButton::Left {
-            cx.propagate();
-            return;
-        }
-
-        if !matches!(self.view_mode, ViewMode::Rendered | ViewMode::Preview) {
-            cx.propagate();
-            return;
-        }
-
-        self.rendered_select_all_cycle = None;
-        if let Some((table_block_id, position)) = self.table_cell_at_point(event.position, cx) {
-            self.cross_block_drag = None;
-            self.table_cell_drag_anchor = Some((table_block_id, position));
-            if event.modifiers.shift {
-                let anchor = self
-                    .table_cell_rectangle
-                    .filter(|selection| selection.table_block_id == table_block_id)
-                    .map(|selection| selection.anchor)
-                    .unwrap_or(position);
-                self.table_cell_rectangle = Some(super::table_selection::TableCellRectangle {
-                    table_block_id,
-                    anchor,
-                    focus: position,
-                });
-                self.sync_table_cell_rectangle_highlights(cx);
-            }
-            cx.propagate();
-            return;
-        }
-        self.table_cell_drag_anchor = None;
-        self.begin_cross_block_drag_at_point(event.position, cx);
-        cx.propagate();
-    }
-
-    pub(super) fn on_editor_mouse_move(
-        &mut self,
-        event: &MouseMoveEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !event.dragging() {
-            return;
-        }
-        if let Some((table_block_id, anchor)) = self.table_cell_drag_anchor {
-            let Some((focus_table_id, focus)) = self.table_cell_at_point(event.position, cx) else {
-                return;
-            };
-            if focus_table_id != table_block_id {
-                return;
-            }
-            self.table_cell_rectangle = Some(super::table_selection::TableCellRectangle {
-                table_block_id,
-                anchor,
-                focus,
-            });
-            self.clear_cross_block_selection(cx);
-            self.sync_table_cell_rectangle_highlights(cx);
-            cx.notify();
-            return;
-        }
-        let Some(drag) = self.cross_block_drag else {
-            return;
-        };
-        let Some(focus) = self.cross_block_endpoint_for_point(event.position, cx) else {
-            return;
-        };
-
-        if self.cross_block_selection.is_none() && drag.anchor.entity_id == focus.entity_id {
-            return;
-        }
-
-        let selection = CrossBlockSelection {
-            anchor: drag.anchor,
-            focus,
-        };
-        if self.cross_block_selection_is_empty(selection) {
-            self.cross_block_selection = None;
-        } else {
-            self.cross_block_selection = Some(selection);
-        }
-        self.sync_cross_block_selection_visuals(cx);
-        cx.notify();
-    }
-
-    pub(super) fn on_editor_mouse_up(
-        &mut self,
-        _event: &MouseUpEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.cross_block_drag = None;
-        self.table_cell_drag_anchor = None;
-        self.end_block_pointer_selection_sessions(cx);
     }
 }
 #[path = "input/selection/clipboard.rs"]
 mod clipboard;
 
 impl Editor {
-    fn rendered_document_is_fully_selected(&self, cx: &App) -> bool {
-        let visible = self.document.visible_blocks().to_vec();
+    /// Detects a full selection against the block identities belonging to one rendered surface.
+    fn rendered_surface_is_fully_selected(&self, surface: SelectionSurface, cx: &App) -> bool {
+        if surface == SelectionSurface::Main && self.virtual_surface.is_some() {
+            let Some(selection) = self.cross_block_selection_for_surface(surface) else {
+                return false;
+            };
+            let revision = self.source_document.snapshot().revision();
+            return selection
+                .source_anchor
+                .is_some_and(|anchor| anchor.byte_offset == 0 && anchor.revision == revision)
+                && selection.source_focus.is_some_and(|focus| {
+                    focus.byte_offset == self.source_document.len() && focus.revision == revision
+                });
+        }
+        let visible = self.selection_surface_entities(surface);
         let Some(first) = visible.first() else {
             return false;
         };
         let Some(last) = visible.last() else {
             return false;
         };
-        let Some(selection) = self.cross_block_selection else {
+        let Some(selection) = self.cross_block_selection_for_surface(surface) else {
             return false;
         };
-        let last_len = last.entity.read(cx).visible_len();
-        selection.anchor
-            == CrossBlockSelectionEndpoint {
-                entity_id: first.entity.entity_id(),
-                offset: 0,
-            }
-            && selection.focus
-                == CrossBlockSelectionEndpoint {
-                    entity_id: last.entity.entity_id(),
-                    offset: last_len,
-                }
+        selection.anchor.entity_id == first.entity_id()
+            && selection.anchor.offset == 0
+            && selection.focus.entity_id == last.entity_id()
+            && selection.focus.offset == last.read(cx).visible_len()
     }
 
-    fn select_focused_block_text_for_rendered_select_all(
-        &mut self,
-        block: Entity<Block>,
-        cx: &mut Context<Self>,
-    ) {
-        self.clear_cross_block_selection(cx);
-        self.end_block_pointer_selection_sessions(cx);
-        self.clear_table_axis_preview(cx);
-        self.clear_table_axis_selection(cx);
-        block.update(cx, |block, cx| {
-            let len = block.visible_len();
-            block.selected_range = 0..len;
-            block.selection_reversed = false;
-            block.marked_range = None;
-            block.vertical_motion_x = None;
-            block.cursor_blink_epoch = std::time::Instant::now();
-            cx.notify();
-        });
-        self.active_entity_id = Some(block.entity_id());
-        cx.notify();
-    }
-
-    fn select_all_rendered_document(&mut self, cx: &mut Context<Self>) {
-        if self.rendered_document_is_fully_selected(cx) {
+    /// Selects the entire active projection on the first command, matching document-surface semantics.
+    fn select_all_rendered_surface(&mut self, surface: SelectionSurface, cx: &mut Context<Self>) {
+        if self.rendered_surface_is_fully_selected(surface, cx) {
             return;
         }
-
-        let visible = self.document.visible_blocks().to_vec();
+        let visible = self.selection_surface_entities(surface);
         let Some(first) = visible.first() else {
             return;
         };
         let Some(last) = visible.last() else {
             return;
         };
-        let first_id = first.entity.entity_id();
-        let last_id = last.entity.entity_id();
-        let last_len = last.entity.read(cx).visible_len();
+        let mut selection = self.cross_block_selection_from_endpoints(
+            surface,
+            CrossBlockSelectionEndpoint {
+                entity_id: first.entity_id(),
+                offset: 0,
+            },
+            CrossBlockSelectionEndpoint {
+                entity_id: last.entity_id(),
+                offset: last.read(cx).visible_len(),
+            },
+            None,
+            cx,
+        );
+        if surface == SelectionSurface::Main && self.virtual_surface.is_some() {
+            let revision = self.source_document.snapshot().revision();
+            selection.source_anchor = Some(CrossBlockSourceAnchor {
+                byte_offset: 0,
+                revision,
+            });
+            selection.source_focus = Some(CrossBlockSourceAnchor {
+                byte_offset: self.source_document.len(),
+                revision,
+            });
+        }
 
-        self.end_block_pointer_selection_sessions(cx);
+        self.end_surface_pointer_selection(surface, cx);
         self.dismiss_contextual_overlays(cx);
-        self.clear_table_axis_preview(cx);
-        self.clear_table_axis_selection(cx);
-        for visible in &visible {
-            visible.entity.update(cx, |block, cx| {
+        if surface == SelectionSurface::Main {
+            self.clear_table_axis_preview(cx);
+            self.clear_table_axis_selection(cx);
+        }
+        self.set_table_cell_rectangle_for_surface(surface, None);
+        self.set_table_cell_drag_anchor_for_surface(surface, None);
+        self.sync_table_cell_rectangle_highlights_for(surface, cx);
+        for entity in visible {
+            entity.update(cx, |block, cx| {
                 let cursor = block.cursor_offset();
                 let collapsed = cursor..cursor;
                 if block.selected_range != collapsed {
@@ -272,57 +165,35 @@ impl Editor {
                 }
             });
         }
-
-        self.cross_block_drag = None;
-        self.cross_block_selection = Some(CrossBlockSelection {
-            anchor: CrossBlockSelectionEndpoint {
-                entity_id: first_id,
-                offset: 0,
-            },
-            focus: CrossBlockSelectionEndpoint {
-                entity_id: last_id,
-                offset: last_len,
-            },
-        });
-        self.sync_cross_block_selection_visuals(cx);
+        self.set_cross_block_drag_for_surface(surface, None);
+        self.set_cross_block_selection_for_surface(surface, Some(selection));
+        self.active_selection_surface = surface;
+        self.sync_cross_block_selection_visuals_for_surface(surface, cx);
         cx.notify();
     }
 
+    /// 首按全选所属文档表面，避免用户把块内选区误认为全文选择。
     pub(super) fn on_rendered_select_all_press(
         &mut self,
         block: Entity<Block>,
         cx: &mut Context<Self>,
     ) {
-        if !matches!(self.view_mode, ViewMode::Rendered | ViewMode::Preview) {
-            self.rendered_select_all_cycle = None;
-            return;
-        }
-
-        let now = std::time::Instant::now();
-        let block_id = block.entity_id();
-        let count = match self.rendered_select_all_cycle {
-            Some(cycle)
-                if cycle.entity_id == block_id
-                    && now.duration_since(cycle.last_pressed_at)
-                        <= Self::RENDERED_SELECT_ALL_CYCLE_WINDOW =>
+        let surface = match self.view_mode {
+            ViewMode::Rendered | ViewMode::Preview => SelectionSurface::Main,
+            ViewMode::Split
+                if self.selection_surface_contains_entity(
+                    SelectionSurface::SplitPreview,
+                    block.entity_id(),
+                ) =>
             {
-                cycle.count.saturating_add(1)
+                SelectionSurface::SplitPreview
             }
-            _ => 1,
-        }
-        .min(3);
-
-        self.rendered_select_all_cycle = Some(super::RenderedSelectAllCycle {
-            entity_id: block_id,
-            count,
-            last_pressed_at: now,
-        });
-
-        if count == 1 {
-            self.select_focused_block_text_for_rendered_select_all(block, cx);
-        } else {
-            self.select_all_rendered_document(cx);
-        }
+            _ => {
+                self.rendered_select_all_cycle = None;
+                return;
+            }
+        };
+        self.select_all_rendered_surface(surface, cx);
     }
 
     pub(super) fn cross_block_source_selection_snapshot(
@@ -337,6 +208,7 @@ impl Editor {
         ))
     }
 
+    /// Restores direction from canonical source bytes so history survives virtual entity remounts.
     pub(super) fn apply_cross_block_selection_snapshot_if_possible(
         &mut self,
         snapshot: &UndoSelectionSnapshot,
@@ -355,25 +227,60 @@ impl Editor {
         let Some(end) = self.endpoint_for_source_offset(range.end, &mappings, cx) else {
             return false;
         };
-        let Some(start_index) = self.document.visible_index_for_entity_id(start.entity_id) else {
+        let start_index = self.document.visible_index_for_entity_id(start.entity_id);
+        let end_index = self.document.visible_index_for_entity_id(end.entity_id);
+        let (start, end) = if start_index
+            .zip(end_index)
+            .is_some_and(|(start, end)| start != end)
+        {
+            (start, end)
+        } else if self.virtual_surface.is_some() {
+            let visible = self.document.visible_blocks();
+            let (Some(first), Some(last)) = (visible.first(), visible.last()) else {
+                return false;
+            };
+            let first = first.entity.clone();
+            let last = last.entity.clone();
+            (
+                CrossBlockSelectionEndpoint {
+                    entity_id: first.entity_id(),
+                    offset: 0,
+                },
+                CrossBlockSelectionEndpoint {
+                    entity_id: last.entity_id(),
+                    offset: last.read(cx).visible_len(),
+                },
+            )
+        } else {
             return false;
         };
-        let Some(end_index) = self.document.visible_index_for_entity_id(end.entity_id) else {
-            return false;
-        };
-        if start_index == end_index {
-            return false;
-        }
 
+        let revision = self.source_document.snapshot().revision();
         self.cross_block_selection = Some(if reversed {
             CrossBlockSelection {
                 anchor: end,
                 focus: start,
+                source_anchor: Some(CrossBlockSourceAnchor {
+                    byte_offset: range.end,
+                    revision,
+                }),
+                source_focus: Some(CrossBlockSourceAnchor {
+                    byte_offset: range.start,
+                    revision,
+                }),
             }
         } else {
             CrossBlockSelection {
                 anchor: start,
                 focus: end,
+                source_anchor: Some(CrossBlockSourceAnchor {
+                    byte_offset: range.start,
+                    revision,
+                }),
+                source_focus: Some(CrossBlockSourceAnchor {
+                    byte_offset: range.end,
+                    revision,
+                }),
             }
         });
         self.cross_block_drag = None;
@@ -384,14 +291,24 @@ impl Editor {
         true
     }
 
+    /// 兼容主表面的调用方；Split 右侧必须显式使用自己的命中投影。
     fn cross_block_endpoint_for_point(
         &self,
         position: Point<Pixels>,
         cx: &App,
     ) -> Option<CrossBlockSelectionEndpoint> {
+        self.cross_block_endpoint_for_surface(position, SelectionSurface::Main, cx)
+    }
+
+    /// Resolves pointer positions against only mounted blocks from the receiving projection.
+    fn cross_block_endpoint_for_surface(
+        &self,
+        position: Point<Pixels>,
+        surface: SelectionSurface,
+        cx: &App,
+    ) -> Option<CrossBlockSelectionEndpoint> {
         let mut previous: Option<(Entity<Block>, Bounds<Pixels>)> = None;
-        for visible in self.document.visible_blocks() {
-            let entity = visible.entity.clone();
+        for entity in self.selection_surface_entities(surface) {
             let bounds = entity.read(cx).last_bounds;
             let Some(bounds) = bounds else {
                 continue;
@@ -428,115 +345,122 @@ impl Editor {
         })
     }
 
+    /// Keeps the existing Main caller contract and compares endpoints in its visible order.
     fn cross_block_selection_is_empty(&self, selection: CrossBlockSelection) -> bool {
-        let Some(anchor_index) = self
-            .document
-            .visible_index_for_entity_id(selection.anchor.entity_id)
+        self.cross_block_selection_is_empty_for_surface(selection, SelectionSurface::Main)
+    }
+
+    /// Rejects stale endpoints from another projection before they can become a visible selection.
+    fn cross_block_selection_is_empty_for_surface(
+        &self,
+        selection: CrossBlockSelection,
+        surface: SelectionSurface,
+    ) -> bool {
+        if let (Some(anchor), Some(focus)) = (selection.source_anchor, selection.source_focus) {
+            if anchor.revision == self.source_document.snapshot().revision()
+                && focus.revision == anchor.revision
+            {
+                return anchor.byte_offset == focus.byte_offset;
+            }
+        }
+        let visible = self.selection_surface_entities(surface);
+        let Some(anchor_index) = visible
+            .iter()
+            .position(|entity| entity.entity_id() == selection.anchor.entity_id)
         else {
             return true;
         };
-        let Some(focus_index) = self
-            .document
-            .visible_index_for_entity_id(selection.focus.entity_id)
+        let Some(focus_index) = visible
+            .iter()
+            .position(|entity| entity.entity_id() == selection.focus.entity_id)
         else {
             return true;
         };
         anchor_index == focus_index && selection.anchor.offset == selection.focus.offset
     }
 
+    /// Preserves Main-only source editing paths while allowing read-only Split selection and copy.
     fn normalized_cross_block_selection(&self, cx: &App) -> Option<NormalizedCrossBlockSelection> {
-        let selection = self.cross_block_selection?;
-        let anchor = self.clamp_cross_block_endpoint(selection.anchor, cx)?;
-        let focus = self.clamp_cross_block_endpoint(selection.focus, cx)?;
-        let anchor_index = self
-            .document
-            .visible_index_for_entity_id(anchor.entity_id)?;
-        let focus_index = self.document.visible_index_for_entity_id(focus.entity_id)?;
-        let reversed = focus_index < anchor_index
-            || (focus_index == anchor_index && focus.offset < anchor.offset);
-        let (start, end, start_index, end_index) = if reversed {
-            (focus, anchor, focus_index, anchor_index)
-        } else {
-            (anchor, focus, anchor_index, focus_index)
-        };
-        let start = self.cross_block_endpoint_on_char_boundary(start, false, cx)?;
-        let end = self.cross_block_endpoint_on_char_boundary(end, true, cx)?;
-        if start_index == end_index && start.offset == end.offset {
-            return None;
-        }
-        Some(NormalizedCrossBlockSelection {
-            start,
-            end,
-            start_index,
-            end_index,
-            reversed,
-        })
+        self.normalized_cross_block_selection_for_surface(SelectionSurface::Main, cx)
     }
 
-    fn clamp_cross_block_endpoint(
-        &self,
-        endpoint: CrossBlockSelectionEndpoint,
-        cx: &App,
-    ) -> Option<CrossBlockSelectionEndpoint> {
-        let entity = self.document.block_entity_by_id(endpoint.entity_id)?;
-        let len = entity.read(cx).visible_len();
-        Some(CrossBlockSelectionEndpoint {
-            entity_id: endpoint.entity_id,
-            offset: endpoint.offset.min(len),
-        })
+    /// Keeps the established Main test and command entry while surface-aware pointer handling lives in its own module.
+    pub(super) fn begin_cross_block_drag_at_point(
+        &mut self,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.begin_surface_cross_block_drag_at_point(
+            SelectionSurface::Main,
+            position,
+            false,
+            None,
+            cx,
+        );
     }
 
-    fn cross_block_endpoint_on_char_boundary(
-        &self,
-        endpoint: CrossBlockSelectionEndpoint,
-        toward_end: bool,
-        cx: &App,
-    ) -> Option<CrossBlockSelectionEndpoint> {
-        let entity = self.document.block_entity_by_id(endpoint.entity_id)?;
-        let block = entity.read(cx);
-        let text = block.display_text();
-        let mut offset = endpoint.offset.min(text.len());
-        if toward_end {
-            while offset < text.len() && !text.is_char_boundary(offset) {
-                offset += 1;
-            }
-        } else {
-            while offset > 0 && !text.is_char_boundary(offset) {
-                offset -= 1;
-            }
-        }
-        Some(CrossBlockSelectionEndpoint {
-            entity_id: endpoint.entity_id,
-            offset,
-        })
-    }
-
+    /// Preserves Main callers for undo/edit paths and forwards the presentation surface explicitly.
     fn sync_cross_block_selection_visuals(&mut self, cx: &mut Context<Self>) {
-        let normalized = self.normalized_cross_block_selection(cx);
-        let visible_blocks = self.document.visible_blocks().to_vec();
-        let inline_commands_safe = normalized.is_some_and(|selection| {
-            self.cross_block_selection_supports_inline_commands(selection, cx)
-        });
-        for (index, visible) in visible_blocks.into_iter().enumerate() {
-            let next_range = normalized.and_then(|selection| {
-                if index < selection.start_index || index > selection.end_index {
-                    return None;
-                }
-                let block = visible.entity.read(cx);
-                let len = block.visible_len();
-                let range = if selection.start_index == selection.end_index {
-                    selection.start.offset.min(len)..selection.end.offset.min(len)
-                } else if index == selection.start_index {
-                    selection.start.offset.min(len)..len
-                } else if index == selection.end_index {
-                    0..selection.end.offset.min(len)
-                } else {
-                    0..len
-                };
-                (!range.is_empty()).then_some(range)
-            });
+        self.sync_cross_block_selection_visuals_for_surface(SelectionSurface::Main, cx);
+    }
 
-            visible.entity.update(cx, |block, cx| {
+    /// Mirrors a surface-local anchor/focus onto Block highlights without granting read-only commands.
+    pub(super) fn sync_cross_block_selection_visuals_for_surface(
+        &mut self,
+        surface: SelectionSurface,
+        cx: &mut Context<Self>,
+    ) {
+        let normalized = self.normalized_cross_block_selection_for_surface(surface, cx);
+        let visible_blocks = self.selection_surface_entities(surface);
+        let virtual_ranges = if surface == SelectionSurface::Main && self.virtual_surface.is_some()
+        {
+            normalized
+                .map(|selection| {
+                    self.virtual_cross_block_selection_ranges_for_entities(
+                        selection,
+                        &visible_blocks,
+                        cx,
+                    )
+                })
+                .unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
+        let inline_commands_safe = surface == SelectionSurface::Main
+            && self.document_surface_is_editable()
+            && normalized.is_some_and(|selection| {
+                self.cross_block_selection_supports_inline_commands(surface, selection, cx)
+            });
+        for (index, entity) in visible_blocks.into_iter().enumerate() {
+            let next_range = if surface == SelectionSurface::Main && self.virtual_surface.is_some()
+            {
+                virtual_ranges.get(&entity.entity_id()).cloned()
+            } else {
+                normalized.and_then(|selection| {
+                    let (Some(start_index), Some(end_index)) =
+                        (selection.start_index, selection.end_index)
+                    else {
+                        return None;
+                    };
+                    if index < start_index || index > end_index {
+                        return None;
+                    }
+                    let block = entity.read(cx);
+                    let len = block.visible_len();
+                    let range = if start_index == end_index {
+                        selection.start.offset.min(len)..selection.end.offset.min(len)
+                    } else if index == start_index {
+                        selection.start.offset.min(len)..len
+                    } else if index == end_index {
+                        0..selection.end.offset.min(len)
+                    } else {
+                        0..len
+                    };
+                    (!range.is_empty()).then_some(range)
+                })
+            };
+
+            entity.update(cx, |block, cx| {
                 let next_support = next_range.is_some() && inline_commands_safe;
                 if block.editor_selection_range != next_range
                     || block.editor_selection_supports_inline_commands != next_support
@@ -548,175 +472,6 @@ impl Editor {
             });
         }
     }
-
-    fn cross_block_selection_supports_inline_commands(
-        &self,
-        selection: NormalizedCrossBlockSelection,
-        cx: &App,
-    ) -> bool {
-        let visible = self.document.visible_blocks();
-        (selection.start_index..=selection.end_index).all(|index| {
-            let Some(visible_block) = visible.get(index) else {
-                return false;
-            };
-            let block = visible_block.entity.read(cx);
-            if block.is_read_only()
-                || block.uses_raw_text_editing()
-                || block.showing_rendered_image()
-                || matches!(block.kind(), BlockKind::Table | BlockKind::Separator)
-            {
-                return false;
-            }
-            let len = block.visible_len();
-            let current_range = if selection.start_index == selection.end_index {
-                selection.start.offset.min(len)..selection.end.offset.min(len)
-            } else if index == selection.start_index {
-                selection.start.offset.min(len)..len
-            } else if index == selection.end_index {
-                0..selection.end.offset.min(len)
-            } else {
-                0..len
-            };
-            let clean_range = block.current_to_clean_range(current_range);
-            clean_range.is_empty() || block.record.title.selection_supports_toolbar(clean_range)
-        })
-    }
-
-    /// 对兼容的跨块富文本选区一次性应用行内格式；验证、决策和提交均不可拆分。
-    pub(super) fn apply_cross_block_inline_command(
-        &mut self,
-        command: EditingCommandId,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let Some(selection) = self.normalized_cross_block_selection(cx) else {
-            return false;
-        };
-        let style = match command {
-            EditingCommandId::Bold => Some(StyleFlag::Bold),
-            EditingCommandId::Italic => Some(StyleFlag::Italic),
-            EditingCommandId::Underline => Some(StyleFlag::Underline),
-            EditingCommandId::Highlight => Some(StyleFlag::Highlight),
-            EditingCommandId::Superscript => Some(StyleFlag::Superscript),
-            EditingCommandId::Subscript => Some(StyleFlag::Subscript),
-            EditingCommandId::Strikethrough => Some(StyleFlag::Strikethrough),
-            EditingCommandId::InlineCode => Some(StyleFlag::Code),
-            EditingCommandId::ClearFormatting => None,
-            _ => return false,
-        };
-        let (mappings, _) = self.build_source_target_mappings_with_block_ranges(cx);
-        let mappings = mappings
-            .into_iter()
-            .map(|mapping| (mapping.entity.entity_id(), mapping))
-            .collect::<HashMap<_, _>>();
-        let visible = self.document.visible_blocks().to_vec();
-        let mut candidates = Vec::new();
-        let mut all_styled = style.is_some();
-
-        for index in selection.start_index..=selection.end_index {
-            let Some(visible_block) = visible.get(index) else {
-                return false;
-            };
-            let entity = visible_block.entity.clone();
-            let block = entity.read(cx);
-            if block.is_read_only()
-                || block.uses_raw_text_editing()
-                || block.showing_rendered_image()
-                || matches!(block.kind(), BlockKind::Table | BlockKind::Separator)
-            {
-                return false;
-            }
-            let len = block.visible_len();
-            let current_range = if selection.start_index == selection.end_index {
-                selection.start.offset.min(len)..selection.end.offset.min(len)
-            } else if index == selection.start_index {
-                selection.start.offset.min(len)..len
-            } else if index == selection.end_index {
-                0..selection.end.offset.min(len)
-            } else {
-                0..len
-            };
-            let clean_range = block.current_to_clean_range(current_range);
-            if !clean_range.is_empty()
-                && !block
-                    .record
-                    .title
-                    .selection_supports_toolbar(clean_range.clone())
-            {
-                return false;
-            }
-            let Some(mapping) = mappings.get(&entity.entity_id()) else {
-                return false;
-            };
-            let title_map = block.record.title.markdown_offset_map();
-            let markdown_len = title_map.markdown().len();
-            let Some(relative_start) = mapping.content_to_source.first().copied() else {
-                return false;
-            };
-            let Some(relative_end) = mapping.content_to_source.get(markdown_len).copied() else {
-                return false;
-            };
-            if let Some(flag) = style
-                && !clean_range.is_empty()
-            {
-                all_styled &= block
-                    .record
-                    .title
-                    .selection_has_style(clean_range.clone(), flag);
-            }
-            candidates.push((
-                entity.clone(),
-                clean_range,
-                block.record.title.clone(),
-                mapping.full_source_range.start + relative_start
-                    ..mapping.full_source_range.start + relative_end,
-            ));
-        }
-
-        let enabled = style.map(|_| !all_styled);
-        let mut targets = Vec::with_capacity(candidates.len());
-        let mut changed = false;
-        for (entity, clean_range, mut next_title, source_content_range) in candidates {
-            let target_changed = if let Some(flag) = style {
-                next_title.set_text_style(clean_range.clone(), flag, enabled.unwrap_or(true))
-            } else {
-                next_title.clear_text_formatting(clean_range.clone())
-            };
-            changed |= target_changed;
-            let replacement = next_title.serialize_markdown();
-            targets.push(CrossBlockInlineTarget {
-                entity,
-                next_title,
-                source_content_range,
-                replacement,
-            });
-        }
-        if !changed {
-            return false;
-        }
-
-        self.prepare_undo_capture(UndoCaptureKind::NonCoalescible, cx);
-        let virtual_edit = self.virtual_surface.is_some() && self.view_mode == ViewMode::Rendered;
-        if virtual_edit {
-            if !self.apply_virtual_cross_block_inline_targets(selection, &targets, cx) {
-                self.pending_virtual_undo_selection = None;
-                return false;
-            }
-        } else {
-            for target in targets {
-                target.entity.update(cx, move |block, cx| {
-                    block.record.set_title(target.next_title);
-                    block.sync_render_cache();
-                    cx.notify();
-                });
-            }
-            self.mark_dirty(cx);
-            self.sync_cross_block_selection_visuals(cx);
-        }
-        self.finalize_pending_undo_capture(cx);
-        self.request_active_block_scroll_into_view(cx);
-        cx.notify();
-        true
-    }
 }
 
 #[path = "selection_parts/controller.rs"]
@@ -725,3 +480,15 @@ mod controller;
 #[cfg(test)]
 #[path = "../../tests/unit/editor/selection.rs"]
 mod tests;
+
+#[cfg(all(test, target_os = "windows"))]
+#[path = "../../tests/unit/editor/ime_input_commands.rs"]
+mod ime_input_commands;
+
+#[cfg(test)]
+#[path = "../../tests/unit/editor/selection_virtualized.rs"]
+mod selection_virtualized;
+
+#[cfg(test)]
+#[path = "../../tests/unit/editor/selection_virtualized_clipboard.rs"]
+mod selection_virtualized_clipboard;

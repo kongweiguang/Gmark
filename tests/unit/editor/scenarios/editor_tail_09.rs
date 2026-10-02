@@ -244,110 +244,7 @@ fn benchmark_percentiles(samples: &mut [u128]) -> (f64, f64, f64) {
     )
 }
 
-fn run_gpui_pipeline_benchmark(cx: &mut TestAppContext, target_mib: usize) {
-    const INPUT_SAMPLES: usize = 30;
-    const SCROLL_SAMPLES: usize = 30;
-    const SAVE_SAMPLES: usize = 30;
-
-    init_editor_test_app(cx);
-    let source = mixed_projection_fixture(target_mib * 1024 * 1024);
-    let rss_before_mib = current_process_rss_mib();
-    let construction_started = Instant::now();
-    let (editor, visual_cx) = cx.add_window_view({
-        let source = source.clone();
-        move |_window, cx| Editor::from_markdown(cx, source, None)
-    });
-    let construction_ms = construction_started.elapsed().as_secs_f64() * 1_000.0;
-
-    let first_draw_started = Instant::now();
-    redraw(visual_cx);
-    let first_draw_ms = first_draw_started.elapsed().as_secs_f64() * 1_000.0;
-    let rss_after_first_draw_mib = current_process_rss_mib();
-    let recovery_temp = tempfile::tempdir().expect("recovery tempdir");
-    let recovery_journal =
-        crate::recovery::RecoveryJournal::create(recovery_temp.path(), None, source.clone())
-            .expect("recovery journal");
-    editor.update(visual_cx, |editor, _cx| {
-        editor.recovery_journal = Some(Arc::new(Mutex::new(recovery_journal)));
-    });
-
-    let mut input_mutation_samples = Vec::with_capacity(INPUT_SAMPLES);
-    let mut input_next_draw_samples = Vec::with_capacity(INPUT_SAMPLES);
-    let mut input_draw_samples = Vec::with_capacity(INPUT_SAMPLES);
-    for _ in 0..INPUT_SAMPLES {
-        let started = Instant::now();
-        editor.update(visual_cx, |editor, cx| {
-            let block = editor.document.first_root().expect("root block").clone();
-            let end = block.read(cx).display_text().len();
-            block.update(cx, |block, cx| {
-                block.prepare_undo_capture(crate::components::UndoCaptureKind::CoalescibleText, cx);
-                block.replace_text_in_visible_range(end..end, "x", None, false, cx);
-            });
-        });
-        input_mutation_samples.push(started.elapsed().as_micros());
-        let draw_started = Instant::now();
-        redraw(visual_cx);
-        input_next_draw_samples.push(draw_started.elapsed().as_micros());
-        input_draw_samples.push(started.elapsed().as_micros());
-    }
-
-    let mut scroll_draw_samples = Vec::with_capacity(SCROLL_SAMPLES);
-    for index in 0..SCROLL_SAMPLES {
-        editor.update(visual_cx, |editor, _cx| {
-            let max_y = f32::from(editor.scroll_handle.max_offset().height.max(px(0.0)));
-            let ratio = if index % 2 == 0 { 0.25 } else { 0.75 };
-            editor
-                .scroll_handle
-                .set_offset(point(px(0.0), px(-max_y * ratio)));
-        });
-        let started = Instant::now();
-        redraw(visual_cx);
-        scroll_draw_samples.push(started.elapsed().as_micros());
-    }
-
-    let save_path = temp_markdown_path(&format!("gpui-{target_mib}mib-benchmark"));
-    let mut save_samples = Vec::with_capacity(SAVE_SAMPLES);
-    for _ in 0..SAVE_SAMPLES {
-        let started = Instant::now();
-        visual_cx.update(|window, cx| {
-            editor.update(cx, |editor, cx| {
-                assert!(editor.save_to_existing_path(&save_path, window, cx));
-            });
-        });
-        save_samples.push(started.elapsed().as_micros());
-    }
-    let saved_bytes = fs::metadata(&save_path)
-        .expect("benchmark save should create target")
-        .len();
-    fs::remove_file(&save_path).expect("remove benchmark save");
-
-    let (input_p50_ms, input_p95_ms, input_p99_ms) = benchmark_percentiles(&mut input_draw_samples);
-    let (mutation_p50_ms, mutation_p95_ms, mutation_p99_ms) =
-        benchmark_percentiles(&mut input_mutation_samples);
-    let (next_draw_p50_ms, next_draw_p95_ms, next_draw_p99_ms) =
-        benchmark_percentiles(&mut input_next_draw_samples);
-    let (scroll_p50_ms, scroll_p95_ms, scroll_p99_ms) =
-        benchmark_percentiles(&mut scroll_draw_samples);
-    let (save_p50_ms, save_p95_ms, save_p99_ms) = benchmark_percentiles(&mut save_samples);
-    println!(
-        "gpui_pipeline_benchmark size_bytes={} construction_ms={construction_ms:.3} first_explicit_draw_ms={first_draw_ms:.3} input_mutation_p50_ms={mutation_p50_ms:.3} input_mutation_p95_ms={mutation_p95_ms:.3} input_mutation_p99_ms={mutation_p99_ms:.3} input_next_draw_p50_ms={next_draw_p50_ms:.3} input_next_draw_p95_ms={next_draw_p95_ms:.3} input_next_draw_p99_ms={next_draw_p99_ms:.3} input_to_draw_p50_ms={input_p50_ms:.3} input_to_draw_p95_ms={input_p95_ms:.3} input_to_draw_p99_ms={input_p99_ms:.3} scroll_draw_p50_ms={scroll_p50_ms:.3} scroll_draw_p95_ms={scroll_p95_ms:.3} scroll_draw_p99_ms={scroll_p99_ms:.3} save_total_p50_ms={save_p50_ms:.3} save_total_p95_ms={save_p95_ms:.3} save_total_p99_ms={save_p99_ms:.3} rss_before_mib={:.2} rss_after_first_draw_mib={:.2} saved_bytes={saved_bytes}",
-        source.len(),
-        rss_before_mib.unwrap_or(f64::NAN),
-        rss_after_first_draw_mib.unwrap_or(f64::NAN),
-    );
-}
-
-#[gpui::test]
-#[ignore = "release-only 1 MiB GPUI pipeline benchmark; run explicitly"]
-async fn gpui_pipeline_1mib_release_benchmark(cx: &mut TestAppContext) {
-    run_gpui_pipeline_benchmark(cx, 1);
-}
-
-#[gpui::test]
-#[ignore = "release-only 10 MiB GPUI pipeline benchmark; run explicitly"]
-async fn gpui_pipeline_10mib_release_benchmark(cx: &mut TestAppContext) {
-    run_gpui_pipeline_benchmark(cx, 10);
-}
+include!("editor_tail_09_benchmark.rs");
 
 #[gpui::test]
 async fn far_focused_row_does_not_expand_virtualized_scroll_window(cx: &mut TestAppContext) {
@@ -735,6 +632,7 @@ async fn virtualized_undo_redo_uses_rope_inverse_without_full_editor_snapshot(
 }
 
 #[gpui::test]
+/// Checks source anchoring and inverse edits while replacement endpoints live in separate regions.
 async fn virtualized_cross_region_replace_preserves_unmounted_source_and_undo_redo(
     cx: &mut TestAppContext,
 ) {
@@ -761,6 +659,8 @@ async fn virtualized_cross_region_replace_preserves_unmounted_source_and_undo_re
                 entity_id: visible[2].entity.entity_id(),
                 offset: 2,
             },
+            source_anchor: None,
+            source_focus: None,
         });
         assert!(editor.replace_cross_block_selection_with_text(
             "替换",

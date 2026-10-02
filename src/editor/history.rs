@@ -394,8 +394,9 @@ impl Editor {
         self.last_scroll_viewport_size = None;
     }
 
+    /// 历史写入入口再次校验实际选择表面，覆盖菜单和内部调用。
     pub(super) fn undo_document(&mut self, cx: &mut Context<Self>) {
-        if self.view_mode == ViewMode::Preview {
+        if !self.document_surface_is_editable() || self.has_active_ime_composition(cx) {
             return;
         }
         if self.virtual_surface.is_some() {
@@ -420,8 +421,9 @@ impl Editor {
         cx.notify();
     }
 
+    /// Split 右侧和候选暂存期间保持正文及历史不变量。
     pub(super) fn redo_document(&mut self, cx: &mut Context<Self>) {
-        if self.view_mode == ViewMode::Preview {
+        if !self.document_surface_is_editable() || self.has_active_ime_composition(cx) {
             return;
         }
         if self.virtual_surface.is_some() {

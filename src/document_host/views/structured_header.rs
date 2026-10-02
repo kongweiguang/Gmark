@@ -7,6 +7,7 @@ use crate::theme::{ThemeColors, workbench::SurfaceKind};
 use crate::ui::visual_preferences::VisualPreferencesManager;
 
 impl DocumentHost {
+    /// Keeps header commands under the structured focus owner so Source shortcuts cannot consume cell navigation.
     pub(super) fn render_structured_header(
         &mut self,
         layout: &StructuredPanelLayout,
@@ -82,6 +83,8 @@ impl DocumentHost {
                                     .bg(structured_selection_color)
                                     .border_color(colors.workbench.focus_ring)
                             })
+                            .capture_key_down(cx.listener(Self::on_structured_table_key_down))
+                            .on_key_down(cx.listener(Self::on_structured_table_key_down))
                             .child(if editing {
                                 div()
                                     .id("document-host-structured-cell-editor")

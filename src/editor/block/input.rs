@@ -19,7 +19,100 @@ use super::element;
 use crate::components::{BlockEvent, UndoCaptureKind};
 use crate::editor::math_edit::MathEditSession;
 
+/// Maps only owners with a dedicated text paint boundary so slot preedit is never attributed to block paint.
+fn input_paint_surface_for_ime_owner(
+    owner: &BlockImeCompositionOwner,
+) -> Option<crate::perf::InputPaintSurface> {
+    match owner {
+        BlockImeCompositionOwner::BlockText => Some(crate::perf::InputPaintSurface::BlockText),
+        BlockImeCompositionOwner::CodeLanguage => {
+            Some(crate::perf::InputPaintSurface::CodeLanguage)
+        }
+        BlockImeCompositionOwner::MathSource => Some(crate::perf::InputPaintSurface::MathSource),
+        BlockImeCompositionOwner::MathSlot(_) => None,
+    }
+}
+
+#[path = "input_parts/composition.rs"]
+mod composition;
+#[path = "input_parts/composition_owner.rs"]
+mod composition_owner;
+#[path = "input_parts/composition_view.rs"]
+mod composition_view;
+#[cfg(not(target_os = "windows"))]
+#[path = "input_compat.rs"]
+mod input_compat;
+pub(crate) use composition::{
+    BlockImeComposition, BlockImeCompositionOwner, BlockImeOriginalSelection,
+};
+
 impl Block {
+    /// Captures only the owner, revision, and visible selection needed to reject stale paint traces.
+    pub(crate) fn input_paint_snapshot(
+        &self,
+        surface: crate::perf::InputPaintSurface,
+    ) -> crate::perf::InputPaintSnapshot {
+        let (selection, reversed, editor_selection) = match surface {
+            crate::perf::InputPaintSurface::BlockText => (
+                &self.selected_range,
+                self.selection_reversed,
+                self.editor_selection_range.as_ref(),
+            ),
+            crate::perf::InputPaintSurface::CodeLanguage => (
+                &self.code_language_selected_range,
+                self.code_language_selection_reversed,
+                None,
+            ),
+            crate::perf::InputPaintSurface::MathSource => (
+                &self.math_source_selected_range,
+                self.math_source_selection_reversed,
+                None,
+            ),
+        };
+        let composition_generation = self
+            .ime_composition
+            .as_ref()
+            .filter(|composition| {
+                input_paint_surface_for_ime_owner(&composition.owner) == Some(surface)
+            })
+            .and_then(|composition| composition.paint_generation);
+
+        crate::perf::InputPaintSnapshot {
+            surface,
+            revision: self.document_revision,
+            selection_start: selection.start,
+            selection_end: selection.end,
+            selection_reversed: reversed,
+            editor_selection: editor_selection.map(|range| (range.start, range.end)),
+            composition_generation,
+        }
+    }
+
+    /// Starts a drag trace only after its Block selection has reached the rendered state.
+    pub(crate) fn begin_selection_input_trace(&self, cx: &mut Context<Self>) {
+        crate::perf::begin_input_to_gpui_paint(
+            crate::perf::InputPaintKind::SelectionDrag,
+            cx.entity().entity_id(),
+            self.input_paint_snapshot(crate::perf::InputPaintSurface::BlockText),
+        );
+    }
+
+    /// Completes a timed input with the post-edit selection snapshot for its actual text surface.
+    pub(crate) fn finish_input_to_gpui_paint(
+        &self,
+        started: Option<crate::perf::InputPaintStart>,
+        kind: crate::perf::InputPaintKind,
+        surface: crate::perf::InputPaintSurface,
+        cx: &mut Context<Self>,
+    ) {
+        crate::perf::finish_input_to_gpui_paint(
+            started,
+            kind,
+            cx.entity().entity_id(),
+            self.input_paint_snapshot(surface),
+        );
+    }
+
     fn math_source_range_from_utf16(&self, text: &str, range_utf16: &Range<usize>) -> Range<usize> {
         let range = Self::utf16_range_to_utf8_in(text, range_utf16);
         let start = range.start.min(text.len());
@@ -27,13 +120,16 @@ impl Block {
         start.min(end)..start.max(end)
     }
 
+    /// Places the system candidate window against the same overlaid source text shown on screen.
     fn math_source_bounds_for_range(
         &self,
         range_utf16: &Range<usize>,
         bounds: Bounds<Pixels>,
     ) -> Option<Bounds<Pixels>> {
-        let text = self.math_source_text();
-        let range = self.math_source_range_from_utf16(&text, range_utf16);
+        let text = self
+            .ime_visible_text(&BlockImeCompositionOwner::MathSource)
+            .unwrap_or_else(|| self.math_source_text());
+        let range = Self::utf16_range_to_utf8_in(&text, range_utf16);
         let line = self.math_source_last_layout.as_ref()?;
         let layout_bounds = self.math_source_last_bounds.unwrap_or(bounds);
         let left = layout_bounds.left() + line.x_for_index(range.start);
@@ -126,15 +222,19 @@ impl Block {
         new_text.replace("\r\n", " ").replace(['\r', '\n'], " ")
     }
 
+    /// Maps native formula-slot ranges through the disposable composition preview when present.
     fn math_bounds_for_range(
         &self,
         range_utf16: &Range<usize>,
         bounds: Bounds<Pixels>,
     ) -> Option<Bounds<Pixels>> {
-        let session = self.math_edit_session.as_ref()?;
-        let (slot, text) = self.math_input_context()?;
+        let (slot, base_text) = self.math_input_context()?;
+        let owner = BlockImeCompositionOwner::MathSlot(slot.clone());
+        let text = self.ime_visible_text(&owner).unwrap_or(base_text);
         let range =
             Self::math_clamped_range(&text, Self::utf16_range_to_utf8_in(&text, range_utf16));
+        let preview = self.math_ime_preview_session();
+        let session = preview.as_ref().or(self.math_edit_session.as_ref())?;
         let document = session.document();
         let anchor = MathCursor2D::at(document, slot.clone(), range.start).ok()?;
         let focus = MathCursor2D::at(document, slot, range.end).ok()?;
@@ -157,6 +257,12 @@ impl Block {
 }
 
 impl EntityInputHandler for Block {
+    /// Pins the selection before platforms that report only a committed result can replace it.
+    fn composition_started(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_ime_composition(window, cx);
+    }
+
+    /// Exposes the virtual preedit view to the pinned OS target without publishing it.
     fn text_for_range(
         &mut self,
         range_utf16: Range<usize>,
@@ -164,6 +270,17 @@ impl EntityInputHandler for Block {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
+        if self.ime_reject_until_end {
+            return None;
+        }
+        if let Some(owner) = self.ime_composition_owner()
+            && let Some(text) = self.ime_visible_text(&owner)
+        {
+            let range = Self::utf16_range_to_utf8_in(&text, &range_utf16);
+            actual_range.replace(Self::utf8_range_to_utf16_in(&text, &range));
+            return text.get(range).map(ToOwned::to_owned);
+        }
+
         if self.math_source_focus_handle.is_focused(_window) {
             let text = self.math_source_text();
             let range = self.math_source_range_from_utf16(&text, &range_utf16);
@@ -191,12 +308,20 @@ impl EntityInputHandler for Block {
         Some(self.display_text()[range].to_string())
     }
 
+    /// Keeps native selection queries in the same coordinate space as staged preedit text.
     fn selected_text_range(
         &mut self,
         _ignore_disabled_input: bool,
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
+        if self.ime_reject_until_end {
+            return None;
+        }
+        if let Some(owner) = self.ime_composition_owner() {
+            return self.ime_selected_text_range(&owner);
+        }
+
         if self.math_source_focus_handle.is_focused(_window) {
             let text = self.math_source_text();
             let (range, reversed) = self.math_source_selection();
@@ -234,11 +359,19 @@ impl EntityInputHandler for Block {
         })
     }
 
+    /// Reports the virtual marked range while preserving the distinction from terminal state.
     fn marked_text_range(
         &self,
         window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Range<usize>> {
+        if self.ime_reject_until_end {
+            return None;
+        }
+        if let Some(owner) = self.ime_composition_owner() {
+            return self.ime_marked_text_range(&owner);
+        }
+
         if self.math_source_focus_handle.is_focused(window) {
             let text = self.math_source_text();
             return self.math_source_marked_range.as_ref().map(|range| {
@@ -268,7 +401,12 @@ impl EntityInputHandler for Block {
             .map(|range| self.range_to_utf16(range))
     }
 
+    /// Treats unmark as a visual hint only; explicit composition termination owns rollback.
     fn unmark_text(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
+        if self.ime_composition.is_some() || self.ime_reject_until_end {
+            return;
+        }
+
         if self.math_source_focus_handle.is_focused(window) {
             self.math_source_marked_range = None;
             return;
@@ -289,6 +427,7 @@ impl EntityInputHandler for Block {
         self.marked_range = None;
     }
 
+    /// Commits the OS result against its captured baseline and ignores late rejected callbacks.
     fn replace_text_in_range(
         &mut self,
         range_utf16: Option<Range<usize>>,
@@ -296,9 +435,16 @@ impl EntityInputHandler for Block {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.ime_reject_until_end {
+            return;
+        }
+        if self.ime_composition.is_some() && self.commit_ime_result(new_text, cx) {
+            return;
+        }
         if self.is_read_only() {
             return;
         }
+        let paint_started = crate::perf::start_input_to_gpui_paint();
         if self.math_source_focus_handle.is_focused(_window) {
             let text = self.math_source_text();
             let visible_range = range_utf16
@@ -321,6 +467,14 @@ impl EntityInputHandler for Block {
             );
             if changed || was_marked {
                 self.math_source_marked_range = None;
+            }
+            if changed {
+                self.finish_input_to_gpui_paint(
+                    paint_started,
+                    crate::perf::InputPaintKind::Typing,
+                    crate::perf::InputPaintSurface::MathSource,
+                    cx,
+                );
             }
             return;
         }
@@ -381,8 +535,20 @@ impl EntityInputHandler for Block {
                 .map(|range| self.code_language_range_from_utf16(range))
                 .or(self.code_language_marked_range.clone())
                 .unwrap_or(self.code_language_selected_range.clone());
+            let original_text = self.code_language_text().to_owned();
+            let original_selection = self.code_language_selected_range.clone();
             self.prepare_undo_capture(undo_kind, cx);
             self.replace_code_language_text_in_range(visible_range, new_text, None, false, cx);
+            if self.code_language_text() != original_text
+                || self.code_language_selected_range != original_selection
+            {
+                self.finish_input_to_gpui_paint(
+                    paint_started,
+                    crate::perf::InputPaintKind::Typing,
+                    crate::perf::InputPaintSurface::CodeLanguage,
+                    cx,
+                );
+            }
             return;
         }
 
@@ -405,7 +571,16 @@ impl EntityInputHandler for Block {
             .map(|range| self.range_from_utf16(range))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        let should_trace_input = !new_text.is_empty() || !visible_range.is_empty();
         if self.try_apply_auto_pair_input(visible_range.clone(), new_text, cx) {
+            if should_trace_input {
+                self.finish_input_to_gpui_paint(
+                    paint_started,
+                    crate::perf::InputPaintKind::Typing,
+                    crate::perf::InputPaintSurface::BlockText,
+                    cx,
+                );
+            }
             return;
         }
         self.prepare_undo_capture(
@@ -417,8 +592,17 @@ impl EntityInputHandler for Block {
             cx,
         );
         self.replace_text_in_visible_range(visible_range, new_text, None, false, cx);
+        if should_trace_input {
+            self.finish_input_to_gpui_paint(
+                paint_started,
+                crate::perf::InputPaintKind::Typing,
+                crate::perf::InputPaintSurface::BlockText,
+                cx,
+            );
+        }
     }
 
+    /// Uses staged composition only where GPUI delivers explicit terminal events; legacy adapters publish marked updates eagerly.
     fn replace_and_mark_text_in_range(
         &mut self,
         range_utf16: Option<Range<usize>>,
@@ -427,143 +611,43 @@ impl EntityInputHandler for Block {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.is_read_only() {
+        if self.ime_reject_until_end {
             return;
         }
-        if self.math_source_focus_handle.is_focused(_window) {
-            let text = self.math_source_text();
-            let visible_range = range_utf16
-                .as_ref()
-                .map(|range| self.math_source_range_from_utf16(&text, range))
-                .or_else(|| self.math_source_marked_range.clone())
-                .unwrap_or_else(|| self.math_source_selection().0);
-            let selected_range_relative = new_selected_range_utf16
-                .as_ref()
-                .map(|range| Self::utf16_range_to_utf8_in(new_text, range));
-            let changed = self.replace_math_source_text_in_range(
-                visible_range,
-                new_text,
-                selected_range_relative,
-                !new_text.is_empty(),
-                UndoCaptureKind::ImeComposition,
-                cx,
-            );
-            if !changed {
-                self.math_source_marked_range = None;
-            }
-            return;
-        }
-
-        if self.math_structure_focus_handle.is_focused(_window) && self.math_edit_session.is_some()
-        {
-            let Some((slot, text)) = self.math_input_context() else {
-                return;
-            };
-            let visible_range = range_utf16
-                .as_ref()
-                .map(|range| Self::utf16_range_to_utf8_in(&text, range))
-                .or_else(|| self.math_marked_range.clone())
-                .unwrap_or_else(|| {
-                    self.math_edit_session
-                        .as_ref()
-                        .map(|session| Self::math_selection_range(session, &slot, text.len()).0)
-                        .unwrap_or(0..0)
-                });
-            let visible_range = Self::math_clamped_range(&text, visible_range);
-            let _ = self.set_math_selection(slot, visible_range.clone());
-            let sanitized = Self::math_input_text(new_text);
-            let selected_range_relative = new_selected_range_utf16
-                .as_ref()
-                .map(|range| Self::utf16_range_to_utf8_in(&sanitized, range))
-                .map(|range| Self::math_clamped_range(&sanitized, range));
-            let inserted_end = visible_range
-                .start
-                .saturating_add(sanitized.len())
-                .min(text.len().saturating_add(sanitized.len()));
-            let changed = self.execute_math_command_live(
-                MathEditCommand::InsertText(sanitized.clone()),
-                UndoCaptureKind::ImeComposition,
-                cx,
-            );
-
-            if !changed {
-                self.math_marked_range = None;
-                return;
-            }
-
-            // `InsertText` leaves the domain cursor after the inserted text.
-            // IME providers may ask for a different selected subrange; restore
-            // it in the same slot after publication so the next composition
-            // update continues from the provider's UTF-16 selection.
-            if let Some(relative) = selected_range_relative {
-                if let Some((next_slot, _)) = self.math_input_context() {
-                    let absolute = visible_range.start.saturating_add(relative.start)
-                        ..visible_range.start.saturating_add(relative.end);
-                    let _ = self.set_math_selection(next_slot, absolute);
-                }
-            }
-            self.math_marked_range =
-                (!sanitized.is_empty()).then_some(visible_range.start..inserted_end);
-            return;
-        }
-
-        if self.code_language_focus_handle.is_focused(_window) {
-            let visible_range = range_utf16
-                .as_ref()
-                .map(|range| self.code_language_range_from_utf16(range))
-                .or(self.code_language_marked_range.clone())
-                .unwrap_or(self.code_language_selected_range.clone());
-            let sanitized_new_text = new_text.replace("\r\n", " ").replace(['\r', '\n'], " ");
-            let selected_range_relative = new_selected_range_utf16
-                .as_ref()
-                .map(|range_utf16| Self::utf16_range_to_utf8_in(&sanitized_new_text, range_utf16))
-                .map(|relative| relative.start..relative.end);
-
-            self.prepare_undo_capture(UndoCaptureKind::ImeComposition, cx);
-            self.replace_code_language_text_in_range(
-                visible_range,
-                &sanitized_new_text,
-                selected_range_relative,
-                !sanitized_new_text.is_empty(),
-                cx,
-            );
-            return;
-        }
-
-        if self.editor_selection_range.is_some() {
-            let selected_range_relative = new_selected_range_utf16
-                .as_ref()
-                .map(|range_utf16| Self::utf16_range_to_utf8_in(new_text, range_utf16))
-                .map(|relative| relative.start..relative.end);
-            cx.emit(BlockEvent::RequestReplaceCrossBlockSelection {
-                text: new_text.to_string(),
-                selected_range_relative,
-                mark_inserted_text: !new_text.is_empty(),
-                undo_kind: UndoCaptureKind::ImeComposition,
-            });
-            return;
-        }
-
-        self.prepare_undo_capture(UndoCaptureKind::ImeComposition, cx);
-        let visible_range = range_utf16
-            .as_ref()
-            .map(|range| self.range_from_utf16(range))
-            .or(self.marked_range.clone())
-            .unwrap_or(self.selected_range.clone());
-        let selected_range_relative = new_selected_range_utf16
-            .as_ref()
-            .map(|range_utf16| Self::utf16_range_to_utf8_in(new_text, range_utf16))
-            .map(|relative| relative.start..relative.end);
-
-        self.replace_text_in_visible_range(
-            visible_range,
+        #[cfg(target_os = "windows")]
+        self.stage_ime_preedit(range_utf16, new_text, new_selected_range_utf16, _window, cx);
+        #[cfg(not(target_os = "windows"))]
+        self.replace_and_mark_text_compat(
+            range_utf16,
             new_text,
-            selected_range_relative,
-            !new_text.is_empty(),
+            new_selected_range_utf16,
+            _window,
             cx,
         );
     }
 
+    /// Delivers the terminal result first, then replays queued unmanaged commands after Changed listeners run.
+    fn composition_ended(
+        &mut self,
+        end: CompositionEnd,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.end_ime_composition(end, cx);
+        let block = cx.entity().downgrade();
+        window.defer(cx, move |window, cx| {
+            let _ = block.update(cx, |block, cx| {
+                block.replay_unmanaged_input_commands(window, cx);
+            });
+        });
+    }
+
+    /// Preserves the active preedit after IMM rejects a deferred completion request.
+    fn composition_finish_failed(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.ime_composition_finish_failed(cx);
+    }
+
+    /// Resolves candidate geometry from the text surface that owns the native composition.
     fn bounds_for_range(
         &mut self,
         range_utf16: Range<usize>,
@@ -571,13 +655,33 @@ impl EntityInputHandler for Block {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        if self.math_source_focus_handle.is_focused(_window) {
-            return self.math_source_bounds_for_range(&range_utf16, bounds);
+        if self.ime_reject_until_end {
+            return None;
         }
-
-        if self.math_structure_focus_handle.is_focused(_window) && self.math_edit_session.is_some()
-        {
-            return self.math_bounds_for_range(&range_utf16, bounds);
+        let owner = self
+            .ime_composition_owner()
+            .or_else(|| self.focused_ime_owner(_window));
+        if let Some(owner) = owner {
+            match owner {
+                BlockImeCompositionOwner::MathSource => {
+                    return self.math_source_bounds_for_range(&range_utf16, bounds);
+                }
+                BlockImeCompositionOwner::MathSlot(_) => {
+                    return self.math_bounds_for_range(&range_utf16, bounds);
+                }
+                BlockImeCompositionOwner::CodeLanguage => {
+                    let text = self.ime_visible_text(&BlockImeCompositionOwner::CodeLanguage)?;
+                    let line = self.code_language_last_layout.as_ref()?;
+                    let range = Self::utf16_range_to_utf8_in(&text, &range_utf16);
+                    let start_x = line.x_for_index(range.start);
+                    let end_x = line.x_for_index(range.end);
+                    return Some(Bounds::from_corners(
+                        point(bounds.left() + start_x, bounds.top()),
+                        point(bounds.left() + end_x, bounds.bottom()),
+                    ));
+                }
+                BlockImeCompositionOwner::BlockText => {}
+            }
         }
 
         if self.code_language_focus_handle.is_focused(_window) {
@@ -592,32 +696,84 @@ impl EntityInputHandler for Block {
         }
 
         let lines = self.last_layout.as_ref()?;
-        let range = self.range_from_utf16(&range_utf16);
         let line_height = self.last_line_height;
-        let text = self.display_text();
-        element::range_bounds(lines, bounds, line_height, text, range, self.text_align())
+        let text = self
+            .ime_visible_text(&BlockImeCompositionOwner::BlockText)
+            .unwrap_or_else(|| self.display_text().to_owned());
+        let range = Self::utf16_range_to_utf8_in(&text, &range_utf16);
+        element::range_bounds(lines, bounds, line_height, &text, range, self.text_align())
     }
 
+    /// Maps pointer hit tests against candidate text to UTF-16 coordinates in the pinned surface.
     fn character_index_for_point(
         &mut self,
         pt: Point<Pixels>,
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
-        if self.math_source_focus_handle.is_focused(_window) {
-            let index = self.math_source_index_for_point(pt);
-            return Some(Self::utf8_to_utf16_in(&self.math_source_text(), index));
+        if self.ime_reject_until_end {
+            return None;
         }
-
-        if self.code_language_focus_handle.is_focused(_window) {
-            let index = self.code_language_index_for_mouse_position(pt);
-            return Some(Self::utf8_to_utf16_in(self.code_language_text(), index));
+        let owner = self
+            .ime_composition_owner()
+            .or_else(|| self.focused_ime_owner(_window));
+        match owner {
+            Some(BlockImeCompositionOwner::MathSource) => {
+                let text = self.ime_visible_text(&BlockImeCompositionOwner::MathSource)?;
+                let bounds = self.math_source_last_bounds?;
+                let line = self.math_source_last_layout.as_ref()?;
+                let index = line
+                    .closest_index_for_x(pt.x - bounds.left())
+                    .min(text.len());
+                return Some(Self::utf8_to_utf16_in(&text, index));
+            }
+            Some(BlockImeCompositionOwner::CodeLanguage) => {
+                let text = self.ime_visible_text(&BlockImeCompositionOwner::CodeLanguage)?;
+                let bounds = self.code_language_last_bounds?;
+                let line = self.code_language_last_layout.as_ref()?;
+                let index = if pt.x <= bounds.left() {
+                    0
+                } else if pt.x >= bounds.right() {
+                    text.len()
+                } else {
+                    line.closest_index_for_x(pt.x - bounds.left())
+                        .min(text.len())
+                };
+                return Some(Self::utf8_to_utf16_in(&text, index));
+            }
+            Some(BlockImeCompositionOwner::MathSlot(slot)) => {
+                let text = self.ime_visible_text(&BlockImeCompositionOwner::MathSlot(slot))?;
+                let bounds = self.last_bounds?;
+                let lines = self.last_layout.as_ref()?;
+                let ranges = element::hard_line_ranges(&text);
+                let relative = Point {
+                    x: pt.x - bounds.left(),
+                    y: pt.y - bounds.top(),
+                };
+                let (line_idx, y_in_line) =
+                    element::wrapped_line_for_y(lines, self.last_line_height, relative.y)?;
+                let layout = &lines[line_idx];
+                let origin_x = element::aligned_line_left(layout, bounds, self.text_align());
+                let offset = match layout.closest_index_for_position(
+                    point(pt.x - origin_x, y_in_line),
+                    self.last_line_height,
+                ) {
+                    Ok(index) | Err(index) => index,
+                };
+                return Some(Self::utf8_to_utf16_in(
+                    &text,
+                    ranges[line_idx].start + offset,
+                ));
+            }
+            Some(BlockImeCompositionOwner::BlockText) | None => {}
         }
 
         let bounds = self.last_bounds?;
         let lines = self.last_layout.as_ref()?;
-        let text = self.display_text();
-        let ranges = element::hard_line_ranges(text);
+        let text = self
+            .ime_visible_text(&BlockImeCompositionOwner::BlockText)
+            .unwrap_or_else(|| self.display_text().to_owned());
+        let ranges = element::hard_line_ranges(&text);
         let relative = Point {
             x: pt.x - bounds.left(),
             y: pt.y - bounds.top(),
@@ -632,6 +788,6 @@ impl EntityInputHandler for Block {
             Ok(idx) | Err(idx) => idx,
         };
         let utf8_index = ranges[line_idx].start + utf8_offset_in_line;
-        Some(Self::utf8_to_utf16_in(self.display_text(), utf8_index))
+        Some(Self::utf8_to_utf16_in(&text, utf8_index))
     }
 }

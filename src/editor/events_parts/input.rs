@@ -303,6 +303,7 @@ impl Editor {
         true
     }
 
+    /// Captures Tab before block-local actions so indentation waits for native IME completion.
     pub(crate) fn on_editor_key_down_capture(
         &mut self,
         event: &KeyDownEvent,
@@ -384,13 +385,9 @@ impl Editor {
         }
 
         if modifiers.shift {
-            target.update(cx, |block, block_cx| {
-                block.on_outdent_block(&OutdentBlock, window, block_cx);
-            });
+            self.on_outdent_block(&OutdentBlock, window, cx);
         } else {
-            target.update(cx, |block, block_cx| {
-                block.on_indent_block(&IndentBlock, window, block_cx);
-            });
+            self.on_indent_block(&IndentBlock, window, cx);
         }
         cx.stop_propagation();
     }

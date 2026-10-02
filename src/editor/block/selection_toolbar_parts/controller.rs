@@ -16,7 +16,11 @@ impl Block {
         }
     }
 
+    /// 拖选或 IME 预编辑期间隐藏会拦截指针的浮层，让选择手势和组合输入先完成。
     pub(crate) fn selection_toolbar_visible(&self) -> bool {
+        if self.is_selecting || self.has_ime_composition() {
+            return false;
+        }
         let Some(range) = self.selection_toolbar_range() else {
             return false;
         };

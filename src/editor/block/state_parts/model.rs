@@ -1,6 +1,8 @@
 // @author kongweiguang
 
 use super::*;
+use gmark_math_edit::MathEditCommand;
+use std::ops::Range;
 
 /// Persistent data of a block independent of the editor runtime.
 ///
@@ -463,6 +465,8 @@ pub(crate) enum BlockHostAction {
     PageDown,
     JumpToTop,
     JumpToBottom,
+    /// Lets an authoritative Source host commit logical-row edits after IME completion.
+    LineOperation(super::super::LineOperation),
     DismissTransientUi,
 }
 
@@ -495,6 +499,56 @@ impl std::fmt::Debug for MermaidSvgExportRequest {
     }
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum BlockInputCommand {
+    /// Cut the current document selection after its composition owner resolves.
+    Cut,
+    /// Paste clipboard content at the restored document selection.
+    Paste,
+    /// Paste clipboard text without preserving rich clipboard structure.
+    PasteAsPlainText,
+    /// Delete the current selection or the adjacent character.
+    Delete,
+    /// Delete backward from the current selection or caret.
+    DeleteBack,
+    /// Delete the preceding word from the current selection or caret.
+    WordDeleteBack,
+    /// Delete the following word from the current selection or caret.
+    WordDeleteForward,
+    /// Select all content in the current document input surface.
+    SelectAll,
+}
+
+#[derive(Debug, Clone)]
+pub enum BlockImeInteraction {
+    /// Preserve a text hit in the Block's baseline visible-text coordinate space.
+    PointerSelection {
+        clean_offset: usize,
+        click_count: usize,
+        shift: bool,
+    },
+    /// Extend the queued selection using another hit captured in baseline coordinates.
+    PointerSelectionMove { clean_offset: usize },
+    /// End a deferred drag without discarding the selection produced by its queued moves.
+    PointerSelectionEnd,
+    /// Apply a formula palette command only after its current native input has resolved.
+    MathPaletteCommand(MathEditCommand),
+    /// Replay a document command against the same clean-text selection after composition.
+    InputCommand {
+        command: BlockInputCommand,
+        selection: Range<usize>,
+        reversed: bool,
+        base_revision: gmark_document::Revision,
+    },
+    /// Apply a stable rich-text command after restoring its original selection.
+    InlineCommand {
+        command: EditingCommandId,
+        selection: Range<usize>,
+        reversed: bool,
+        base_revision: gmark_document::Revision,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub enum BlockEvent {
     /// Capture the current document state before an upcoming mutation.
@@ -506,6 +560,14 @@ pub enum BlockEvent {
     /// Hosts with their own document model use this to translate the local
     /// block range into a stable source anchor without waiting for an edit.
     SelectionChanged,
+    /// Resolve a focus or pointer intent only after the owning native composition ends.
+    RequestImeInteraction { interaction: BlockImeInteraction },
+    /// Native clipboard rejection is reported before Cut mutates the selection or document.
+    RequestClipboardFailure,
+    /// 平台终态只唤醒等待中的视图操作；预编辑和取消不得进入正文事务。
+    ImeCompositionEnded { committed: bool },
+    /// 完成请求失败仍保留候选会话，宿主只展示状态并允许用户重试。
+    ImeCompositionFinishFailed,
     /// The user pressed Enter; a new sibling should be created with the given
     /// trailing text. At block start the sibling is inserted before the intact
     /// current block so its semantic kind moves together with its content.

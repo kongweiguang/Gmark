@@ -547,7 +547,8 @@ impl Block {
             .unwrap_or(self.collapsed_caret_affinity)
     }
 
-    pub(super) fn sync_collapsed_caret_affinity(&mut self) {
+    /// Recomputes projection-side caret affinity after restoring a cancelled IME selection.
+    pub(crate) fn sync_collapsed_caret_affinity(&mut self) {
         self.collapsed_caret_affinity = if self.selected_range.is_empty() {
             self.projection
                 .as_ref()

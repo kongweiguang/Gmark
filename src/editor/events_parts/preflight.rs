@@ -12,6 +12,45 @@ impl Editor {
         event: &BlockEvent,
         cx: &mut Context<Self>,
     ) -> bool {
+        // 原平台 owner 可能因共享冲突脱离投影，终态仍必须唤醒等待器。
+        if matches!(event, BlockEvent::ImeCompositionEnded { .. }) {
+            self.ime_completion_requested = false;
+            self.ime_completion_failed = false;
+            self.schedule_auto_save(cx);
+            cx.notify();
+            return true;
+        }
+        if matches!(event, BlockEvent::ImeCompositionFinishFailed) {
+            self.ime_completion_requested = false;
+            self.ime_completion_failed = true;
+            self.show_pane_notice("输入法暂未完成，请确认或取消候选后重试操作", cx);
+            return true;
+        }
+        if matches!(event, BlockEvent::RequestClipboardFailure) {
+            self.show_pane_notice("无法写入剪贴板，文字已保留，请重试", cx);
+            return true;
+        }
+        let Some(surface) = self.selection_surface_for_block_id(block.entity_id()) else {
+            return true;
+        };
+        self.active_selection_surface = surface;
+        if let BlockEvent::RequestImeInteraction { interaction } = event {
+            self.queue_ime_operation(
+                crate::editor::ime_lifecycle::DeferredImeOperation::InputInteraction {
+                    tab: self.tabs.records.get(self.tabs.active).map(|tab| tab.id),
+                    surface,
+                    block: block.clone(),
+                    interaction: interaction.clone(),
+                },
+                cx,
+            );
+            return true;
+        }
+        if !self.document_surface_is_editable_for(surface)
+            && Self::block_event_requires_document_write(event)
+        {
+            return true;
+        }
         if let BlockEvent::PrepareUndo { kind } = event {
             self.prepare_undo_capture_from_stable_snapshot(*kind);
             return true;
@@ -141,5 +180,32 @@ impl Editor {
             return true;
         }
         false
+    }
+
+    /// Filters only source mutations so read-only previews retain navigation and view-only events.
+    fn block_event_requires_document_write(event: &BlockEvent) -> bool {
+        matches!(
+            event,
+            BlockEvent::Changed
+                | BlockEvent::PrepareUndo { .. }
+                | BlockEvent::RequestNewline { .. }
+                | BlockEvent::RequestEnterCalloutBody
+                | BlockEvent::RequestQuoteBreak
+                | BlockEvent::RequestCalloutBreak
+                | BlockEvent::RequestMergeIntoPrev { .. }
+                | BlockEvent::RequestPasteMultiline { .. }
+                | BlockEvent::RequestPasteImage { .. }
+                | BlockEvent::RequestSlashCommand { .. }
+                | BlockEvent::RequestEditingCommand { .. }
+                | BlockEvent::RequestMoveBlock { .. }
+                | BlockEvent::RequestReplaceCrossBlockSelection { .. }
+                | BlockEvent::RequestIndent
+                | BlockEvent::RequestOutdent
+                | BlockEvent::RequestDowngradeNestedListItemToChildParagraph
+                | BlockEvent::ToggleTaskChecked
+                | BlockEvent::RequestAppendTableColumn
+                | BlockEvent::RequestAppendTableRow
+                | BlockEvent::RequestDelete
+        )
     }
 }

@@ -276,22 +276,52 @@ impl Editor {
         }
     }
 
+    /// 翻页归属实际文本焦点；候选终态先于插入点和视口移动。
     pub(crate) fn on_page_up(
         &mut self,
-        _: &crate::components::PageUp,
-        _window: &mut Window,
+        action: &crate::components::PageUp,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        match self.route_navigation_action_to_focused_owner(
+            crate::editor::editing_navigation::FocusedNavigationAction::PageUp,
+            window,
+            cx,
+        ) {
+            crate::editor::editing_navigation::EditorActionRoute::Local => {}
+            _ => return,
+        }
+        if self.defer_action_for_ime(action, window, cx) {
+            return;
+        }
+        if self.move_focused_by_page(-1, window, cx) {
+            return;
+        }
         let page = self.scroll_handle.bounds().size.height;
         self.scroll_viewport_by(page, cx);
     }
 
+    /// 下一页沿用原文本目标，不让独立字段或其他窗格接收延迟导航。
     pub(crate) fn on_page_down(
         &mut self,
-        _: &crate::components::PageDown,
-        _window: &mut Window,
+        action: &crate::components::PageDown,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        match self.route_navigation_action_to_focused_owner(
+            crate::editor::editing_navigation::FocusedNavigationAction::PageDown,
+            window,
+            cx,
+        ) {
+            crate::editor::editing_navigation::EditorActionRoute::Local => {}
+            _ => return,
+        }
+        if self.defer_action_for_ime(action, window, cx) {
+            return;
+        }
+        if self.move_focused_by_page(1, window, cx) {
+            return;
+        }
         let page = self.scroll_handle.bounds().size.height;
         self.scroll_viewport_by(-page, cx);
     }

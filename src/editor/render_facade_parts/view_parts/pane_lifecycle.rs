@@ -361,9 +361,20 @@ impl Editor {
     pub(in crate::editor) fn handle_pane_event(
         &mut self,
         event: crate::editor::panes::PaneEvent,
-        window: Option<&mut Window>,
+        mut window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
+        if self.has_active_ime_composition(cx) {
+            self.queue_ime_operation(
+                crate::editor::ime_lifecycle::DeferredImeOperation::Pane(event),
+                cx,
+            );
+            if let Some(window) = window.as_deref_mut() {
+                self.wait_for_ime_completion(window, cx);
+            }
+            cx.notify();
+            return;
+        }
         let Some(workspace_entity) = self.pane_workspace.clone() else {
             return;
         };

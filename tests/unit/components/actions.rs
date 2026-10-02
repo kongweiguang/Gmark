@@ -373,7 +373,7 @@ fn word_and_block_shortcuts_follow_platform_navigation() {
     );
 }
 
-/// 页滚动保持物理键一致，文档首尾跳转则使用各平台主导航组合。
+/// Page actions remain viewport-oriented; caret actions own the document-start/end bindings.
 #[test]
 fn page_navigation_shortcuts_have_defaults() {
     assert_eq!(
@@ -384,8 +384,57 @@ fn page_navigation_shortcuts_have_defaults() {
         resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::PageDown),
         vec!["pagedown".to_string()]
     );
-    assert_platform_defaults(ShortcutCommand::JumpToTop, &["ctrl-home"], &["cmd-up"]);
-    assert_platform_defaults(ShortcutCommand::JumpToBottom, &["ctrl-end"], &["cmd-down"]);
+    assert_eq!(
+        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::JumpToTop),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::JumpToBottom),
+        Vec::<String>::new()
+    );
+    assert_platform_defaults(
+        ShortcutCommand::MoveToDocumentStart,
+        &["ctrl-home"],
+        &["cmd-up"],
+    );
+    assert_platform_defaults(
+        ShortcutCommand::MoveToDocumentEnd,
+        &["ctrl-end"],
+        &["cmd-down"],
+    );
+    assert_platform_defaults(
+        ShortcutCommand::SelectToDocumentStart,
+        &["ctrl-shift-home"],
+        &["cmd-shift-up"],
+    );
+    assert_platform_defaults(
+        ShortcutCommand::SelectToDocumentEnd,
+        &["ctrl-shift-end"],
+        &["cmd-shift-down"],
+    );
+    assert_eq!(
+        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::SelectPageUp),
+        vec!["shift-pageup".to_string()]
+    );
+    assert_eq!(
+        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::SelectPageDown),
+        vec!["shift-pagedown".to_string()]
+    );
+}
+
+/// Row-edit commands use familiar platform modifiers and remain independent from clipboard and redo bindings.
+#[test]
+fn line_edit_shortcuts_have_platform_defaults() {
+    assert_platform_defaults(ShortcutCommand::DuplicateLine, &["ctrl-d"], &["cmd-d"]);
+    assert_platform_defaults(ShortcutCommand::DeleteLine, &["ctrl-y"], &["cmd-y"]);
+    assert_eq!(
+        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::MoveLineUp),
+        vec!["alt-shift-up".to_string()]
+    );
+    assert_eq!(
+        resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::MoveLineDown),
+        vec!["alt-shift-down".to_string()]
+    );
 }
 
 #[test]

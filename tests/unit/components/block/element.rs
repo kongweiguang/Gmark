@@ -133,6 +133,7 @@ async fn link_hit_matches_only_rendered_link_text(cx: &mut TestAppContext) {
     assert_eq!(miss_right, None);
 }
 
+/// Begin a drag from an unfocused source block on the first press and select its exact text range.
 #[gpui::test]
 async fn source_document_mouse_drag_selects_exact_text_range(cx: &mut TestAppContext) {
     let cx = cx.add_empty_window();
@@ -157,7 +158,6 @@ async fn source_document_mouse_drag_selects_exact_text_range(cx: &mut TestAppCon
     });
 
     cx.update(|window, app| {
-        block.read(app).focus_handle.focus(window);
         block.update(app, |block, block_cx| {
             block.on_mouse_down(
                 &MouseDownEvent {
@@ -198,6 +198,7 @@ async fn source_document_mouse_drag_selects_exact_text_range(cx: &mut TestAppCon
     });
 }
 
+/// Double-clicking rendered link text selects its word; only Ctrl+click follows the link.
 #[gpui::test]
 async fn secondary_click_follows_link_while_plain_click_edits(cx: &mut TestAppContext) {
     let cx = cx.add_empty_window();
@@ -254,12 +255,56 @@ async fn secondary_click_follows_link_while_plain_click_edits(cx: &mut TestAppCo
         assert_ne!(block.selected_range, 0..0);
     });
 
-    // Cmd/Ctrl+click follows the link instead: the caret is left untouched
-    // and no drag-selection begins.
+    let link_range = block.read_with(cx, |block, _cx| {
+        block
+            .inline_spans()
+            .iter()
+            .find(|span| span.link.is_some())
+            .expect("link span should exist")
+            .range
+            .clone()
+    });
+
+    // A plain double click selects the label's word rather than activating it.
     block.update(cx, |block, _cx| block.selected_range = 0..0);
+    event.click_count = 2;
+    cx.update(|window, app| {
+        block.update(app, |block, block_cx| {
+            block.on_mouse_down(&event, window, block_cx);
+            block.on_mouse_up(
+                &MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: link_position,
+                    modifiers: Modifiers::default(),
+                    click_count: 2,
+                },
+                window,
+                block_cx,
+            );
+        });
+    });
+    block.read_with(cx, |block, _cx| {
+        assert_eq!(block.selected_range, link_range)
+    });
+
+    // Ctrl+click leaves text selection untouched and follows the link on release.
+    block.update(cx, |block, _cx| block.selected_range = 0..0);
+    event.click_count = 1;
     event.modifiers = Modifiers::secondary_key();
     cx.update(|window, app| {
-        block.update(app, |block, cx| block.on_mouse_down(&event, window, cx));
+        block.update(app, |block, block_cx| {
+            block.on_mouse_down(&event, window, block_cx);
+            block.on_mouse_up(
+                &MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: link_position,
+                    modifiers: Modifiers::secondary_key(),
+                    click_count: 1,
+                },
+                window,
+                block_cx,
+            );
+        });
     });
     block.read_with(cx, |block, _cx| {
         assert_eq!(block.selected_range, 0..0);

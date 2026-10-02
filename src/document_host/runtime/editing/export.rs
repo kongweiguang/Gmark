@@ -155,6 +155,13 @@ impl DocumentHost {
         event: &BlockEvent,
         cx: &mut Context<Self>,
     ) {
+        if matches!(
+            event,
+            BlockEvent::ImeCompositionEnded { .. } | BlockEvent::ImeCompositionFinishFailed
+        ) {
+            self.on_source_ime_terminal(&block, event, cx);
+            return;
+        }
         if matches!(event, BlockEvent::SelectionChanged) {
             self.sync_selection_from_active_source_block(&block, cx);
             return;
@@ -185,10 +192,29 @@ impl DocumentHost {
             self.suppressed_line_edit_text = None;
             return;
         }
-        let Some(active) = &self.active_edit else {
+        let Some(active) = self.active_edit.as_ref() else {
             return;
         };
         if active.block != block {
+            return;
+        }
+        let range = active.range.clone();
+        let ending = active.ending.clone();
+        let active_line = active.line;
+        let base_revision = active.base_revision;
+        let Some(document) = self.document.clone() else {
+            self.active_edit = None;
+            self.error = Some(
+                cx.global::<I18nManager>()
+                    .strings()
+                    .large_document_text("source_backend_unavailable")
+                    .into(),
+            );
+            cx.notify();
+            return;
+        };
+        if document.revision() != base_revision {
+            self.reject_stale_source_edit(cx);
             return;
         }
         if block.read(cx).marked_range.is_some() {
@@ -201,8 +227,6 @@ impl DocumentHost {
         }
         let text = block.read(cx).display_text().to_owned();
         let caret_in_text = block.read(cx).selected_range.end.min(text.len());
-        let range = active.range.clone();
-        let ending = active.ending.clone();
         let replacement = format!("{text}{ending}");
         let recovery_selection = block.read(cx).selected_range.clone();
         let recovery_selection = u64::try_from(recovery_selection.start)
@@ -228,7 +252,7 @@ impl DocumentHost {
             let start = document
                 .line_for_offset(range.start.min(document.len()))
                 .and_then(|line| usize::try_from(line).ok())
-                .unwrap_or(active.line);
+                .unwrap_or(active_line);
             let end = document
                 .line_for_offset(range.end.min(document.len()))
                 .and_then(|line| usize::try_from(line).ok())
@@ -241,22 +265,35 @@ impl DocumentHost {
         if self.document.is_none() && self.probe.len == 0 {
             self.start_initial_index(cx);
         }
-        let Some(document) = self.document.clone() else {
-            self.active_edit = None;
-            self.error = Some(
-                cx.global::<I18nManager>()
-                    .strings()
-                    .large_document_text("source_backend_unavailable")
-                    .into(),
-            );
-            cx.notify();
-            return;
+        let selection_before = document.source_selection();
+        let selection_after = recovery_selection.unwrap_or_else(|| {
+            SourceSelection::collapsed(
+                range.start.saturating_add(caret_in_text as u64),
+                SourceAffinity::After,
+            )
+        });
+        let transaction_id = match document.next_transaction_id() {
+            Ok(transaction_id) => transaction_id,
+            Err(error) => {
+                self.error = Some(error.to_string().into());
+                self.reject_stale_source_edit(cx);
+                return;
+            }
         };
-        match document.replace_range(range.clone(), replacement.as_str()) {
-            Ok(_) => {
+        let transaction = Transaction::new(
+            DocumentRevision(base_revision),
+            vec![SourceEdit::new(range.clone(), replacement.clone())],
+        );
+        match document.apply_transaction(
+            transaction_id,
+            transaction,
+            selection_before,
+            selection_after,
+        ) {
+            Ok(()) => {
                 // Capture the post-edit snapshot outside the Controller lock;
                 // the recovery worker performs the journal append later.
-                let revision_before = document.revision().saturating_sub(1);
+                let revision_before = base_revision;
                 self.enqueue_recovery_transaction(
                     &document,
                     revision_before,
@@ -298,6 +335,7 @@ impl DocumentHost {
                     if let Some(active) = self.active_edit.as_mut() {
                         active.line = line;
                         active.range = windowed.replace_range;
+                        active.base_revision = document.revision();
                         active.ending = windowed.ending;
                         active.leading_truncated = windowed.leading_truncated;
                         active.trailing_truncated = windowed.trailing_truncated;
@@ -320,6 +358,7 @@ impl DocumentHost {
                         .scroll_to_item(line, ScrollStrategy::Center);
                 } else if let Some(active) = self.active_edit.as_mut() {
                     active.range = range.start..range.start + replacement.len() as u64;
+                    active.base_revision = document.revision();
                 }
                 if let Some(selection) = recovery_selection {
                     let _ = document.set_source_selection(selection);
@@ -354,7 +393,10 @@ impl DocumentHost {
                 self.schedule_json_graph_projection(cx);
                 cx.emit(DocumentHostEvent::StateChanged);
             }
-            Err(error) => self.error = Some(localized_document_error(&error, cx)),
+            Err(error) => {
+                self.error = Some(error.to_string().into());
+                self.reject_stale_source_edit(cx);
+            }
         }
         cx.notify();
     }

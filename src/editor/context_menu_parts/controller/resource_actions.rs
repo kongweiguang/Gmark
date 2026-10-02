@@ -3,6 +3,15 @@
 use super::*;
 
 impl Editor {
+    /// Re-resolves the resource owner's mounted surface so stale menu targets fail closed.
+    pub(in crate::editor) fn resource_target_is_editable(&self, entity_id: EntityId) -> bool {
+        let Some(surface) = self.selection_surface_for_block_id(entity_id) else {
+            return false;
+        };
+        self.document_surface_is_editable_for(surface)
+    }
+
+    /// Keeps the native picker closed when its resource target belongs to a read-only projection.
     pub(in crate::editor) fn replace_resource_from_context_menu(
         &mut self,
         _event: &ClickEvent,
@@ -13,6 +22,9 @@ impl Editor {
             return;
         };
         let entity_id = block.entity_id();
+        if !self.resource_target_is_editable(entity_id) {
+            return;
+        }
         let Some(previous) = self.resource_context_record(cx) else {
             return;
         };
@@ -31,6 +43,9 @@ impl Editor {
                 return;
             };
             let _ = this.update(cx, move |editor, cx| {
+                if !editor.resource_target_is_editable(entity_id) {
+                    return;
+                }
                 let behavior = crate::preferences::read_app_preferences()
                     .map(|preferences| preferences.resource_insert_behavior())
                     .unwrap_or(crate::preferences::ImagePasteBehavior::None);
@@ -52,6 +67,7 @@ impl Editor {
         .detach();
     }
 
+    /// Rechecks delayed replacement targets before scheduling any filesystem work.
     pub(crate) fn complete_resource_replacement(
         &mut self,
         entity_id: EntityId,
@@ -59,14 +75,16 @@ impl Editor {
         source: std::path::PathBuf,
         cx: &mut Context<Self>,
     ) {
+        if !self.resource_target_is_editable(entity_id) {
+            return;
+        }
         let behavior = crate::preferences::read_app_preferences()
             .map(|preferences| preferences.resource_insert_behavior())
             .unwrap_or(crate::preferences::ImagePasteBehavior::None);
         self.schedule_resource_replacement(entity_id, previous, source, behavior, cx);
     }
 
-    /// 在资源替换提交前把文件系统复制和路径解析移到后台，并以文档 epoch/revision
-    /// 丢弃迟到结果；清理 guard 只拥有本次任务创建的副本，旧资源永远不会被删除。
+    /// 在可编辑目标上后台复制资源，并在提交前复核 surface 与 revision；guard 只回收本次新副本。
     fn schedule_resource_replacement(
         &mut self,
         entity_id: EntityId,
@@ -75,6 +93,9 @@ impl Editor {
         behavior: crate::preferences::ResourceInsertBehavior,
         cx: &mut Context<Self>,
     ) {
+        if !self.resource_target_is_editable(entity_id) {
+            return;
+        }
         let document_path = self.file_path.clone();
         let expected_epoch = self.document_epoch;
         let expected_revision = self.source_document.revision();
@@ -125,6 +146,9 @@ impl Editor {
                         ) {
                             return;
                         }
+                        if !editor.resource_target_is_editable(entity_id) {
+                            return;
+                        }
                         let Some(block) = editor.focusable_entity_by_id(entity_id) else {
                             return;
                         };
@@ -170,6 +194,7 @@ impl Editor {
         cx.write_to_clipboard(ClipboardItem::new_string(destination));
     }
 
+    /// Converts the card only when its owning surface still permits document edits.
     pub(in crate::editor) fn convert_resource_to_link_from_context_menu(
         &mut self,
         _event: &ClickEvent,
@@ -179,6 +204,9 @@ impl Editor {
         let Some(block) = self.resource_context_block(cx) else {
             return;
         };
+        if !self.resource_target_is_editable(block.entity_id()) {
+            return;
+        }
         let Some(record) = self.resource_context_record(cx) else {
             return;
         };
@@ -195,6 +223,7 @@ impl Editor {
         cx.notify();
     }
 
+    /// Preserves the menu and resource when a stale or read-only target invokes Delete directly.
     pub(in crate::editor) fn delete_resource_from_context_menu(
         &mut self,
         _event: &ClickEvent,
@@ -204,12 +233,16 @@ impl Editor {
         let Some(block) = self.resource_context_block(cx) else {
             return;
         };
+        if !self.resource_target_is_editable(block.entity_id()) {
+            return;
+        }
         self.close_context_menu(cx);
         block.update(cx, |_, cx| {
             cx.emit(crate::components::BlockEvent::RequestDelete)
         });
     }
 
+    /// Avoids opening a picker for a read-only target; the delayed scheduler rechecks after the picker.
     pub(in crate::editor) fn relocate_resource_from_context_menu(
         &mut self,
         _event: &ClickEvent,
@@ -220,6 +253,9 @@ impl Editor {
             return;
         };
         let entity_id = block.entity_id();
+        if !self.resource_target_is_editable(entity_id) {
+            return;
+        }
         let Some(previous) = self.resource_context_record(cx) else {
             return;
         };

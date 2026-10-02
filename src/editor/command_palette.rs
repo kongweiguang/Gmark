@@ -95,7 +95,7 @@ struct PaletteCommand {
 }
 
 pub(super) struct CommandPaletteState {
-    input: Entity<Block>,
+    pub(super) input: Entity<Block>,
     restore_focus: Option<EntityId>,
     commands: Vec<PaletteCommand>,
     filtered: Vec<usize>,
@@ -105,12 +105,17 @@ pub(super) struct CommandPaletteState {
 }
 
 impl Editor {
+    /// Queues palette focus until the active editor input has a confirmed IME terminal state.
     pub(crate) fn on_command_palette_action(
         &mut self,
         _: &crate::components::CommandPalette,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.defer_action_for_ime(&crate::components::CommandPalette, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         self.close_menu_bar(cx);
         self.dismiss_contextual_overlays(cx);
         let i18n = cx.global::<crate::i18n::I18nManager>();
@@ -238,12 +243,16 @@ impl Editor {
         true
     }
 
+    /// Leaves navigation, Enter, and Escape to the palette input's IME while candidates are active.
     pub(super) fn handle_command_palette_key(
         &mut self,
         event: &KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.has_active_ime_composition(cx) {
+            return false;
+        }
         let Some(state) = self.command_palette.as_mut() else {
             return false;
         };
@@ -276,6 +285,7 @@ impl Editor {
         true
     }
 
+    /// Keeps the search field mounted when outside clicks request dismissal during composition.
     pub(super) fn render_command_palette_overlay(
         &self,
         theme: &Theme,
@@ -316,10 +326,9 @@ impl Editor {
                 .items_start()
                 .pt(px(82.0))
                 .bg(palette.overlay_scrim)
-                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                     let _ = dismiss_editor.update(cx, |editor, cx| {
-                        editor.dismiss_command_palette();
-                        cx.notify();
+                        editor.request_command_palette_close(window, cx);
                     });
                 })
                 .child(
@@ -374,10 +383,9 @@ impl Editor {
                                             crate::ui::ui_tooltip(close_tooltip.clone(), cx)
                                         })
                                         .child(svg().path(CLOSE_ICON).size(px(15.0)))
-                                        .on_click(move |_event, _window, cx| {
+                                        .on_click(move |_event, window, cx| {
                                             let _ = close_editor.update(cx, |editor, cx| {
-                                                editor.dismiss_command_palette();
-                                                cx.notify();
+                                                editor.request_command_palette_close(window, cx);
                                             });
                                         }),
                                 ),

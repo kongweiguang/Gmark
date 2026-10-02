@@ -571,24 +571,10 @@ impl Editor {
                 cx.notify();
             }
             BlockEvent::RequestAppendTableColumn => {
-                if block.read(cx).kind() == BlockKind::Table {
-                    self.prepare_undo_capture(
-                        crate::components::UndoCaptureKind::NonCoalescible,
-                        cx,
-                    );
-                    self.append_table_column(&block, cx);
-                    self.finalize_pending_undo_capture(cx);
-                }
+                self.append_table_axis_from_event(&block, true, cx);
             }
             BlockEvent::RequestAppendTableRow => {
-                if block.read(cx).kind() == BlockKind::Table {
-                    self.prepare_undo_capture(
-                        crate::components::UndoCaptureKind::NonCoalescible,
-                        cx,
-                    );
-                    self.append_table_row(&block, cx);
-                    self.finalize_pending_undo_capture(cx);
-                }
+                self.append_table_axis_from_event(&block, false, cx);
             }
             BlockEvent::RequestTableAxisPreview {
                 kind,
@@ -769,14 +755,7 @@ impl Editor {
                 cx.notify();
             }
             BlockEvent::RequestFocus => {
-                self.close_menu_bar(cx);
-                self.clear_table_axis_preview(cx);
-                self.clear_table_axis_selection(cx);
-                self.focus_block(block.entity_id());
-                for visible in self.document.flatten_visible_blocks() {
-                    visible.entity.update(cx, |_, cx| cx.notify());
-                }
-                cx.notify();
+                self.handle_block_focus_request(&block, cx);
             }
             BlockEvent::RequestToggleCollapse { key, heading } => {
                 self.toggle_rendered_collapse(key, *heading, cx);
@@ -790,7 +769,11 @@ impl Editor {
             BlockEvent::SelectionChanged => {
                 self.workspace_link_completion = None;
             }
-            BlockEvent::RequestRenderedSelectAll => {}
+            BlockEvent::RequestRenderedSelectAll
+            | BlockEvent::ImeCompositionEnded { .. }
+            | BlockEvent::ImeCompositionFinishFailed
+            | BlockEvent::RequestClipboardFailure
+            | BlockEvent::RequestImeInteraction { .. } => {}
             BlockEvent::RequestSlashCommand { .. }
             | BlockEvent::RequestEditingCommand { .. }
             | BlockEvent::RequestMoveBlock { .. } => {}

@@ -79,6 +79,7 @@ impl Editor {
             // Live/Preview 中 frontmatter 是整理后的元数据区；修改原始 fence 与 YAML
             // 必须进入 Source 或 Split 左栏，避免隐藏语法与光标偏移不一致。
             block.set_read_only(frontmatter);
+            block.set_ime_interactions_managed(true);
             block
         });
         cx.subscribe(&block, Self::on_block_event).detach();

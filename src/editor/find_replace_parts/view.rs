@@ -5,6 +5,7 @@ use crate::theme::workbench::SurfaceKind;
 use crate::ui::visual_preferences::VisualPreferencesManager;
 
 impl Editor {
+    /// Renders controls without allowing a click to detach a live IME composition owner.
     pub(in crate::editor) fn render_find_panel(
         &self,
         theme: &Theme,
@@ -267,7 +268,6 @@ impl Editor {
                     .hover(|this| this.bg(palette.control_hover))
                     .cursor_pointer()
                     .on_click(cx.listener(|editor, _event, window, cx| {
-                        editor.focus_find_keyboard_target(FindKeyboardTarget::Close, window, cx);
                         editor.close_find_panel(window, cx);
                     }))
                     .child(

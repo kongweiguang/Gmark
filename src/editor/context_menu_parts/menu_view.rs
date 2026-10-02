@@ -8,6 +8,7 @@ use gpui::prelude::FluentBuilder;
 type ResourceContextHandler = fn(&mut Editor, &ClickEvent, &mut Window, &mut Context<Editor>);
 
 impl Editor {
+    /// Renders each transient menu in one overlay while preserving pane-bound command routing.
     pub(in crate::editor) fn render_context_menu_overlay(
         &self,
         theme: &Theme,
@@ -510,6 +511,9 @@ impl Editor {
                         .into_any_element(),
                 )
             }
+            ContextMenuState::Text { position, .. } => {
+                self.render_text_context_menu_overlay(*position, theme, window, cx)
+            }
             ContextMenuState::Workspace { position, .. } => {
                 let panel_width = d.context_menu_submenu_width.max(220.0);
                 let panel_origin = clamped_floating_panel_origin(
@@ -780,7 +784,8 @@ impl Editor {
     }
 }
 
-fn resource_menu_text(
+/// Resolves shared resource wording from the command catalog for sibling menu surfaces.
+pub(super) fn resource_menu_text(
     strings: &crate::i18n::I18nStrings,
     key: &str,
     english_fallback: &str,

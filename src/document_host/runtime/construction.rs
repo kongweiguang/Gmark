@@ -19,6 +19,7 @@ impl DocumentHost {
         Self::new_with_source(path, probe, Some(source), cx)
     }
 
+    /// Builds every persistent Host input once so IME owner subscriptions survive view remounts.
     pub(super) fn new_with_source(
         path: PathBuf,
         probe: OpenProbe,
@@ -61,6 +62,8 @@ impl DocumentHost {
         });
         cx.subscribe(&search_input, Self::on_search_input_event)
             .detach();
+        cx.subscribe(&search_input, Self::on_host_input_ime_event)
+            .detach();
         let navigation_placeholder = strings
             .large_document_text("go_to_line_placeholder")
             .to_owned();
@@ -75,6 +78,8 @@ impl DocumentHost {
             block
         });
         cx.subscribe(&navigation_input, Self::on_navigation_input_event)
+            .detach();
+        cx.subscribe(&navigation_input, Self::on_host_input_ime_event)
             .detach();
         let structured_filter_placeholder = if probe.format == DocumentFormat::Json {
             cx.try_global::<I18nManager>()
@@ -100,6 +105,8 @@ impl DocumentHost {
             block.set_source_raw_mode();
             block
         });
+        cx.subscribe(&graph_edit_input, Self::on_host_input_ime_event)
+            .detach();
         let structured_cell_input = cx.new(|cx| {
             let mut block = Block::with_record(
                 cx,
@@ -110,11 +117,15 @@ impl DocumentHost {
             block.set_host_submit_enabled(true);
             block
         });
+        cx.subscribe(&structured_cell_input, Self::on_host_input_ime_event)
+            .detach();
         cx.subscribe(
             &structured_filter_input,
             Self::on_structured_filter_input_event,
         )
         .detach();
+        cx.subscribe(&structured_filter_input, Self::on_host_input_ime_event)
+            .detach();
         let tail_enabled = path
             .extension()
             .and_then(|extension| extension.to_str())
@@ -153,6 +164,7 @@ impl DocumentHost {
             structure_error_byte: None,
             structured_filter_input,
             structured_cell_input,
+            structured_focus_handle: cx.focus_handle(),
             structured_cell_edit: None,
             structured_selected_cell: None,
             structured_cell_overrides: BTreeMap::new(),
@@ -218,6 +230,7 @@ impl DocumentHost {
             metrics: PagedDocumentMetrics::default(),
             first_render_started: crate::perf::start(),
             source_row_blocks: BTreeMap::new(),
+            pending_source_ime_action: None,
             source_syntax_contexts: BTreeMap::new(),
             source_row_epochs: BTreeMap::new(),
             source_cache_epoch: 0,

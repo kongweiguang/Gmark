@@ -13,6 +13,7 @@ use unicode_segmentation::*;
 
 mod auto_pair;
 mod code;
+mod construction;
 mod image;
 pub(crate) use image::{ImageResizeSession, ImageRuntime};
 mod mermaid;
@@ -128,8 +129,10 @@ impl EditMode {
 
 #[path = "implementation/editing.rs"]
 mod editing;
+mod ime_interaction;
 #[path = "implementation/inline_projection.rs"]
 mod inline_projection;
+mod input_command;
 #[path = "implementation/math_edit.rs"]
 pub(super) mod math_edit;
 #[path = "implementation/math_source.rs"]
@@ -198,6 +201,25 @@ pub struct Block {
     pub(crate) editor_selection_range: Option<Range<usize>>,
     pub(crate) editor_selection_supports_inline_commands: bool,
     pub marked_range: Option<Range<usize>>,
+    /// 预编辑属于当前输入目标，不能进入正文记录或共享撤销历史。
+    pub(crate) ime_composition: Option<super::input::BlockImeComposition>,
+    /// 并发冲突取消后，原平台会话的迟到结果必须丢弃到终态为止。
+    pub(crate) ime_reject_until_end: bool,
+    /// 平台已收到预编辑后，即使结果文本先到，也要等终态再允许宿主卸载输入目标。
+    pub(crate) ime_awaiting_end: bool,
+    /// Editor-owned blocks defer pointer focus changes through the editor IME queue.
+    pub(crate) ime_interactions_managed: bool,
+    /// Records a managed mouse-down until its deferred intent is replayed or released.
+    pub(crate) ime_pointer_selection_pending: bool,
+    /// Retains one IME rebase map until every queued input command has replayed.
+    pub(crate) ime_input_command_pending: usize,
+    /// Independent input owners replay commands locally after Changed reaches their host.
+    pub(crate) ime_unmanaged_input_commands:
+        std::collections::VecDeque<super::state::BlockImeInteraction>,
+    /// Tracks editor-surface drags whose endpoint may still reference this composition owner.
+    pub(crate) ime_surface_selection_pending: bool,
+    /// One terminal maps queued BlockText pointer offsets from their baseline into committed text.
+    pub(crate) ime_interaction_rebase: Option<ime_interaction::BlockImeInteractionRebase>,
     pub(crate) spelling_diagnostics: Arc<[crate::spellcheck::SpellingDiagnostic]>,
     pub last_layout: Option<Vec<WrappedLine>>,
     pub(crate) source_layout_identity: Option<SourceLayoutIdentity>,
@@ -223,6 +245,7 @@ pub struct Block {
     pub(crate) parent_is_list_item: bool,
     pub list_ordinal: Option<usize>,
     pub is_selecting: bool,
+    pub(crate) pointer_selection: Option<super::pointer_selection::PointerSelectionSession>,
     pub cursor_blink_epoch: Instant,
     pub vertical_motion_x: Option<Pixels>,
     pub(super) cursor_blink_task: Option<Task<()>>,
@@ -393,169 +416,6 @@ pub(crate) enum CollapsedCaretAffinity {
 }
 
 impl Block {
-    pub fn with_record(cx: &mut Context<Self>, record: BlockRecord) -> Self {
-        let edit_mode = EditMode::for_kind(&record.kind);
-        let render_cache = record.title.render_cache();
-        let mut block = Self {
-            record,
-            render_cache,
-            code_highlight: None,
-            source_syntax_language: None,
-            source_syntax_context: None,
-            last_successful_math_render: None,
-            last_successful_mermaid_render: None,
-            math_render_error: None,
-            mermaid_render_error: None,
-            math_preview_key: None,
-            mermaid_preview_key: None,
-            mermaid_successful_preview_key: None,
-            math_preview_task: None,
-            mermaid_preview_task: None,
-            mermaid_view_mode: MermaidViewMode::default(),
-            mermaid_preview_scroll_handle: ScrollHandle::new(),
-            mermaid_workbench_bounds: Arc::new(Mutex::new(None)),
-            mermaid_copy_feedback: false,
-            mermaid_copy_feedback_task: None,
-            children: Vec::new(),
-            focus_handle: cx.focus_handle(),
-            code_language_focus_handle: cx.focus_handle(),
-            code_language_selected_range: 0..0,
-            code_language_selection_reversed: false,
-            code_language_marked_range: None,
-            code_language_last_layout: None,
-            code_language_last_bounds: None,
-            code_language_is_selecting: false,
-            code_language_menu_open: false,
-            code_language_menu_selected: 0,
-            code_copy_focus_handle: cx.focus_handle(),
-            code_copy_feedback: false,
-            code_copy_feedback_task: None,
-            selected_range: 0..0,
-            selection_reversed: false,
-            editor_selection_range: None,
-            editor_selection_supports_inline_commands: false,
-            marked_range: None,
-            spelling_diagnostics: Arc::default(),
-            last_layout: None,
-            source_layout_identity: None,
-            source_layout_cache_key: None,
-            source_layout_cache_hits: 0,
-            source_layout_cache_misses: 0,
-            last_bounds: None,
-            last_line_height: px(20.0),
-            render_depth: 0,
-            structural_sibling_index: 0,
-            structural_sibling_count: 1,
-            structural_context_revision: 0,
-            quote_depth: 0,
-            quote_group_anchor: None,
-            visible_quote_depth: 0,
-            visible_quote_group_anchor: None,
-            callout_depth: 0,
-            callout_anchor: None,
-            callout_variant: None,
-            footnote_anchor: None,
-            parent_is_list_item: false,
-            list_ordinal: None,
-            is_selecting: false,
-            cursor_blink_epoch: Instant::now(),
-            vertical_motion_x: None,
-            cursor_blink_task: None,
-            projection: None,
-            projection_cache_key: None,
-            cached_display_text: SharedString::default(),
-            input_placeholder: None,
-            host_action_handler: None,
-            host_submit_enabled: false,
-            collapsed_caret_affinity: CollapsedCaretAffinity::Default,
-            edit_mode,
-            read_only: false,
-            show_source_line_numbers: false,
-            compact_source_host: false,
-            host_text_size: None,
-            table_runtime: None,
-            table_cell_position: None,
-            table_cell_alignment: None,
-            table_axis_preview: None,
-            table_axis_selection: None,
-            table_axis_highlight: TableAxisHighlight::None,
-            table_append_column_edge_hovered: false,
-            table_append_column_hovered: false,
-            table_append_column_zone_hovered: false,
-            table_append_column_button_hovered: false,
-            table_append_column_close_task: None,
-            table_append_row_edge_hovered: false,
-            table_append_row_hovered: false,
-            table_append_row_zone_hovered: false,
-            table_append_row_button_hovered: false,
-            table_append_row_close_task: None,
-            presentation_hidden: false,
-            presentation_collapsed: false,
-            presentation_fold_key: None,
-            presentation_fold_heading: false,
-            fold_focus_handle: cx.focus_handle(),
-            table_column_layout: None,
-            table_view_key: None,
-            table_column_resize_session: None,
-            table_column_resize_focus_handle: cx.focus_handle(),
-            table_column_resize_boundary: None,
-            math_edit_inline_range: None,
-            math_edit_session: None,
-            math_marked_range: None,
-            math_structure_focus_handle: cx.focus_handle(),
-            math_source_focus_handle: cx.focus_handle(),
-            math_source_selected_range: 0..0,
-            math_source_selection_reversed: false,
-            math_source_marked_range: None,
-            math_source_last_layout: None,
-            math_source_last_bounds: None,
-            math_source_is_selecting: false,
-            math_visual_scroll_handle: ScrollHandle::new(),
-            math_palette_page: MathPalettePage::Symbols,
-            math_palette_offset: point(px(0.0), px(0.0)),
-            math_palette_drag_anchor: None,
-            math_palette_anchor_y: None,
-            document_revision: gmark_document::Revision::INITIAL,
-            image_runtime: None,
-            resource_runtime: None,
-            resource_probe_key: None,
-            resource_probe_task: None,
-            resource_selected: false,
-            image_edit_expanded: false,
-            image_expand_requested: false,
-            image_retry_requested: false,
-            image_selected: false,
-            image_resize_session: None,
-            image_preview_width_percent: None,
-            html_details_state: HashMap::new(),
-            html_details_source_hash: None,
-            html_image_asset_states: HashMap::new(),
-            image_base_dir: None,
-            image_reference_definitions: Arc::default(),
-            link_reference_definitions: Arc::default(),
-            footnote_registry: Arc::default(),
-            toc_entries: Arc::default(),
-            list_group_separator_candidate: false,
-            numbered_list_restart_requested: false,
-            quote_reparse_requested: false,
-            slash_menu: None,
-            slash_menu_dismissed_query: None,
-            slash_menu_scroll_handle: ScrollHandle::new(),
-            block_drop_placement: super::BlockDropPlacement::Before,
-            selection_toolbar_dismissed_range: None,
-            selection_toolbar_keyboard_active: false,
-            selection_toolbar_keyboard_index: 0,
-            selection_toolbar_overflow_open: false,
-            selection_toolbar_type_menu_open: false,
-            selection_toolbar_link_input: None,
-            selection_toolbar_link_range: None,
-            selection_toolbar_link_had_target: false,
-        };
-        block.sync_code_highlight();
-        block.refresh_cached_display_text();
-        block
-    }
-
     pub fn kind(&self) -> BlockKind {
         self.record.kind.clone()
     }

@@ -7,6 +7,7 @@ use crate::theme::{ThemeColors, workbench::SurfaceKind};
 use crate::ui::visual_preferences::VisualPreferencesManager;
 
 impl DocumentHost {
+    /// Shares one structured focus owner across virtual rows while each editable cell retains its native input target.
     pub(super) fn render_structured_list(
         &mut self,
         layout: &StructuredPanelLayout,
@@ -179,6 +180,12 @@ impl DocumentHost {
                                                     .bg(structured_selection_color)
                                                     .border_color(focus_ring_color)
                                             })
+                                            .capture_key_down(
+                                                _cx.listener(Self::on_structured_table_key_down),
+                                            )
+                                            .on_key_down(
+                                                _cx.listener(Self::on_structured_table_key_down),
+                                            )
                                             .pl(px(10.0 + row_depth as f32 * 14.0))
                                             .child(if editing {
                                                 div()

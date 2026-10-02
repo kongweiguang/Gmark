@@ -248,7 +248,8 @@ impl Editor {
         }
     }
 
-    pub(super) fn show_pane_notice(
+    /// 短暂错误复用既有底栏反馈，不改变正文布局或夺取当前输入焦点。
+    pub(in crate::editor) fn show_pane_notice(
         &mut self,
         message: impl Into<SharedString>,
         cx: &mut Context<Self>,

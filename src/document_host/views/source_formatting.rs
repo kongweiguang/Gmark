@@ -12,21 +12,37 @@ impl DocumentHost {
         self.start_source_format(false, cx);
     }
 
+    /// Waits for native Source composition before taking a formatting snapshot.
     pub(crate) fn on_format_document(
         &mut self,
         _: &FormatDocument,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.defer_source_action_for_ime(
+            super::source_ime::DeferredSourceAction::FormatDocument,
+            window,
+            cx,
+        ) {
+            return;
+        }
         self.start_source_format(false, cx);
     }
 
+    /// Waits for native Source composition before capturing a selection for formatting.
     pub(crate) fn on_format_selection(
         &mut self,
         _: &FormatSelection,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.defer_source_action_for_ime(
+            super::source_ime::DeferredSourceAction::FormatSelection,
+            window,
+            cx,
+        ) {
+            return;
+        }
         self.start_source_format(true, cx);
     }
 

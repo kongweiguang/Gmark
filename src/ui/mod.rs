@@ -6,6 +6,7 @@ pub(crate) mod actions;
 pub(crate) mod controls;
 pub(crate) mod i18n;
 pub(crate) mod motion;
+pub(crate) mod text_editing;
 pub(crate) mod theme;
 pub(crate) mod visual_preferences;
 

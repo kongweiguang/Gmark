@@ -51,9 +51,132 @@ pub(super) fn parse_tsv_matrix(text: &str) -> Option<Vec<Vec<String>>> {
 }
 
 impl Editor {
+    /// Highlights only the table cells owned by the active surface, since Split keeps two runtimes mounted.
     pub(super) fn sync_table_cell_rectangle_highlights(&mut self, cx: &mut Context<Self>) {
-        let selection = self.table_cell_rectangle;
-        for binding in self.table_cells.values() {
+        self.sync_table_cell_rectangle_highlights_for(self.active_selection_surface, cx);
+    }
+
+    /// Keeps focus-local table selection state independent across the Split projections.
+    pub(super) fn table_cell_rectangle_for_surface(
+        &self,
+        surface: super::selection_surface::SelectionSurface,
+    ) -> Option<TableCellRectangle> {
+        match surface {
+            super::selection_surface::SelectionSurface::Main => self.table_cell_rectangle,
+            super::selection_surface::SelectionSurface::SplitPreview => {
+                self.split_preview_table_cell_rectangle
+            }
+        }
+    }
+
+    /// Stores rectangle changes without allowing a click in one pane to erase the other pane's selection.
+    pub(super) fn set_table_cell_rectangle_for_surface(
+        &mut self,
+        surface: super::selection_surface::SelectionSurface,
+        selection: Option<TableCellRectangle>,
+    ) {
+        match surface {
+            super::selection_surface::SelectionSurface::Main => {
+                self.table_cell_rectangle = selection;
+            }
+            super::selection_surface::SelectionSurface::SplitPreview => {
+                self.split_preview_table_cell_rectangle = selection;
+            }
+        }
+    }
+
+    /// Reads the active pointer anchor from the pane receiving the drag.
+    pub(super) fn table_cell_drag_anchor_for_surface(
+        &self,
+        surface: super::selection_surface::SelectionSurface,
+    ) -> Option<(EntityId, TableCellPosition)> {
+        match surface {
+            super::selection_surface::SelectionSurface::Main => self.table_cell_drag_anchor,
+            super::selection_surface::SelectionSurface::SplitPreview => {
+                self.split_preview_table_cell_drag_anchor
+            }
+        }
+    }
+
+    /// Stores the table drag anchor with its owning pane so mouse-up can end only that gesture.
+    pub(super) fn set_table_cell_drag_anchor_for_surface(
+        &mut self,
+        surface: super::selection_surface::SelectionSurface,
+        anchor: Option<(EntityId, TableCellPosition)>,
+    ) {
+        match surface {
+            super::selection_surface::SelectionSurface::Main => {
+                self.table_cell_drag_anchor = anchor
+            }
+            super::selection_surface::SelectionSurface::SplitPreview => {
+                self.split_preview_table_cell_drag_anchor = anchor;
+            }
+        }
+    }
+
+    /// Uses the existing per-surface registry so overlapping pane coordinates cannot hit the wrong table.
+    pub(super) fn table_cell_at_point_for_surface(
+        &self,
+        surface: super::selection_surface::SelectionSurface,
+        position: Point<Pixels>,
+        cx: &App,
+    ) -> Option<(EntityId, TableCellPosition)> {
+        let bindings = match surface {
+            super::selection_surface::SelectionSurface::Main => Some(&self.table_cells),
+            super::selection_surface::SelectionSurface::SplitPreview => self
+                .split_preview
+                .as_ref()
+                .map(|preview| &preview.table_cells),
+        }?;
+        bindings.values().find_map(|binding| {
+            let bounds = binding.cell.read(cx).last_bounds?;
+            let inside = position.x >= bounds.left()
+                && position.x <= bounds.right()
+                && position.y >= bounds.top()
+                && position.y <= bounds.bottom();
+            inside.then_some((binding.table_block.entity_id(), binding.position))
+        })
+    }
+
+    /// Returns table bindings for the selected surface without rebuilding either runtime.
+    fn table_bindings_for_surface(
+        &self,
+        surface: super::selection_surface::SelectionSurface,
+    ) -> Option<&HashMap<EntityId, TableCellBinding>> {
+        match surface {
+            super::selection_surface::SelectionSurface::Main => Some(&self.table_cells),
+            super::selection_surface::SelectionSurface::SplitPreview => self
+                .split_preview
+                .as_ref()
+                .map(|preview| &preview.table_cells),
+        }
+    }
+
+    /// Resolves a table block from its own projection for read-only copying and guarded editing.
+    fn table_block_for_surface(
+        &self,
+        surface: super::selection_surface::SelectionSurface,
+        entity_id: EntityId,
+        _cx: &App,
+    ) -> Option<Entity<Block>> {
+        self.table_bindings_for_surface(surface)?
+            .values()
+            .find(|binding| binding.table_block.entity_id() == entity_id)
+            .map(|binding| binding.table_block.clone())
+    }
+
+    /// Updates the visible highlight only for the selected surface's runtime entities.
+    pub(super) fn sync_table_cell_rectangle_highlights_for(
+        &mut self,
+        surface: super::selection_surface::SelectionSurface,
+        cx: &mut Context<Self>,
+    ) {
+        let selection = self.table_cell_rectangle_for_surface(surface);
+        let bindings = self
+            .table_bindings_for_surface(surface)
+            .map(|bindings| bindings.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for binding in bindings {
             let selected = selection.is_some_and(|selection| {
                 selection.table_block_id == binding.table_block.entity_id()
                     && selection.contains(binding.position)
@@ -72,40 +195,87 @@ impl Editor {
         }
     }
 
+    /// Prevents cell text ranges from competing with the explicit rectangular table selection.
+    fn clear_table_cell_text_selections_for(
+        &self,
+        surface: super::selection_surface::SelectionSurface,
+        table_block_id: EntityId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bindings) = self.table_bindings_for_surface(surface) else {
+            return;
+        };
+        let cells = bindings
+            .values()
+            .filter(|binding| binding.table_block.entity_id() == table_block_id)
+            .map(|binding| binding.cell.clone())
+            .collect::<Vec<_>>();
+        for cell in cells {
+            cell.update(cx, |block, cx| {
+                let had_selection = !block.selected_range.is_empty()
+                    || block.editor_selection_range.is_some()
+                    || block.editor_selection_supports_inline_commands
+                    || block.is_selecting
+                    || block.pointer_selection.is_some();
+                if !had_selection {
+                    return;
+                }
+                let cursor = block.cursor_offset();
+                block.assign_collapsed_selection_offset(cursor, Default::default(), None);
+                block.editor_selection_range = None;
+                block.editor_selection_supports_inline_commands = false;
+                block.is_selecting = false;
+                block.pointer_selection = None;
+                cx.notify();
+            });
+        }
+    }
+
+    /// Routes keyboard rectangle selection through the most recently focused document surface.
     pub(super) fn handle_table_cell_selection_key(
         &mut self,
         event: &KeyDownEvent,
         cx: &mut Context<Self>,
     ) -> bool {
+        let surface = self.active_selection_surface;
         let key = event.keystroke.key.as_str();
-        if self.table_cell_rectangle.is_none() {
+        let current = self.table_cell_rectangle_for_surface(surface);
+        if current.is_none() {
             if key != "escape" {
                 return false;
             }
             let Some(binding) = self
                 .active_entity_id
-                .and_then(|id| self.table_cells.get(&id))
-                .cloned()
+                .and_then(|id| self.table_bindings_for_surface(surface)?.get(&id).cloned())
             else {
                 return false;
             };
-            self.clear_table_axis_selection(cx);
-            self.table_cell_rectangle = Some(TableCellRectangle {
-                table_block_id: binding.table_block.entity_id(),
-                anchor: binding.position,
-                focus: binding.position,
-            });
-            self.sync_table_cell_rectangle_highlights(cx);
+            let table_block_id = binding.table_block.entity_id();
+            self.clear_cross_block_selection_for_surface(surface, cx);
+            self.clear_table_cell_text_selections_for(surface, table_block_id, cx);
+            if surface == super::selection_surface::SelectionSurface::Main {
+                self.clear_table_axis_selection(cx);
+            }
+            self.set_table_cell_rectangle_for_surface(
+                surface,
+                Some(TableCellRectangle {
+                    table_block_id,
+                    anchor: binding.position,
+                    focus: binding.position,
+                }),
+            );
+            self.sync_table_cell_rectangle_highlights_for(surface, cx);
             cx.notify();
             return true;
         }
 
-        let selection = self.table_cell_rectangle.expect("checked above");
+        let selection = current.expect("checked above");
         if matches!(key, "enter" | "f2" | "escape") {
-            self.table_cell_rectangle = None;
-            self.sync_table_cell_rectangle_highlights(cx);
+            self.set_table_cell_rectangle_for_surface(surface, None);
+            self.sync_table_cell_rectangle_highlights_for(surface, cx);
             if key != "escape"
-                && let Some(table) = self.table_block_by_id(selection.table_block_id, cx)
+                && let Some(table) =
+                    self.table_block_for_surface(surface, selection.table_block_id, cx)
             {
                 self.focus_table_cell_position(&table, selection.focus, cx);
             }
@@ -113,17 +283,21 @@ impl Editor {
             return true;
         }
         if matches!(key, "delete" | "backspace") {
+            if !self.document_surface_is_editable() {
+                return true;
+            }
             return self.clear_table_cell_rectangle(selection, cx);
         }
         if !matches!(key, "left" | "right" | "up" | "down") {
             return false;
         }
-        let Some(table_block) = self.table_block_by_id(selection.table_block_id, cx) else {
-            self.table_cell_rectangle = None;
+        let Some(table_block) = self.table_block_for_surface(surface, selection.table_block_id, cx)
+        else {
+            self.set_table_cell_rectangle_for_surface(surface, None);
             return true;
         };
         let Some(table) = table_block.read(cx).record.table.as_ref() else {
-            self.table_cell_rectangle = None;
+            self.set_table_cell_rectangle_for_surface(surface, None);
             return true;
         };
         let max_row = table.rows.len();
@@ -136,26 +310,39 @@ impl Editor {
             "down" => focus.row = (focus.row + 1).min(max_row),
             _ => {}
         }
-        self.table_cell_rectangle = Some(if event.keystroke.modifiers.shift {
-            TableCellRectangle { focus, ..selection }
-        } else {
-            TableCellRectangle {
-                anchor: focus,
-                focus,
-                ..selection
-            }
-        });
-        self.sync_table_cell_rectangle_highlights(cx);
+        self.set_table_cell_rectangle_for_surface(
+            surface,
+            Some(if event.keystroke.modifiers.shift {
+                TableCellRectangle { focus, ..selection }
+            } else {
+                TableCellRectangle {
+                    anchor: focus,
+                    focus,
+                    ..selection
+                }
+            }),
+        );
+        self.sync_table_cell_rectangle_highlights_for(surface, cx);
         cx.notify();
         true
     }
 
+    /// Clears cells only after an editable Main surface has passed the actual write boundary.
     pub(super) fn clear_table_cell_rectangle(
         &mut self,
         selection: TableCellRectangle,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(table_block) = self.table_block_by_id(selection.table_block_id, cx) else {
+        if !self.document_surface_is_editable()
+            || self.active_selection_surface != super::selection_surface::SelectionSurface::Main
+        {
+            return false;
+        }
+        let Some(table_block) = self.table_block_for_surface(
+            super::selection_surface::SelectionSurface::Main,
+            selection.table_block_id,
+            cx,
+        ) else {
             return false;
         };
         self.sync_table_record_from_runtime(&table_block, cx);
@@ -168,7 +355,10 @@ impl Editor {
         self.prepare_undo_capture(UndoCaptureKind::NonCoalescible, cx);
         table_block.update(cx, move |block, _cx| block.record.table = Some(table));
         self.rebuild_table_runtimes(cx);
-        self.table_cell_rectangle = Some(selection);
+        self.set_table_cell_rectangle_for_surface(
+            super::selection_surface::SelectionSurface::Main,
+            Some(selection),
+        );
         self.sync_table_cell_rectangle_highlights(cx);
         self.mark_dirty(cx);
         self.finalize_pending_undo_capture(cx);
@@ -176,24 +366,27 @@ impl Editor {
         true
     }
 
+    /// Serializes the active pane's native table selection as TSV for ordinary Copy.
     pub(super) fn selected_table_cells_tsv(&self, cx: &App) -> Option<String> {
-        let selection = self.table_cell_rectangle?;
-        let table = self.table_block_by_id(selection.table_block_id, cx)?;
+        let surface = self.active_selection_surface;
+        let selection = self.table_cell_rectangle_for_surface(surface)?;
+        let table = self.table_block_for_surface(surface, selection.table_block_id, cx)?;
         let table = table.read(cx).record.table.as_ref()?.clone();
         let mut lines = Vec::new();
         for row in selection.rows() {
             let cells = if row == 0 {
                 &table.header
             } else {
-                &table.rows[row - 1]
+                table.rows.get(row - 1)?
             };
             lines.push(
                 selection
                     .columns()
                     .map(|column| {
-                        cells[column]
-                            .visible_text()
-                            .replace(['\t', '\n', '\r'], " ")
+                        cells
+                            .get(column)
+                            .map(|cell| cell.visible_text().replace(['\t', '\n', '\r'], " "))
+                            .unwrap_or_default()
                     })
                     .collect::<Vec<_>>()
                     .join("\t"),
@@ -202,14 +395,22 @@ impl Editor {
         Some(lines.join("\n"))
     }
 
+    /// Rejects paste before reading or mutating the table when the focused pane is read-only.
     pub(super) fn paste_table_cells_tsv(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+        if !self.document_surface_is_editable()
+            || self.active_selection_surface != super::selection_surface::SelectionSurface::Main
+        {
+            return false;
+        }
         let Some(matrix) = parse_tsv_matrix(text) else {
             return false;
         };
-        let Some(selection) = self.table_cell_rectangle else {
+        let surface = self.active_selection_surface;
+        let Some(selection) = self.table_cell_rectangle_for_surface(surface) else {
             return false;
         };
-        let Some(table_block) = self.table_block_by_id(selection.table_block_id, cx) else {
+        let Some(table_block) = self.table_block_for_surface(surface, selection.table_block_id, cx)
+        else {
             return false;
         };
         self.sync_table_record_from_runtime(&table_block, cx);
@@ -245,17 +446,20 @@ impl Editor {
         self.prepare_undo_capture(UndoCaptureKind::NonCoalescible, cx);
         table_block.update(cx, move |block, _cx| block.record.table = Some(table));
         self.rebuild_table_runtimes(cx);
-        self.table_cell_rectangle = Some(TableCellRectangle {
-            table_block_id: selection.table_block_id,
-            anchor: TableCellPosition {
-                row: start_row,
-                column: start_column,
-            },
-            focus: TableCellPosition {
-                row: start_row + matrix.len() - 1,
-                column: start_column + matrix[0].len() - 1,
-            },
-        });
+        self.set_table_cell_rectangle_for_surface(
+            super::selection_surface::SelectionSurface::Main,
+            Some(TableCellRectangle {
+                table_block_id: selection.table_block_id,
+                anchor: TableCellPosition {
+                    row: start_row,
+                    column: start_column,
+                },
+                focus: TableCellPosition {
+                    row: start_row + matrix.len() - 1,
+                    column: start_column + matrix[0].len() - 1,
+                },
+            }),
+        );
         self.sync_table_cell_rectangle_highlights(cx);
         self.mark_dirty(cx);
         self.finalize_pending_undo_capture(cx);

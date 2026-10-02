@@ -425,6 +425,29 @@ impl Editor {
                         .scrollbar_width(px(0.0))
                         .track_scroll(&scroll_handle)
                         .on_scroll_wheel(cx.listener(Self::on_split_preview_scroll_wheel))
+                        .capture_any_mouse_down(
+                            cx.listener(Self::on_split_preview_capture_mouse_down),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(|editor, event, window, cx| {
+                                editor.on_text_context_menu_mouse_down_for_surface(
+                                    crate::editor::selection_surface::SelectionSurface::SplitPreview,
+                                    event,
+                                    window,
+                                    cx,
+                                );
+                            }),
+                        )
+                        .on_mouse_move(cx.listener(Self::on_split_preview_mouse_move))
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(Self::on_split_preview_mouse_up),
+                        )
+                        .on_mouse_up_out(
+                            MouseButton::Left,
+                            cx.listener(Self::on_split_preview_mouse_up),
+                        )
                         .px(px(d.editor_padding))
                         .pt(px(top_padding))
                         .pb(px(bottom_padding))
@@ -557,6 +580,27 @@ impl Editor {
                     .scrollbar_width(px(0.0))
                     .track_scroll(&scroll_handle)
                     .on_scroll_wheel(cx.listener(Self::on_split_preview_scroll_wheel))
+                    .capture_any_mouse_down(cx.listener(Self::on_split_preview_capture_mouse_down))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|editor, event, window, cx| {
+                            editor.on_text_context_menu_mouse_down_for_surface(
+                                crate::editor::selection_surface::SelectionSurface::SplitPreview,
+                                event,
+                                window,
+                                cx,
+                            );
+                        }),
+                    )
+                    .on_mouse_move(cx.listener(Self::on_split_preview_mouse_move))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(Self::on_split_preview_mouse_up),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(Self::on_split_preview_mouse_up),
+                    )
                     .px(px(d.editor_padding))
                     .pt(px(top_padding))
                     .pb(px(bottom_padding))

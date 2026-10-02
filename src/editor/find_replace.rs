@@ -65,14 +65,20 @@ pub(super) struct FindPanelState {
     tooltip_task: Option<Task<()>>,
     keyboard_target: FindKeyboardTarget,
     focus_handle: FocusHandle,
-    restore_focus: Option<EntityId>,
+    restore_focus: Option<FindRestoreFocus>,
     /// Original rendered fold choices restored when find closes. Finding may
     /// temporarily reveal a match inside a collapsed region.
     pub(super) view_state_before_expand: Option<markdown_view_state::MarkdownViewState>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct FindRestoreFocus {
+    pub(super) surface: super::selection_surface::SelectionSurface,
+    pub(super) entity_id: EntityId,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum FindKeyboardTarget {
+pub(super) enum FindKeyboardTarget {
     #[default]
     Query,
     Replacement,
@@ -233,12 +239,17 @@ pub(super) struct FindMatchMetadata {
 }
 
 impl Editor {
+    /// Holds Find until the active IME owner has committed or cancelled its pre-edit text.
     pub(crate) fn on_find_in_document_action(
         &mut self,
         _: &crate::components::FindInDocument,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.defer_action_for_ime(&crate::components::FindInDocument, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if let Some(document_host) = self.document_host.clone() {
             document_host.update(cx, |document_host, cx| {
                 document_host.on_find_in_document(&crate::components::FindInDocument, window, cx);
@@ -248,12 +259,17 @@ impl Editor {
         self.open_find_panel(false, window, cx);
     }
 
+    /// Holds Replace until the active IME owner has committed or cancelled its pre-edit text.
     pub(crate) fn on_replace_in_document_action(
         &mut self,
         _: &crate::components::ReplaceInDocument,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.defer_action_for_ime(&crate::components::ReplaceInDocument, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if let Some(document_host) = self.document_host.clone() {
             document_host.update(cx, |document_host, cx| {
                 document_host.on_find_in_document(&crate::components::FindInDocument, window, cx);
@@ -263,12 +279,17 @@ impl Editor {
         self.open_find_panel(true, window, cx);
     }
 
+    /// Keeps navigation in the original document until the IME resolves its candidate state.
     pub(crate) fn on_find_next_action(
         &mut self,
         _: &crate::components::FindNext,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.defer_action_for_ime(&crate::components::FindNext, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if let Some(document_host) = self.document_host.clone() {
             document_host.update(cx, |document_host, cx| {
                 document_host.on_find_next(&crate::components::FindNext, window, cx);
@@ -282,12 +303,17 @@ impl Editor {
         }
     }
 
+    /// Keeps reverse navigation in the original document until the IME resolves its candidate state.
     pub(crate) fn on_find_previous_action(
         &mut self,
         _: &crate::components::FindPrevious,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.defer_action_for_ime(&crate::components::FindPrevious, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if let Some(document_host) = self.document_host.clone() {
             document_host.update(cx, |document_host, cx| {
                 document_host.on_find_previous(&crate::components::FindPrevious, window, cx);
@@ -301,7 +327,28 @@ impl Editor {
         }
     }
 
+    /// Captures the actual focused text surface before Find takes focus from its source block.
+    fn capture_find_restore_focus(&self, window: &Window, cx: &App) -> Option<FindRestoreFocus> {
+        if let Some((surface, block)) = self.focused_document_target(window, cx) {
+            return Some(FindRestoreFocus {
+                surface,
+                entity_id: block.entity_id(),
+            });
+        }
+        let surface = self.active_selection_surface;
+        let entity_id = match surface {
+            super::selection_surface::SelectionSurface::Main => self.active_entity_id,
+            super::selection_surface::SelectionSurface::SplitPreview => self
+                .cross_block_selection_for_surface(surface)
+                .map(|selection| selection.focus.entity_id),
+        }?;
+        self.selection_surface_contains_entity(surface, entity_id)
+            .then_some(FindRestoreFocus { surface, entity_id })
+    }
+
+    /// Opens Find and records the exact editable surface whose focus should return on close.
     fn open_find_panel(&mut self, show_replace: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let restore_focus = self.capture_find_restore_focus(window, cx);
         self.close_menu_bar(cx);
         self.dismiss_contextual_overlays(cx);
         if let Some(state) = self.find_panel.as_mut() {
@@ -365,7 +412,7 @@ impl Editor {
             tooltip_task: None,
             keyboard_target: FindKeyboardTarget::Query,
             focus_handle: find_focus_handle,
-            restore_focus: self.active_entity_id,
+            restore_focus,
             view_state_before_expand: None,
         });
         self.schedule_find(cx);
@@ -713,3 +760,7 @@ pub(super) fn replacement_for_range(
 #[cfg(test)]
 #[path = "../../tests/unit/editor/find_replace_limits.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../tests/unit/editor/find_replace_surface.rs"]
+mod surface_tests;

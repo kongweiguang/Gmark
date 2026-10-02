@@ -442,22 +442,198 @@ async fn large_document_uses_the_standard_editor_shell(cx: &mut TestAppContext) 
     );
 }
 
+/// Bounds asynchronous file-save waiting while checking both completion and durable dirty-state acknowledgement.
 fn wait_for_large_document_save(
     view: &gpui::Entity<crate::document_host::DocumentHost>,
     cx: &mut gpui::VisualTestContext,
 ) {
     for _ in 0..5_000 {
         cx.run_until_parked();
-        let (saving, dirty) = view.read_with(cx, |view, _cx| {
-            (view.is_saving_for_test(), view.is_dirty())
-        });
+        let (saving, dirty) =
+            view.read_with(cx, |view, _cx| (view.is_saving_for_test(), view.is_dirty()));
         if !saving && !dirty {
             return;
         }
         std::thread::sleep(Duration::from_millis(1));
     }
     let (saving, dirty, error) = view.read_with(cx, |view, _cx| {
-        (view.is_saving_for_test(), view.is_dirty(), view.error_for_test())
+        (
+            view.is_saving_for_test(),
+            view.is_dirty(),
+            view.error_for_test(),
+        )
     });
-    panic!("large document save did not finish within the bounded test wait (saving={saving}, dirty={dirty}, error={error:?})");
+    panic!(
+        "large document save did not finish within the bounded test wait (saving={saving}, dirty={dirty}, error={error:?})"
+    );
+}
+
+/// Exercises Source-to-tool IME handoff and confirms a Host action runs after its input update lease ends.
+#[cfg(target_os = "windows")]
+#[gpui::test]
+async fn large_source_tool_focus_waits_for_ime_terminal(cx: &mut TestAppContext) {
+    init_editor_test_app(cx);
+    let temp = tempfile::tempdir().expect("host IME focus tempdir");
+    let path = temp.path().join("host-ime-focus.md");
+    fs::write(&path, "alpha\n").expect("host IME focus fixture");
+    let probe = gmark_paged_document::probe_file(
+        &path,
+        gmark_paged_document::ProbeOptions {
+            max_resident_bytes: 1,
+            ..gmark_paged_document::ProbeOptions::default()
+        },
+    )
+    .expect("host IME focus probe");
+    let source = gmark_paged_document::FileSource::open(&path).expect("host IME focus source");
+    let (editor, visual) = cx.add_window_view(move |_window, cx| {
+        Editor::from_source_backed_file(cx, path, probe, source)
+    });
+    visual.run_until_parked();
+    redraw(visual);
+    let host = editor
+        .read_with(visual, |editor, _cx| editor.document_host.clone())
+        .expect("large Source host");
+    visual.update(|window, cx| {
+        host.update(cx, |host, cx| host.begin_line_edit_for_test(0, window, cx));
+    });
+    redraw(visual);
+    let source_block = host
+        .read_with(visual, |host, _cx| host.active_edit_for_test())
+        .expect("active Source row")
+        .1;
+
+    visual.update(|window, cx| {
+        source_block.update(cx, |block, block_cx| {
+            <crate::components::Block as gpui::EntityInputHandler>::replace_and_mark_text_in_range(
+                block,
+                None,
+                "n",
+                Some(1..1),
+                window,
+                block_cx,
+            );
+        });
+    });
+    visual.run_until_parked();
+    assert!(source_block.read_with(visual, |block, _cx| block.has_ime_composition()));
+    visual.update(|window, cx| {
+        editor.update(cx, |editor, cx| {
+            editor.on_find_in_document_action(&crate::components::FindInDocument, window, cx);
+        });
+    });
+    redraw(visual);
+    assert!(
+        visual.debug_bounds("document-host-find-panel").is_none(),
+        "Find must wait while the Source row owns pre-edit text"
+    );
+
+    visual.update(|window, cx| {
+        source_block.update(cx, |block, block_cx| {
+            <crate::components::Block as gpui::EntityInputHandler>::replace_text_in_range(
+                block, None, "你", window, block_cx,
+            );
+            <crate::components::Block as gpui::EntityInputHandler>::composition_ended(
+                block,
+                gpui::CompositionEnd::Committed,
+                window,
+                block_cx,
+            );
+        });
+    });
+    visual.run_until_parked();
+    redraw(visual);
+    assert!(visual.debug_bounds("document-host-find-panel").is_some());
+    let search_input = host.read_with(visual, |host, _cx| host.search_input_for_test());
+    assert!(visual.update(|window, cx| { search_input.read(cx).focus_handle.is_focused(window) }));
+
+    visual.update(|window, cx| {
+        search_input.update(cx, |block, block_cx| {
+            <crate::components::Block as gpui::EntityInputHandler>::replace_and_mark_text_in_range(
+                block,
+                None,
+                "n",
+                Some(1..1),
+                window,
+                block_cx,
+            );
+        });
+    });
+    visual.run_until_parked();
+    assert!(search_input.read_with(visual, |block, _cx| block.has_ime_composition()));
+    visual.update(|window, cx| {
+        editor.update(cx, |editor, cx| {
+            editor.on_go_to_line_action(&crate::components::GoToLine, window, cx);
+        });
+    });
+    redraw(visual);
+    assert!(
+        visual
+            .debug_bounds("document-host-navigation-panel")
+            .is_none(),
+        "Go To Line must not steal focus from an active search-field composition"
+    );
+
+    visual.update(|window, cx| {
+        search_input.update(cx, |block, block_cx| {
+            <crate::components::Block as gpui::EntityInputHandler>::replace_text_in_range(
+                block, None, "好", window, block_cx,
+            );
+            <crate::components::Block as gpui::EntityInputHandler>::composition_ended(
+                block,
+                gpui::CompositionEnd::Committed,
+                window,
+                block_cx,
+            );
+        });
+    });
+    visual.run_until_parked();
+    redraw(visual);
+    assert!(
+        visual
+            .debug_bounds("document-host-navigation-panel")
+            .is_some()
+    );
+    assert_eq!(
+        host.read_with(visual, |host, cx| host.search_text_for_test(cx)),
+        "好",
+        "the original tool keeps its committed candidate when focus advances"
+    );
+    let navigation_input = host.read_with(visual, |host, _cx| host.navigation_input_for_test());
+    assert!(
+        visual.update(|window, cx| { navigation_input.read(cx).focus_handle.is_focused(window) })
+    );
+    visual.simulate_input("1");
+    visual.run_until_parked();
+    assert_eq!(
+        navigation_input.read_with(visual, |input, _cx| input.display_text().to_owned()),
+        "1",
+        "Go To Line must retain the entered line number after updating the source selection"
+    );
+    assert!(
+        visual.update(|window, cx| { navigation_input.read(cx).focus_handle.is_focused(window) }),
+        "updating the source selection must leave focus in the Go To Line input"
+    );
+    assert!(editor.read_with(visual, |editor, _cx| {
+        editor.view_mode == ViewMode::Source
+    }));
+    assert!(
+        !host.read_with(visual, |host, cx| host.has_active_ime_composition(cx)),
+        "no Host input should still own an IME composition before Go To Line submit"
+    );
+    visual.simulate_keystrokes("enter");
+    visual.run_until_parked();
+    redraw(visual);
+    assert!(
+        !host.read_with(visual, |host, _cx| host.navigation_visible_for_test()),
+        "the deferred navigation submit must update Host visibility"
+    );
+    // GPUI 0.2.2 的 Frame.clear 不清 debug_bounds，旧 selector 不能证明面板仍存在；
+    // 验证权威可见性和实际焦点返回，覆盖异步提交完成后的公开行为。
+    assert!(
+        visual.update(|window, cx| {
+            !navigation_input.read(cx).focus_handle.is_focused(window)
+                && gpui::Focusable::focus_handle(host.read(cx), cx).is_focused(window)
+        }),
+        "submitting Go To Line must return keyboard focus to the Source host"
+    );
 }

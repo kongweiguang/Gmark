@@ -457,6 +457,7 @@ pub(crate) use model::{
     BlockDragPayload, BlockDropPlacement, BlockHostAction, MermaidSvgExportRequest,
 };
 pub use model::{BlockEvent, BlockRecord, PastedImageSource, UndoCaptureKind};
+pub(crate) use model::{BlockImeInteraction, BlockInputCommand};
 #[cfg(test)]
 #[path = "../../../tests/unit/components/block/state.rs"]
 mod tests;

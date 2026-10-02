@@ -4,6 +4,7 @@
 
 use super::*;
 
+/// 行操作沿既有焦点分发，菜单与快捷键共享动作，避免维护第二套编辑语义。
 pub(super) fn build_menus(
     _theme_manager: &ThemeManager,
     i18n_manager: &I18nManager,
@@ -165,6 +166,27 @@ pub(super) fn build_menus(
                     PasteAsPlainText,
                 ),
                 MenuItem::action(strings.preferences_shortcut_select_all.clone(), SelectAll),
+                MenuItem::submenu(Menu {
+                    name: if chinese { "行操作" } else { "Lines" }.into(),
+                    items: vec![
+                        MenuItem::action(
+                            strings.preferences_shortcut_duplicate_line.clone(),
+                            DuplicateLine,
+                        ),
+                        MenuItem::action(
+                            strings.preferences_shortcut_delete_line.clone(),
+                            DeleteLine,
+                        ),
+                        MenuItem::action(
+                            strings.preferences_shortcut_move_line_up.clone(),
+                            MoveLineUp,
+                        ),
+                        MenuItem::action(
+                            strings.preferences_shortcut_move_line_down.clone(),
+                            MoveLineDown,
+                        ),
+                    ],
+                }),
                 MenuItem::separator(),
                 MenuItem::action(
                     strings.preferences_shortcut_find_in_document.clone(),

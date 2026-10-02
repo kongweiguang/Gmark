@@ -214,6 +214,7 @@ async fn table_insert_and_duplicate_commands_are_single_undo_steps(cx: &mut Test
     });
 }
 
+/// Entering rectangle mode clears cell-local ranges so later clipboard commands have one selection owner.
 #[gpui::test]
 async fn escape_enters_rectangular_table_selection_and_delete_clears_cells(
     cx: &mut TestAppContext,
@@ -236,15 +237,24 @@ async fn escape_enters_rectangular_table_selection_and_delete_clears_cells(
     editor.update(cx, |editor, cx| {
         let table = editor.document.first_root().expect("table root").clone();
         let first = table.read(cx).table_runtime.as_ref().unwrap().header[0].clone();
+        first.update(cx, |block, _cx| {
+            block.selected_range = 0..1;
+        });
         editor.active_entity_id = Some(first.entity_id());
         assert!(editor.handle_table_cell_selection_key(&escape, cx));
+        assert!(first.read(cx).selected_range.is_empty());
         assert!(editor.handle_table_cell_selection_key(&extend, cx));
         let selection = editor.table_cell_rectangle.expect("rectangle selection");
         assert_eq!(selection.columns(), 0..=1);
 
         assert!(editor.handle_table_cell_selection_key(&delete, cx));
         let table = table.read(cx).record.table.as_ref().unwrap();
-        assert!(table.header.iter().all(|cell| cell.visible_text().is_empty()));
+        assert!(
+            table
+                .header
+                .iter()
+                .all(|cell| cell.visible_text().is_empty())
+        );
         assert_eq!(editor.undo_history.len(), 1);
     });
 }

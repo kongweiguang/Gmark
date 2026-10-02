@@ -2,7 +2,7 @@
 
 [package]
 name = "gmark"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2024"
 rust-version = "1.95"
 authors = ["kongweiguang"]
@@ -28,7 +28,7 @@ members = [
     "crates/gmark-update-core",
     "xtask",
 ]
-exclude = ["fuzz"]
+exclude = ["fuzz", "vendor/gpui"]
 resolver = "2"
 
 [workspace.package]
@@ -345,6 +345,8 @@ embed-resource = "3"
 # revision 的 workspace patch 配套，否则干净 runner 会错误解析 crates.io 版本。
 [patch.crates-io]
 async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
+# The locked crates.io source is vendored for a narrow Windows IME lifecycle patch.
+gpui = { path = "vendor/gpui" }
 
 [profile.bench]
 # Keep DWARF for samply / perf / cargo flamegraph; doesn't disable opts.

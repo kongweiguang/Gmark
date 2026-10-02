@@ -87,7 +87,8 @@ async fn source_mode_keyboard_copy_cut_paste_and_history_match_text_editor(
 }
 
 #[gpui::test]
-async fn ctrl_a_selects_only_focused_block_text_in_rendered_mode(cx: &mut TestAppContext) {
+/// 文档表面一次全选，局部光标状态不代替跨块全文选区。
+async fn ctrl_a_selects_entire_rendered_document_from_any_focused_block(cx: &mut TestAppContext) {
     init_editor_test_app(cx);
     let (editor, cx) = cx.add_window_view(|_window, cx| {
         Editor::from_markdown(cx, "alpha\n\nbeta".to_string(), None)
@@ -108,14 +109,19 @@ async fn ctrl_a_selects_only_focused_block_text_in_rendered_mode(cx: &mut TestAp
     editor.read_with(cx, |editor, cx| {
         let first = editor.document.visible_blocks()[0].entity.read(cx);
         let second = editor.document.visible_blocks()[1].entity.read(cx);
-        assert_eq!(first.selected_range, 0..0);
-        assert_eq!(second.selected_range, 0..second.visible_len());
-        assert!(editor.cross_block_selection.is_none());
+        let selection = editor
+            .cross_block_selection
+            .expect("one Ctrl+A selects the document");
+        assert_eq!(selection.anchor.offset, 0);
+        assert_eq!(selection.focus.offset, second.visible_len());
+        assert_eq!(first.editor_selection_range, Some(0..first.visible_len()));
+        assert_eq!(second.editor_selection_range, Some(0..second.visible_len()));
     });
 }
 
 #[gpui::test]
-async fn repeated_ctrl_a_selects_all_rendered_blocks(cx: &mut TestAppContext) {
+/// 连续全选始终包含表格与代码，不再依赖按键轮次。
+async fn repeated_ctrl_a_keeps_all_rendered_blocks_selected(cx: &mut TestAppContext) {
     init_editor_test_app(cx);
     let markdown =
         "alpha\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n```rust\nfn main() {}\n```\n\ngamma";
@@ -138,8 +144,8 @@ async fn repeated_ctrl_a_selects_all_rendered_blocks(cx: &mut TestAppContext) {
 
     editor.read_with(cx, |editor, cx| {
         let first = editor.document.visible_blocks()[0].entity.read(cx);
-        assert_eq!(first.selected_range, 0..first.visible_len());
-        assert!(editor.cross_block_selection.is_none());
+        assert_eq!(first.editor_selection_range, Some(0..first.visible_len()));
+        assert!(editor.cross_block_selection.is_some());
     });
 
     cx.simulate_keystrokes("ctrl-a");
@@ -153,7 +159,7 @@ async fn repeated_ctrl_a_selects_all_rendered_blocks(cx: &mut TestAppContext) {
         let last_len = last.entity.read(cx).visible_len();
         let selection = editor
             .cross_block_selection
-            .expect("second Ctrl+A should select the rendered document");
+            .expect("Ctrl+A keeps the rendered document selected");
         assert_eq!(selection.anchor.entity_id, first_id);
         assert_eq!(selection.anchor.offset, 0);
         assert_eq!(selection.focus.entity_id, last_id);
@@ -187,51 +193,30 @@ async fn repeated_ctrl_a_selects_all_rendered_blocks(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-async fn rendered_ctrl_a_cycle_expires_before_second_press(cx: &mut TestAppContext) {
+/// 移动光标及等待后，全选仍然一次选择全文，不需要临时循环状态。
+async fn rendered_ctrl_a_selects_full_document_after_cursor_move(cx: &mut TestAppContext) {
     init_editor_test_app(cx);
     let (editor, cx) = cx.add_window_view(|_window, cx| {
         Editor::from_markdown(cx, "alpha\n\nbeta".to_string(), None)
     });
-
+    redraw(cx);
+    cx.simulate_keystrokes("ctrl-a");
+    redraw(cx);
     editor.update(cx, |editor, cx| {
+        editor.clear_cross_block_selection(cx);
         let block = editor.document.visible_blocks()[1].entity.clone();
         editor.focus_block(block.entity_id());
-        block.update(cx, |block, block_cx| {
-            block.move_to(1, block_cx);
-        });
+        block.update(cx, |block, cx| block.move_to(1, cx));
     });
+    cx.executor().advance_clock(Duration::from_secs(2));
     redraw(cx);
-
     cx.simulate_keystrokes("ctrl-a");
     redraw(cx);
-
-    editor.update(cx, |editor, cx| {
-        let block = editor.document.visible_blocks()[1].entity.clone();
-        block.update(cx, |block, _cx| {
-            block.selected_range = 1..1;
-        });
-        let cycle = editor
-            .rendered_select_all_cycle
-            .as_mut()
-            .expect("first Ctrl+A should arm the rendered select-all cycle");
-        cycle.last_pressed_at =
-            Instant::now() - (Editor::RENDERED_SELECT_ALL_CYCLE_WINDOW + Duration::from_millis(1));
-    });
-
-    cx.simulate_keystrokes("ctrl-a");
-    redraw(cx);
-
     editor.read_with(cx, |editor, cx| {
         let second = editor.document.visible_blocks()[1].entity.read(cx);
-        assert_eq!(second.selected_range, 0..second.visible_len());
-        assert!(editor.cross_block_selection.is_none());
-        assert_eq!(
-            editor
-                .rendered_select_all_cycle
-                .expect("cycle should be reset by expired second press")
-                .count,
-            1
-        );
+        assert_eq!(second.editor_selection_range, Some(0..second.visible_len()));
+        assert!(editor.cross_block_selection.is_some());
+        assert!(editor.rendered_select_all_cycle.is_none());
     });
 }
 

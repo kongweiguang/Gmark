@@ -16,3 +16,5 @@ mod table_axis_commands;
 mod table_axis_menu;
 #[path = "controller/table_insert.rs"]
 mod table_insert;
+#[path = "controller/text_context.rs"]
+mod text_context;

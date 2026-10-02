@@ -18,7 +18,16 @@ impl Editor {
         }
     }
 
-    fn close_find_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Keeps the query/replacement input alive until an IME pre-edit reaches a terminal state.
+    pub(in crate::editor) fn close_find_panel(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.defer_tool_ime_intent(super::super::tool_ime::ToolImeIntent::FindClose, window, cx)
+        {
+            return;
+        }
         let Some(state) = self.find_panel.take() else {
             return;
         };
@@ -31,18 +40,56 @@ impl Editor {
             self.prev_render_window = None;
             self.row_stride_cache.clear();
         }
-        if let Some(block) = restore.and_then(|id| self.focusable_entity_by_id(id)) {
-            block.read(cx).focus_handle.focus(window);
+        if let Some(restore) = restore {
+            let block = match restore.surface {
+                super::super::selection_surface::SelectionSurface::Main => self
+                    .selection_surface_entities(restore.surface)
+                    .into_iter()
+                    .find(|block| block.entity_id() == restore.entity_id)
+                    .or_else(|| {
+                        self.table_cells
+                            .values()
+                            .find(|binding| binding.cell.entity_id() == restore.entity_id)
+                            .map(|binding| binding.cell.clone())
+                    }),
+                super::super::selection_surface::SelectionSurface::SplitPreview => self
+                    .selection_surface_entities(restore.surface)
+                    .into_iter()
+                    .find(|block| block.entity_id() == restore.entity_id)
+                    .or_else(|| {
+                        self.split_preview.as_ref().and_then(|preview| {
+                            preview
+                                .table_cells
+                                .values()
+                                .find(|binding| binding.cell.entity_id() == restore.entity_id)
+                                .map(|binding| binding.cell.clone())
+                        })
+                    }),
+            };
+            if let Some(block) = block {
+                self.active_selection_surface = restore.surface;
+                if restore.surface == super::super::selection_surface::SelectionSurface::Main
+                    && self.selection_surface_contains_entity(restore.surface, restore.entity_id)
+                {
+                    self.focus_block(restore.entity_id);
+                } else {
+                    block.read(cx).focus_handle.focus(window);
+                }
+            }
         }
         cx.notify();
     }
 
+    /// Lets candidate navigation and confirmation keys reach the focused composition owner first.
     pub(in crate::editor) fn handle_find_panel_key(
         &mut self,
         event: &KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.has_active_ime_composition(cx) {
+            return false;
+        }
         let Some(state) = self.find_panel.as_ref() else {
             return false;
         };
@@ -70,13 +117,14 @@ impl Editor {
         true
     }
 
+    /// Defers target changes so a query field remains the native IME owner through END.
     fn move_find_keyboard_target(
         &mut self,
         reverse: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(state) = self.find_panel.as_mut() else {
+        let Some(state) = self.find_panel.as_ref() else {
             return;
         };
         const FIND_ONLY_ORDER: [FindKeyboardTarget; 7] = [
@@ -112,15 +160,7 @@ impl Editor {
         } else {
             (current + 1) % order.len()
         };
-        state.keyboard_target = order[next];
-        match state.keyboard_target {
-            FindKeyboardTarget::Query => state.query.read(cx).focus_handle.focus(window),
-            FindKeyboardTarget::Replacement => {
-                state.replacement.read(cx).focus_handle.focus(window)
-            }
-            _ => state.focus_handle.focus(window),
-        }
-        cx.notify();
+        self.focus_find_keyboard_target(order[next], window, cx);
     }
 
     fn activate_find_keyboard_target(
@@ -150,12 +190,20 @@ impl Editor {
         }
     }
 
-    fn focus_find_keyboard_target(
+    /// Defers focus changes while a find field owns pre-edit text, preserving the original target.
+    pub(in crate::editor) fn focus_find_keyboard_target(
         &mut self,
         target: FindKeyboardTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.defer_tool_ime_intent(
+            super::super::tool_ime::ToolImeIntent::FindFocus(target),
+            window,
+            cx,
+        ) {
+            return;
+        }
         let Some(state) = self.find_panel.as_mut() else {
             return;
         };
@@ -310,7 +358,7 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.view_mode == super::ViewMode::Preview || !self.source_encoding.is_utf8() {
+        if !self.document_surface_is_editable() || !self.source_encoding.is_utf8() {
             return;
         }
         if self
@@ -318,6 +366,9 @@ impl Editor {
             .as_ref()
             .is_some_and(|state| state.replace_task.is_some())
         {
+            return;
+        }
+        if self.defer_find_replace_for_ime(false, window, cx) {
             return;
         }
         let Some((range, metadata, query, replacement_template, options, revision, generation)) =
@@ -428,16 +479,23 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.view_mode == super::ViewMode::Preview || !self.source_encoding.is_utf8() {
+        if !self.document_surface_is_editable() || !self.source_encoding.is_utf8() {
+            return;
+        }
+        if self
+            .find_panel
+            .as_ref()
+            .is_some_and(|state| state.replace_task.is_some())
+        {
+            return;
+        }
+        if self.defer_find_replace_for_ime(true, window, cx) {
             return;
         }
         let Some(state) = self.find_panel.as_ref() else {
             return;
         };
-        if state.matches.is_empty()
-            || state.revision != self.source_document.revision()
-            || state.replace_task.is_some()
-        {
+        if state.matches.is_empty() || state.revision != self.source_document.revision() {
             return;
         }
         let generation = state.generation;

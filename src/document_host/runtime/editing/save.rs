@@ -6,12 +6,20 @@ use super::*;
 use std::io::Write as _;
 
 impl DocumentHost {
+    /// Waits for the Source input target's native terminal event before snapshotting the document for save.
     pub(crate) fn on_save_document(
         &mut self,
         _: &SaveDocument,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.defer_source_action_for_ime(
+            super::source_ime::DeferredSourceAction::Block(BlockHostAction::Save),
+            window,
+            cx,
+        ) {
+            return;
+        }
         if self.coordinator.external_monitor_paused {
             self.error = Some(
                 cx.global::<I18nManager>()
@@ -36,15 +44,60 @@ impl DocumentHost {
         self.start_save(self.path.clone(), false, window.window_handle(), cx);
     }
 
+    /// Waits for Source IME completion before opening Save As and keeps the dialog callback bound to this Host.
+    pub(crate) fn on_save_document_as(
+        &mut self,
+        _: &SaveDocumentAs,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.defer_source_action_for_ime(
+            super::source_ime::DeferredSourceAction::SaveAs,
+            window,
+            cx,
+        ) {
+            return;
+        }
+        let default_dir = self.path.parent().map(PathBuf::from).unwrap_or_default();
+        let suggested_name = self
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned());
+        let prompt = cx.prompt_for_new_path(&default_dir, suggested_name.as_deref());
+        let window_handle = window.window_handle();
+        cx.spawn(async move |this, cx| match prompt.await {
+            Ok(Ok(Some(path))) => {
+                let _ = this.update(cx, |host, cx| {
+                    host.save_as_path(path, window_handle, cx);
+                });
+            }
+            Ok(Ok(None)) | Err(_) => {}
+            Ok(Err(_)) => {
+                let _ = this.update(cx, |host, cx| {
+                    host.error = Some("另存为路径不可用，请重试。".into());
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Starts Save As only after the UI action has crossed its native IME completion boundary.
     pub(crate) fn save_as_path(
         &mut self,
         path: PathBuf,
         window_handle: gpui::AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
+        if self.has_active_ime_composition(cx) {
+            self.error = Some("请先确认或取消输入法候选，再保存文档。".into());
+            cx.notify();
+            return;
+        }
         self.start_save(path, true, window_handle, cx);
     }
 
+    /// Captures one immutable revision only when no transient native composition can enter the snapshot.
     pub(super) fn start_save(
         &mut self,
         path: PathBuf,
@@ -52,6 +105,11 @@ impl DocumentHost {
         window_handle: gpui::AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
+        if self.has_active_ime_composition(cx) {
+            self.error = Some("请先确认或取消输入法候选，再保存文档。".into());
+            cx.notify();
+            return;
+        }
         if self.saving || self.reloading || (!document_dirty_state(&self.document) && !save_as) {
             return;
         }

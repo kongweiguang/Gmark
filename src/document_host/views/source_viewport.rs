@@ -222,12 +222,14 @@ impl DocumentHost {
                                 .source_rows
                                 .get(&line)
                                 .is_none_or(|previous| !previous.has_same_surface_text(&row));
-                            if row_changed
-                                && view
-                                    .active_edit
+                            let row_is_pinned =
+                                view.active_edit
                                     .as_ref()
-                                    .is_none_or(|active| active.line != line)
-                            {
+                                    .is_some_and(|active| active.line == line)
+                                    || view.source_row_blocks.get(&line).is_some_and(|block| {
+                                        view.is_pending_source_ime_owner(block)
+                                    });
+                            if row_changed && !row_is_pinned {
                                 view.source_row_blocks.remove(&line);
                             }
                             view.source_rows.insert(line, Arc::new(row));
@@ -255,11 +257,14 @@ impl DocumentHost {
                             view.source_rows.remove(&evicted);
                             view.source_row_epochs.remove(&evicted);
                             view.source_syntax_contexts.remove(&evicted);
-                            if view
-                                .active_edit
-                                .as_ref()
-                                .is_none_or(|active| active.line != evicted)
-                            {
+                            let row_is_pinned =
+                                view.active_edit
+                                    .as_ref()
+                                    .is_some_and(|active| active.line == evicted)
+                                    || view.source_row_blocks.get(&evicted).is_some_and(|block| {
+                                        view.is_pending_source_ime_owner(block)
+                                    });
+                            if !row_is_pinned {
                                 view.source_row_blocks.remove(&evicted);
                             }
                         }
@@ -330,6 +335,7 @@ impl DocumentHost {
                     }
                 }
                 let queued = view.source_queued_visible.take();
+                view.schedule_source_ime_replay(cx);
                 cx.notify();
                 if let Some(visible) = queued {
                     // 不在即将完成的 source_task 内覆盖并 drop 自己。TestApp 会让已取消

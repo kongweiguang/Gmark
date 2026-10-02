@@ -244,6 +244,7 @@ impl Block {
         deferred(hit_container).with_priority(30).into_any_element()
     }
 
+    /// Renders structured IME candidates from a disposable session so preview never mutates source.
     pub(super) fn render_math_content(
         &mut self,
         theme: &Theme,
@@ -253,9 +254,12 @@ impl Block {
         let wb = &c.workbench;
         let d = &theme.dimensions;
         let t = &theme.typography;
-        let raw = self
-            .math_edit_session
+        let ime_preview = self.math_ime_preview_session();
+        let visible_session = ime_preview.as_ref().or(self.math_edit_session.as_ref());
+        let ime_marked_selection = ime_preview
             .as_ref()
+            .and_then(|preview| self.math_ime_marked_selection(preview));
+        let raw = visible_session
             .map(crate::editor::math_edit::MathEditSession::visual_preview_raw)
             .unwrap_or_else(|| {
                 self.record
@@ -266,7 +270,7 @@ impl Block {
             });
         let text_color = c.text_default;
         let font_size = display_math_font_size(t.text_size);
-        let editing_geometry = self.math_edit_session.as_ref().map(|session| {
+        let editing_geometry = visible_session.map(|session| {
             (
                 gmark_math_edit::MathVisualProjection::from_document(session.document()),
                 session.editor().cursor().clone(),
@@ -318,7 +322,14 @@ impl Block {
             (Some(rendered), None) => editing_geometry
                 .as_ref()
                 .map(|(projection, cursor, selection)| {
-                    render_math_editing_svg_content(rendered, theme, projection, cursor, selection)
+                    render_math_editing_svg_content(
+                        rendered,
+                        theme,
+                        projection,
+                        cursor,
+                        selection,
+                        ime_marked_selection.as_ref(),
+                    )
                 })
                 .unwrap_or_else(|| render_math_svg_content(rendered, theme)),
             (Some(rendered), Some(error)) => div()
@@ -370,6 +381,7 @@ impl Block {
 
     /// Floating 200 px formula palette. Graphic labels stay compact while
     /// localized names are exposed through tooltips and the accessibility tree.
+    /// Toolbar commands retain the source input's IME owner until its terminal event before focusing the diagram.
     pub(super) fn render_math_structure_toolbar(
         &self,
         theme: &Theme,
@@ -391,7 +403,6 @@ impl Block {
         let strings = cx.global::<I18nManager>().strings_arc();
         let block = cx.entity().downgrade();
         let drag_target = block.clone();
-        let structure_focus_handle = self.math_structure_focus_handle.clone();
         let page = self.math_palette_page;
         let structured = self.math_edit_session.is_some();
         let items: Vec<(&'static str, &'static str, MathEditCommand)> = match page {
@@ -567,8 +578,6 @@ impl Block {
         let tab = |id: &'static str, label_key: &'static str, target_page: MathPalettePage| {
             let target = block.clone();
             let pointer_target = block.clone();
-            let focus = structure_focus_handle.clone();
-            let pointer_focus = structure_focus_handle.clone();
             let active = page == target_page;
             let tooltip = SharedString::from(strings.math_palette_text(label_key));
             div()
@@ -599,16 +608,14 @@ impl Block {
                 .tab_index(0)
                 .cursor_pointer()
                 .tooltip(move |_window, cx| crate::ui::ui_tooltip(tooltip.clone(), cx))
-                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                    pointer_focus.focus(window);
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                     let _ = pointer_target.update(cx, |block, cx| {
                         block.math_palette_page = target_page;
                         cx.notify();
                     });
                     cx.stop_propagation();
                 })
-                .on_click(move |_event, window, cx| {
-                    focus.focus(window);
+                .on_click(move |_event, _window, cx| {
                     let _ = target.update(cx, |block, cx| {
                         block.math_palette_page = target_page;
                         cx.notify();
@@ -621,11 +628,7 @@ impl Block {
         let rows = items.chunks(5).map(|row| {
             let buttons = row.iter().map(|(key, glyph, command)| {
                 let target = block.clone();
-                let pointer_target = block.clone();
-                let focus = structure_focus_handle.clone();
-                let pointer_focus = structure_focus_handle.clone();
                 let command = command.clone();
-                let pointer_command = command.clone();
                 let tooltip = strings.math_palette_text(key);
                 // The command key is the stable identity. Row/column are a
                 // presentation detail and must not change selectors when
@@ -654,19 +657,19 @@ impl Block {
                     .text_size(px(16.0))
                     .cursor_pointer()
                     .tooltip(move |_window, cx| crate::ui::ui_tooltip(tooltip.clone(), cx))
-                    .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                        pointer_focus.focus(window);
-                        let command = pointer_command.clone();
-                        let _ = pointer_target.update(cx, |block, cx| {
-                            let _ = block.execute_math_palette_command(command, cx);
-                        });
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                         cx.stop_propagation();
                     })
                     .on_click(move |_event, window, cx| {
-                        focus.focus(window);
                         let command = command.clone();
                         let _ = target.update(cx, |block, cx| {
-                            let _ = block.execute_math_palette_command(command, cx);
+                            block.request_ime_interaction(
+                                crate::components::block::BlockImeInteraction::MathPaletteCommand(
+                                    command,
+                                ),
+                                window,
+                                cx,
+                            );
                         });
                         cx.stop_propagation();
                     })

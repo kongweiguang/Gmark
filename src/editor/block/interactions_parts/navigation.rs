@@ -292,286 +292,6 @@ impl Block {
         }
     }
 
-    pub(crate) fn on_mouse_down(
-        &mut self,
-        event: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // 原生表格容器包裹着独立的单元格编辑器；容器不得重复处理从单元格冒泡的点击，
-        // 否则会在单元格请求聚焦后立即把焦点抢回表格块。
-        if self.kind() == BlockKind::Table && self.table_runtime.is_some() {
-            self.is_selecting = false;
-            return;
-        }
-
-        if self.kind() == BlockKind::MermaidBlock {
-            let source_hit = self.last_bounds.is_some_and(|bounds| {
-                event.position.x >= bounds.left()
-                    && event.position.x <= bounds.right()
-                    && event.position.y >= bounds.top()
-                    && event.position.y <= bounds.bottom()
-            });
-            if self.mermaid_view_mode() == MermaidViewMode::Preview || !source_hit {
-                self.is_selecting = false;
-                self.focus_handle.focus(window);
-                cx.stop_propagation();
-                cx.notify();
-                return;
-            }
-        }
-
-        // Resource cards are rendered inside the same block shell as editable
-        // Markdown. Claim their pointer gesture before the text handler can
-        // move the caret and switch the projection back to source text.
-        let resource_card_visible = self.record.resource.is_some()
-            && (!self.focus_handle.is_focused(window) || self.resource_selected);
-        if resource_card_visible {
-            self.is_selecting = false;
-            self.focus_handle.focus(window);
-            if event.click_count >= 2 {
-                if let Some(record) = self
-                    .record
-                    .resource
-                    .as_ref()
-                    .map(|resource| resource.with_base_dir(self.image_base_dir()))
-                {
-                    self.request_resource_open(&record, cx);
-                }
-            } else {
-                self.resource_selected = true;
-                cx.notify();
-            }
-            cx.stop_propagation();
-            return;
-        }
-
-        if self.showing_rendered_image() {
-            self.is_selecting = false;
-            if event.click_count >= 2 {
-                self.request_image_edit_expansion();
-            } else {
-                self.select_rendered_image(cx);
-            }
-            if self.focus_handle.is_focused(window) {
-                if self.sync_image_focus_state(true) {
-                    cx.notify();
-                }
-            } else {
-                cx.emit(BlockEvent::RequestFocus);
-            }
-            cx.stop_propagation();
-            return;
-        }
-
-        let offset = self.index_for_mouse_position(event.position);
-        let was_focused = self.focus_handle.is_focused(window);
-
-        // Cmd/Ctrl+click follows a rendered link instead of editing it, so the
-        // block is neither focused nor selected; the link opens on mouse-up.
-        if event.modifiers.secondary() && self.pointer_link_hit(event.position).is_some() {
-            self.is_selecting = false;
-            cx.stop_propagation();
-            return;
-        }
-
-        if was_focused {
-            self.is_selecting = true;
-            if event.modifiers.shift {
-                self.select_to(offset, cx);
-            } else {
-                self.move_to(offset, cx);
-            }
-        } else {
-            self.is_selecting = false;
-            self.move_to(offset, cx);
-            cx.emit(BlockEvent::RequestFocus);
-        }
-    }
-
-    pub(crate) fn on_read_only_mouse_down(
-        &mut self,
-        event: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.pointer_link_hit(event.position).is_some() {
-            self.is_selecting = false;
-            cx.stop_propagation();
-            return;
-        }
-
-        self.focus_handle.focus(window);
-        self.is_selecting = true;
-        let offset = self.index_for_mouse_position(event.position);
-        if event.modifiers.shift {
-            self.select_to(offset, cx);
-        } else {
-            self.move_to(offset, cx);
-        }
-    }
-
-    pub(crate) fn on_read_only_mouse_up(
-        &mut self,
-        event: &MouseUpEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let was_selecting = self.is_selecting;
-        self.is_selecting = false;
-        if !was_selecting && let Some(link) = self.pointer_link_hit(event.position) {
-            self.open_rendered_link(&link, cx);
-        }
-    }
-
-    /// Resolve the inline link under a pointer position against the most recent
-    /// rendered text layout, if any. Returns `None` while the block shows raw
-    /// source or when the pointer is not over a link.
-    pub(crate) fn pointer_link_hit(&self, position: Point<Pixels>) -> Option<super::InlineLinkHit> {
-        self.last_layout
-            .as_ref()
-            .zip(self.last_bounds)
-            .and_then(|(lines, bounds)| {
-                super::element::link_at_position(
-                    self,
-                    lines,
-                    bounds,
-                    self.last_line_height,
-                    position,
-                )
-            })
-            .cloned()
-    }
-
-    /// Handle mouse-down on a rendered inline link (in a mixed inline-visual
-    /// block). A Cmd/Ctrl+click is claimed here so it follows the link instead
-    /// of focusing the block; the destination opens on the matching mouse-up.
-    pub(crate) fn on_rendered_link_mouse_down(
-        &mut self,
-        event: &MouseDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // Only Cmd/Ctrl+click follows the link; a plain click falls through so
-        // the block focuses for editing like any other inline text.
-        if event.modifiers.secondary() {
-            cx.stop_propagation();
-        }
-    }
-
-    /// Open a rendered inline link's destination through the editor prompt.
-    pub(crate) fn open_rendered_link(
-        &mut self,
-        link: &super::InlineLinkHit,
-        cx: &mut Context<Self>,
-    ) {
-        cx.stop_propagation();
-        cx.emit(BlockEvent::RequestOpenLink {
-            prompt_target: link.prompt_target.clone(),
-            open_target: link.open_target.clone(),
-        });
-    }
-
-    pub(crate) fn on_mouse_up(
-        &mut self,
-        event: &MouseUpEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.finish_image_resize(cx) {
-            cx.stop_propagation();
-            return;
-        }
-        self.is_selecting = false;
-
-        // Cmd/Ctrl+click follows a rendered link, using the same open-link
-        // prompt as the double-click gesture below.
-        if event.modifiers.secondary()
-            && let Some(link) = self.pointer_link_hit(event.position)
-        {
-            self.open_rendered_link(&link, cx);
-            return;
-        }
-
-        if event.click_count >= 2 {
-            let footnote = self
-                .last_layout
-                .as_ref()
-                .zip(self.last_bounds)
-                .and_then(|(lines, bounds)| {
-                    super::element::footnote_at_position(
-                        self,
-                        lines,
-                        bounds,
-                        self.last_line_height,
-                        event.position,
-                    )
-                })
-                .cloned();
-            if let Some(footnote) = footnote {
-                cx.stop_propagation();
-                cx.emit(BlockEvent::RequestJumpToFootnoteDefinition { id: footnote.id });
-                return;
-            }
-
-            if let Some(link) = self.pointer_link_hit(event.position) {
-                self.open_rendered_link(&link, cx);
-            }
-        }
-    }
-
-    pub(crate) fn on_footnote_backref_mouse_down(
-        &mut self,
-        _: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        cx.stop_propagation();
-        if !self.focus_handle.is_focused(window) {
-            cx.emit(BlockEvent::RequestFocus);
-        }
-    }
-
-    pub(crate) fn on_footnote_backref_mouse_up(
-        &mut self,
-        _: &MouseUpEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(id) = self.footnote_definition_id() else {
-            return;
-        };
-        cx.stop_propagation();
-        cx.emit(BlockEvent::RequestJumpToFootnoteBackref { id });
-    }
-
-    pub(crate) fn on_mouse_move(
-        &mut self,
-        event: &MouseMoveEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.image_resize_session.is_some() {
-            if event.dragging() {
-                self.update_image_resize(event.position.x, cx);
-            } else {
-                self.finish_image_resize(cx);
-            }
-            cx.stop_propagation();
-            return;
-        }
-        if self.is_selecting {
-            // A stale selecting flag can survive a missed mouse-up. Only extend
-            // the selection while the platform still reports an active drag.
-            if !event.dragging() {
-                self.is_selecting = false;
-                cx.notify();
-                return;
-            }
-            self.select_to(self.index_for_mouse_position(event.position), cx);
-        }
-    }
-
     pub(crate) fn on_task_checkbox_mouse_down(
         &mut self,
         _: &MouseDownEvent,
@@ -652,24 +372,26 @@ impl Block {
         self.set_table_append_row_hover_part(Some(*hovered), None, None, cx);
     }
 
+    /// Avoids emitting a structural write request if a stale append control fires after Preview.
     pub(crate) fn on_append_table_column(
         &mut self,
         _: &ClickEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.kind() == BlockKind::Table {
+        if !self.is_read_only() && self.kind() == BlockKind::Table {
             cx.emit(BlockEvent::RequestAppendTableColumn);
         }
     }
 
+    /// Avoids emitting a structural write request if a stale append control fires after Preview.
     pub(crate) fn on_append_table_row(
         &mut self,
         _: &ClickEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.kind() == BlockKind::Table {
+        if !self.is_read_only() && self.kind() == BlockKind::Table {
             cx.emit(BlockEvent::RequestAppendTableRow);
         }
     }

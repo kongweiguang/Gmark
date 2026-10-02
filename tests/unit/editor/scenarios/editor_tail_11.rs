@@ -383,6 +383,7 @@ async fn wide_large_csv_exposes_only_source_without_column_projection(cx: &mut T
     assert!(visual.debug_bounds("document-host-structured-columns-next").is_none());
 }
 
+/// Verifies structured-surface Tab stays owned by the table and moves in both directions.
 #[gpui::test]
 async fn csv_uses_all_four_modes_and_live_cell_edits_rebuild_the_table(
     cx: &mut TestAppContext,
@@ -484,10 +485,20 @@ async fn csv_uses_all_four_modes_and_live_cell_edits_rebuild_the_table(
         Some((Some(0), 1))
     );
     visual.simulate_keystrokes("tab");
-    assert_ne!(
+    visual.run_until_parked();
+    redraw(visual);
+    let selected_after =
+        large_view.read_with(visual, |view, _cx| view.structured_selected_cell_for_test());
+    assert_eq!(
+        selected_after,
+        Some((Some(1), 0)),
+        "Tab must advance to the next row-major cell"
+    );
+    visual.simulate_keystrokes("shift-tab");
+    assert_eq!(
         large_view.read_with(visual, |view, _cx| view.structured_selected_cell_for_test()),
         Some((Some(0), 1)),
-        "Tab must move the selected cell"
+        "Shift+Tab must return to the prior selected cell"
     );
     visual.simulate_click(cell.center(), Modifiers::default());
     visual.simulate_keystrokes("enter");
@@ -523,6 +534,21 @@ async fn csv_uses_all_four_modes_and_live_cell_edits_rebuild_the_table(
         let len = block.display_text().len();
         block.replace_text_in_visible_range(0..len, "11", None, false, cx);
     });
+    visual.simulate_keystrokes("tab");
+    visual.run_until_parked();
+    redraw(visual);
+    let selected_after =
+        large_view.read_with(visual, |view, _cx| view.structured_selected_cell_for_test());
+    assert_eq!(
+        selected_after,
+        Some((Some(1), 0)),
+        "Tab in a CSV cell editor must move to the next row-major cell"
+    );
+    assert_eq!(
+        large_view.read_with(visual, |view, _cx| view.source_text_for_test()),
+        "name,score\r\nAda,11\r\nBob,20\r\n",
+        "cell navigation must commit the current field before returning focus to the grid"
+    );
     let next_cell = visual
         .debug_bounds("document-host-structured-cell-0-0")
         .expect("next editable CSV cell");

@@ -2,10 +2,12 @@
 
 use super::Block;
 use crate::components::{
-    BlockKind, BlockRecord, Copy, Cut, InlineTextTree, Paste, PastedImageSource, SelectAll,
+    BlockEvent, BlockKind, BlockRecord, Copy, Cut, InlineTextTree, Paste, PastedImageSource,
+    SelectAll, TableData,
 };
-use gpui::{AppContext, ClipboardItem, TestAppContext};
+use gpui::{AppContext, ClickEvent, ClipboardItem, TestAppContext};
 use std::fs;
+use std::sync::{Arc, Mutex};
 
 fn temp_image_path(name: &str) -> std::path::PathBuf {
     let root =
@@ -51,6 +53,38 @@ async fn read_only_preview_text_can_be_selected_and_copied(cx: &mut TestAppConte
             .as_deref(),
         Some("preview text")
     );
+}
+
+/// Prevents stale append-button callbacks from emitting writes after a table becomes read-only.
+#[gpui::test]
+async fn read_only_table_does_not_emit_append_requests(cx: &mut TestAppContext) {
+    let cx = cx.add_empty_window();
+    let block = cx.new(|cx| {
+        let mut block = Block::with_record(cx, BlockRecord::table(TableData::new_empty(1, 2)));
+        block.set_read_only(true);
+        block
+    });
+    let append_requests = Arc::new(Mutex::new(0usize));
+    let observed_requests = append_requests.clone();
+    let _subscription = cx.update(|_window, cx| {
+        cx.subscribe(&block, move |_, event: &BlockEvent, _| {
+            if matches!(
+                event,
+                BlockEvent::RequestAppendTableColumn | BlockEvent::RequestAppendTableRow
+            ) {
+                *observed_requests.lock().expect("event count lock") += 1;
+            }
+        })
+    });
+
+    cx.update(|window, cx| {
+        block.update(cx, |block, block_cx| {
+            block.on_append_table_column(&ClickEvent::default(), window, block_cx);
+            block.on_append_table_row(&ClickEvent::default(), window, block_cx);
+        });
+    });
+
+    assert_eq!(*append_requests.lock().expect("event count lock"), 0);
 }
 
 #[gpui::test]

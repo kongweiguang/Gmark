@@ -78,6 +78,7 @@ impl DocumentHost {
 }
 
 impl Render for DocumentHost {
+    /// 将文档级键盘命令注册在 Host 焦点面上，使虚拟 Source 与结构视图共用稳定入口。
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.prepare_document_render(window, cx);
         let viewport_width = f32::from(window.viewport_size().width).max(1.0);
@@ -125,6 +126,7 @@ impl Render for DocumentHost {
             // 右键打开菜单时，焦点路径里可能仍包含行内 Block；在捕获阶段关闭
             // 瞬态菜单，避免 Block 先消费 Escape 导致菜单残留。
             .capture_key_down(cx.listener(Self::on_source_surface_key_down))
+            .capture_action(cx.listener(Self::on_select_all_capture))
             .on_action(cx.listener(Self::on_undo))
             .on_action(cx.listener(Self::on_redo))
             .on_action(cx.listener(Self::on_save_document))
@@ -139,6 +141,14 @@ impl Render for DocumentHost {
             .on_action(cx.listener(Self::on_delete))
             .on_action(cx.listener(Self::on_delete_back))
             .on_action(cx.listener(Self::on_select_all))
+            .on_action(cx.listener(Self::on_select_up))
+            .on_action(cx.listener(Self::on_select_down))
+            .on_action(cx.listener(Self::on_select_page_up))
+            .on_action(cx.listener(Self::on_select_page_down))
+            .on_action(cx.listener(Self::on_move_to_document_start))
+            .on_action(cx.listener(Self::on_move_to_document_end))
+            .on_action(cx.listener(Self::on_select_to_document_start))
+            .on_action(cx.listener(Self::on_select_to_document_end))
             .on_action(cx.listener(Self::on_export_selection))
             .on_action(cx.listener(Self::on_page_up))
             .on_action(cx.listener(Self::on_page_down))
@@ -148,6 +158,12 @@ impl Render for DocumentHost {
             .on_action(cx.listener(Self::on_expand_fold))
             .on_action(cx.listener(Self::on_collapse_all_folds))
             .on_action(cx.listener(Self::on_expand_all_folds))
+            .on_action(cx.listener(Self::on_duplicate_line))
+            .on_action(cx.listener(Self::on_delete_line))
+            .on_action(cx.listener(Self::on_move_line_up))
+            .on_action(cx.listener(Self::on_move_line_down))
+            .on_action(cx.listener(Self::on_indent_source))
+            .on_action(cx.listener(Self::on_outdent_source))
             .on_action(cx.listener(Self::on_format_document))
             .on_action(cx.listener(Self::on_format_selection))
             .on_action(cx.listener(Self::on_cancel_formatting))

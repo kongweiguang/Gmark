@@ -147,6 +147,39 @@ impl DocumentTree {
         self.rebuild_metadata_and_snapshot(cx);
     }
 
+    /// 共享投影重建后保留原 IME 输入实体，系统迟到回调仍能找到原 owner。
+    pub(super) fn retain_input_entity(
+        &mut self,
+        replaced: EntityId,
+        retained: Entity<Block>,
+        cx: &mut Context<Editor>,
+    ) -> bool {
+        let Some(location) = self.find_block_location(replaced) else {
+            return false;
+        };
+        let changed = match location.parent {
+            Some(parent) => parent.update(cx, |parent, _cx| {
+                let Some(slot) = parent.children.get_mut(location.index) else {
+                    return false;
+                };
+                *slot = retained;
+                true
+            }),
+            None => match self.roots.get_mut(location.index) {
+                Some(slot) => {
+                    *slot = retained;
+                    true
+                }
+                None => false,
+            },
+        };
+        if !changed {
+            return false;
+        }
+        self.rebuild_metadata_and_snapshot(cx);
+        true
+    }
+
     pub(super) fn markdown_text(&self, cx: &App) -> String {
         Self::markdown_text_for_roots(&self.roots, cx)
     }

@@ -24,12 +24,19 @@ fn selection_range_on_utf8_boundaries(
 }
 
 impl Editor {
-    pub(super) fn apply_virtual_cross_block_inline_targets(
+    /// Uses selected clean offsets rather than ephemeral entities, so scrolling cannot invalidate a formatting transaction.
+    pub(in crate::editor) fn apply_virtual_cross_block_inline_targets(
         &mut self,
         selection: NormalizedCrossBlockSelection,
         targets: &[CrossBlockInlineTarget],
         cx: &mut Context<Self>,
     ) -> bool {
+        if !self.document_surface_is_editable()
+            || self.active_selection_surface
+                != crate::editor::selection_surface::SelectionSurface::Main
+        {
+            return false;
+        }
         let mut changed = targets
             .iter()
             .filter(|target| {
@@ -58,14 +65,9 @@ impl Editor {
             replacement.replace_range(start..end, &target.replacement);
         }
 
-        let endpoint_after_edit = |endpoint: CrossBlockSelectionEndpoint| -> Option<usize> {
-            let target = targets
-                .iter()
-                .find(|target| target.entity.entity_id() == endpoint.entity_id)?;
-            let clean_offset = target
-                .entity
-                .read(cx)
-                .current_to_clean_offset(endpoint.offset);
+        let endpoint_after_edit = |target: &CrossBlockInlineTarget,
+                                   clean_offset: usize|
+         -> Option<usize> {
             let delta_before = changed
                 .iter()
                 .filter(|changed| {
@@ -87,30 +89,34 @@ impl Editor {
                         .visible_to_markdown_offset(clean_offset),
             )
         };
-        let Some(start_source) = endpoint_after_edit(selection.start) else {
+        let Some(start_target) = targets
+            .iter()
+            .min_by_key(|target| target.source_content_range.start)
+        else {
             return false;
         };
-        let Some(end_source) = endpoint_after_edit(selection.end) else {
+        let Some(end_target) = targets
+            .iter()
+            .max_by_key(|target| target.source_content_range.end)
+        else {
+            return false;
+        };
+        let Some(start_source) =
+            endpoint_after_edit(start_target, start_target.selected_clean_range.start)
+        else {
+            return false;
+        };
+        let Some(end_source) = endpoint_after_edit(end_target, end_target.selected_clean_range.end)
+        else {
             return false;
         };
         if !self.apply_virtual_cross_block_source_edit(union_start..union_end, &replacement, cx) {
             return false;
         }
-        let next_mappings = self.build_source_target_mappings(cx);
-        let Some(start) = self.endpoint_for_source_offset(start_source, &next_mappings, cx) else {
-            return false;
-        };
-        let Some(end) = self.endpoint_for_source_offset(end_source, &next_mappings, cx) else {
-            return false;
-        };
-        let (anchor, focus) = if selection.reversed {
-            (end, start)
-        } else {
-            (start, end)
-        };
-        self.cross_block_selection = Some(CrossBlockSelection { anchor, focus });
-        self.focus_block(focus.entity_id);
-        self.sync_cross_block_selection_visuals(cx);
+        // 新投影只挂载当前视口；保留完整源码锚点，不能让最近的可见实体缩短选区。
+        let restored =
+            UndoSelectionSnapshot::from_range(start_source..end_source, selection.reversed);
+        self.apply_cross_block_selection_snapshot_if_possible(&restored, cx);
         true
     }
 
@@ -121,6 +127,7 @@ impl Editor {
             .collect()
     }
 
+    /// Reuses the caller's region map so resolving both endpoints does not rescan mounted blocks.
     fn endpoint_source_offset(
         &self,
         endpoint: CrossBlockSelectionEndpoint,
@@ -128,6 +135,68 @@ impl Editor {
         cx: &App,
     ) -> Option<usize> {
         let mapping = mappings.get(&endpoint.entity_id)?;
+        self.endpoint_source_offset_from_mapping(endpoint, mapping, cx)
+    }
+
+    /// Resolves one resident or pinned virtual endpoint without scanning unrelated regions.
+    pub(in crate::editor) fn cross_block_source_offset_for_endpoint(
+        &self,
+        endpoint: CrossBlockSelectionEndpoint,
+        cx: &App,
+    ) -> Option<usize> {
+        let mapping = self.build_source_target_mapping_for_entity(endpoint.entity_id, cx)?;
+        self.endpoint_source_offset_from_mapping(endpoint, &mapping, cx)
+    }
+
+    /// Captures a byte anchor only when the virtual projection and shared document share a revision.
+    pub(in crate::editor) fn cross_block_source_anchor_for_endpoint(
+        &self,
+        surface: crate::editor::selection_surface::SelectionSurface,
+        endpoint: CrossBlockSelectionEndpoint,
+        cx: &App,
+    ) -> Option<CrossBlockSourceAnchor> {
+        if surface != crate::editor::selection_surface::SelectionSurface::Main {
+            return None;
+        }
+        let revision = self.source_document.snapshot().revision();
+        if self
+            .virtual_surface
+            .as_ref()
+            .is_some_and(|virtual_surface| virtual_surface.projection_revision() != revision)
+        {
+            return None;
+        }
+        Some(CrossBlockSourceAnchor {
+            byte_offset: self.cross_block_source_offset_for_endpoint(endpoint, cx)?,
+            revision,
+        })
+    }
+
+    /// Preserves a drag's source anchor while mapping its newly reached focus at the current revision.
+    pub(in crate::editor) fn cross_block_selection_from_endpoints(
+        &self,
+        surface: crate::editor::selection_surface::SelectionSurface,
+        anchor: CrossBlockSelectionEndpoint,
+        focus: CrossBlockSelectionEndpoint,
+        source_anchor: Option<CrossBlockSourceAnchor>,
+        cx: &App,
+    ) -> CrossBlockSelection {
+        CrossBlockSelection {
+            anchor,
+            focus,
+            source_anchor: source_anchor
+                .or_else(|| self.cross_block_source_anchor_for_endpoint(surface, anchor, cx)),
+            source_focus: self.cross_block_source_anchor_for_endpoint(surface, focus, cx),
+        }
+    }
+
+    /// Converts a current display endpoint through its clean text and source maps.
+    pub(in crate::editor) fn endpoint_source_offset_from_mapping(
+        &self,
+        endpoint: CrossBlockSelectionEndpoint,
+        mapping: &SourceTargetMapping,
+        cx: &App,
+    ) -> Option<usize> {
         let block = mapping.entity.read(cx);
         let visible_len = block.visible_len();
         if endpoint.offset == 0 {
@@ -171,11 +240,37 @@ impl Editor {
         })
     }
 
-    pub(super) fn cross_block_source_range_for_normalized(
+    /// Maps a normalized selection only while its anchors and virtual projection match the source revision.
+    pub(in crate::editor) fn cross_block_source_range_for_normalized(
         &self,
         selection: NormalizedCrossBlockSelection,
         cx: &App,
     ) -> Option<Range<usize>> {
+        if self
+            .virtual_surface
+            .as_ref()
+            .is_some_and(|virtual_surface| {
+                virtual_surface.projection_revision() != self.source_document.snapshot().revision()
+            })
+        {
+            return None;
+        }
+        if let Some((start, end)) = selection.source_start.zip(selection.source_end) {
+            let revision = self.source_document.snapshot().revision();
+            if start.revision != revision || end.revision != revision {
+                return None;
+            }
+            let source_len = self.source_document.len();
+            if start.byte_offset >= end.byte_offset || end.byte_offset > source_len {
+                return None;
+            }
+            return Some(start.byte_offset..end.byte_offset);
+        }
+
+        let (Some(start_index), Some(end_index)) = (selection.start_index, selection.end_index)
+        else {
+            return None;
+        };
         let (mapping_list, block_ranges) = self.build_source_target_mappings_with_block_ranges(cx);
         let mappings: HashMap<EntityId, SourceTargetMapping> = mapping_list
             .into_iter()
@@ -197,15 +292,15 @@ impl Editor {
                 Some(if at_end { range.end } else { range.start })
             };
 
-        let start = endpoint_offset(selection.start, selection.start_index, false)?;
-        let end = endpoint_offset(selection.end, selection.end_index, true)?;
+        let start = endpoint_offset(selection.start, start_index, false)?;
+        let end = endpoint_offset(selection.end, end_index, true)?;
         let (mut lo, mut hi) = (start.min(end), start.max(end));
 
         // Endpoint offsets can never point *after* a zero-visible-len (atomic)
         // block, so a table at the trailing boundary of the selection would be
         // left behind. Union in the full source range of every atomic block
         // whose visible index falls inside the selection so it is removed whole.
-        for index in selection.start_index..=selection.end_index {
+        for index in start_index..=end_index {
             let entity = visible.get(index)?.entity.clone();
             if entity.read(cx).visible_len() == 0 {
                 if let Some(range) = block_ranges.get(&entity.entity_id()) {
@@ -217,6 +312,7 @@ impl Editor {
         Some(lo..hi)
     }
 
+    /// 常驻跨块命令共用源码重建边界，保证一次修改后表格与主投影同步；调用方负责只读和撤销门禁。
     fn rebuild_after_cross_block_source_edit(&mut self, source: String, cx: &mut Context<Self>) {
         self.sync_source_document_from_projection(&source);
         match self.view_mode {
@@ -240,13 +336,18 @@ impl Editor {
     ///
     /// 这里不能复用 `mark_dirty`：它只序列化活动 Entity 所属的单一区域，
     /// 在跨区域删除后会把残留的 mounted Entity 再次写回源码。
-    fn apply_virtual_cross_block_source_edit(
+    pub(in crate::editor) fn apply_virtual_cross_block_source_edit(
         &mut self,
         source_range: Range<usize>,
         replacement: &str,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.virtual_surface.is_none() || self.view_mode != ViewMode::Rendered {
+        if !self.document_surface_is_editable()
+            || self.active_selection_surface
+                != crate::editor::selection_surface::SelectionSurface::Main
+            || self.virtual_surface.is_none()
+            || self.view_mode != ViewMode::Rendered
+        {
             return false;
         }
 
@@ -344,6 +445,7 @@ impl Editor {
         });
     }
 
+    /// Replaces the selected source range as one undoable edit after checking its writable surface.
     pub(in crate::editor) fn replace_cross_block_selection_with_text(
         &mut self,
         new_text: &str,
@@ -352,6 +454,12 @@ impl Editor {
         undo_kind: UndoCaptureKind,
         cx: &mut Context<Self>,
     ) -> bool {
+        if !self.document_surface_is_editable()
+            || self.active_selection_surface
+                != crate::editor::selection_surface::SelectionSurface::Main
+        {
+            return false;
+        }
         let Some(selection) = self.normalized_cross_block_selection(cx) else {
             return false;
         };
@@ -407,11 +515,39 @@ impl Editor {
         true
     }
 
+    /// Serializes the selection belonging to the last operated surface for copy and Markdown copy.
     pub(in crate::editor) fn cross_block_selected_markdown(&self, cx: &App) -> Option<String> {
-        let selection = self.normalized_cross_block_selection(cx)?;
-        let source = self.current_document_source(cx);
-        let mappings = self.source_mapping_by_entity_id(cx);
-        let visible = self.document.visible_blocks();
+        self.cross_block_selected_markdown_for_surface(self.active_selection_surface, cx)
+    }
+
+    /// Builds selected Markdown from projection-local blocks; only Main needs canonical source maps.
+    fn cross_block_selected_markdown_for_surface(
+        &self,
+        surface: crate::editor::selection_surface::SelectionSurface,
+        cx: &App,
+    ) -> Option<String> {
+        let selection = self.normalized_cross_block_selection_for_surface(surface, cx)?;
+        if surface == crate::editor::selection_surface::SelectionSurface::Main
+            && self.virtual_surface.is_some()
+        {
+            let range = self.cross_block_source_range_for_normalized(selection, cx)?;
+            return self.source_document.snapshot().text_for_range(range).ok();
+        }
+        let source = if surface == crate::editor::selection_surface::SelectionSurface::Main {
+            self.current_document_source(cx)
+        } else {
+            String::new()
+        };
+        let mappings = if surface == crate::editor::selection_surface::SelectionSurface::Main {
+            self.source_mapping_by_entity_id(cx)
+        } else {
+            HashMap::new()
+        };
+        let visible = self.selection_surface_entities(surface);
+        let (Some(start_index), Some(end_index)) = (selection.start_index, selection.end_index)
+        else {
+            return None;
+        };
 
         // Join blocks with the same spacing the document serializer uses
         // (collect_root_markdown_lines): a blank line between blocks, but tight
@@ -423,28 +559,27 @@ impl Editor {
         let mut pending_empty = 0usize;
         let mut previous_was_list_item = false;
 
-        for index in selection.start_index..=selection.end_index {
-            let entity = visible.get(index)?.entity.clone();
+        for index in start_index..=end_index {
+            let entity = visible.get(index)?.clone();
             let block = entity.read(cx);
             let len = block.visible_len();
-            let range = if selection.start_index == selection.end_index {
+            let range = if start_index == end_index {
                 selection.start.offset.min(len)..selection.end.offset.min(len)
-            } else if index == selection.start_index {
+            } else if index == start_index {
                 selection.start.offset.min(len)..len
-            } else if index == selection.end_index {
+            } else if index == end_index {
                 0..selection.end.offset.min(len)
             } else {
                 0..len
             };
-            let full_block = range.start == 0
-                && range.end == len
-                && (selection.start_index != selection.end_index || len > 0);
+            let full_block =
+                range.start == 0 && range.end == len && (start_index != end_index || len > 0);
             // Cut deletes any atomic block covered by a multi-block selection
             // (see cross_block_source_range_for_normalized), so the clipboard
             // must serialize those blocks too, including boundary ones, not
             // just interior. Otherwise cut would drop a table from the clipboard
             // that it nonetheless removed from the document.
-            let include_atomic = len == 0 && selection.start_index != selection.end_index;
+            let include_atomic = len == 0 && start_index != end_index;
             if range.is_empty() && !include_atomic {
                 continue;
             }
@@ -550,7 +685,14 @@ impl Editor {
             .unwrap_or_default()
     }
 
+    /// Restricts cross-block deletion to the writable Main selection before touching source or history.
     pub(super) fn delete_cross_block_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.document_surface_is_editable()
+            || self.active_selection_surface
+                != crate::editor::selection_surface::SelectionSurface::Main
+        {
+            return false;
+        }
         let Some(selection) = self.normalized_cross_block_selection(cx) else {
             return false;
         };
@@ -606,8 +748,8 @@ impl Editor {
         }
 
         // Fall back to a single block with a non-collapsed selection range.
-        for visible in self.document.visible_blocks() {
-            let block = visible.entity.read(cx);
+        for entity in self.selection_surface_entities(self.active_selection_surface) {
+            let block = entity.read(cx);
             if block.selected_range.is_empty() {
                 continue;
             }

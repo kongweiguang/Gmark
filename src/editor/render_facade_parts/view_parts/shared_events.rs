@@ -62,6 +62,20 @@ impl Editor {
         polled.merge(immediate);
         let resynchronized = polled.snapshot.is_some();
         let events = polled.events;
+        let foreign_revision = events.iter().any(|event| {
+            matches!(event,
+            gmark_document_runtime::DocumentEvent::RevisionChanged { view_id, .. }
+                if *view_id != self.source_document.view_id())
+        });
+        let mut ime_sessions =
+            if (resynchronized || foreign_revision) && self.has_active_ime_composition(cx) {
+                self.capture_ime_for_shared_rebase(cx)
+            } else {
+                Vec::new()
+            };
+        if resynchronized {
+            Self::invalidate_shared_ime_sessions(&mut ime_sessions);
+        }
         if let Some(snapshot) = polled.snapshot {
             self.document_dirty = snapshot.dirty;
             self.pending_window_edited = snapshot.dirty;
@@ -73,6 +87,7 @@ impl Editor {
                     view_id,
                     revision,
                     dirty,
+                    mutation,
                     ..
                 } => {
                     self.document_dirty = dirty;
@@ -86,6 +101,9 @@ impl Editor {
                     // rebuild on the next frame, which is the shared-document
                     // synchronization contract.
                     let originated_here = view_id == self.source_document.view_id();
+                    if !originated_here {
+                        Self::map_ime_shared_mutation(&mut ime_sessions, &mutation);
+                    }
                     if !originated_here
                         && self
                             .projection_cache
@@ -119,16 +137,31 @@ impl Editor {
             }
         }
         if !projection_revision_changed {
+            self.restore_ime_after_shared_rebase(ime_sessions, cx);
             return;
         }
 
         match self.view_mode {
-            ViewMode::Source => {
-                self.document = self.source_view_document(cx);
+            ViewMode::Source | ViewMode::Split => {
+                if let Some(block) = self.document.first_root().cloned() {
+                    let source = self.source_document.text();
+                    block.update(cx, |block, cx| {
+                        block
+                            .record
+                            .set_title(crate::components::InlineTextTree::plain(source));
+                        block.sync_render_cache();
+                        cx.notify();
+                    });
+                    self.document.rebuild_metadata_and_snapshot(cx);
+                } else {
+                    self.document = self.source_view_document(cx);
+                }
                 self.virtual_surface = None;
                 self.table_cells.clear();
+                if self.view_mode == ViewMode::Split {
+                    self.rebuild_split_preview_projection(cx);
+                }
             }
-            ViewMode::Split => self.rebuild_split_preview_projection(cx),
             ViewMode::Rendered | ViewMode::Preview => {
                 self.rebuild_primary_projection_from_source_reusing(cx);
             }
@@ -138,6 +171,7 @@ impl Editor {
             self.apply_selection_snapshot_in_current_mode(&snapshot, cx);
             self.last_selection_snapshot = snapshot;
         }
+        self.restore_ime_after_shared_rebase(ime_sessions, cx);
         self.pending_window_title_refresh = true;
         self.refresh_stable_document_snapshot(cx);
     }

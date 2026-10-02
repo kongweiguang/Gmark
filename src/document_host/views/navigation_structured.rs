@@ -255,14 +255,28 @@ impl DocumentHost {
         Some(start..end)
     }
 
+    /// Routes row commands through the IME queue before handing navigation and editing to the Host.
     pub(super) fn on_line_edit_host_action(
         &mut self,
         action: BlockHostAction,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !matches!(
+            action,
+            BlockHostAction::Submit(_) | BlockHostAction::DismissTransientUi
+        ) && self.defer_source_action_for_ime(
+            super::source_ime::DeferredSourceAction::Block(action.clone()),
+            window,
+            cx,
+        ) {
+            return;
+        }
         match action {
             BlockHostAction::Submit(_) => {}
+            BlockHostAction::LineOperation(operation) => {
+                self.on_source_row_line_operation(operation, window, cx);
+            }
             BlockHostAction::Save => self.on_save_document(&SaveDocument, window, cx),
             BlockHostAction::Undo => self.on_undo(&Undo, window, cx),
             BlockHostAction::Redo => self.on_redo(&Redo, window, cx),

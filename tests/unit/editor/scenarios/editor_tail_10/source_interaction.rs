@@ -182,6 +182,7 @@ async fn large_source_pointer_selection_is_character_precise_cross_line_and_reve
     });
 }
 
+/// Keeps selection expansion tied to the newly mounted rows while the edge timer advances.
 #[gpui::test]
 async fn large_source_drag_autoscroll_extends_selection_beyond_mounted_viewport(
     cx: &mut TestAppContext,
@@ -241,6 +242,61 @@ async fn large_source_drag_autoscroll_extends_selection_beyond_mounted_viewport(
     assert!(selection.range().end > 200, "selection={selection:?}");
 }
 
+/// A drag at either file edge must reach the edge once and stop refreshing; its anchor
+/// stays intact so reversing the drag still selects from the original mouse-down position.
+#[gpui::test]
+async fn large_source_drag_autoscroll_stops_at_document_edges(cx: &mut TestAppContext) {
+    init_editor_test_app(cx);
+    let temp = tempfile::tempdir().expect("source edge drag tempdir");
+    let path = temp.path().join("drag-edges.txt");
+    let text = "first\r\nmiddle\r\nlast";
+    fs::write(&path, text).expect("source edge drag fixture");
+    let probe = gmark_paged_document::probe_file(
+        &path,
+        gmark_paged_document::ProbeOptions {
+            max_resident_bytes: 1,
+            ..gmark_paged_document::ProbeOptions::default()
+        },
+    )
+    .expect("source edge drag probe");
+    let source = gmark_paged_document::FileSource::open(&path).expect("source edge drag source");
+    let (editor, visual) = cx.add_window_view(move |_window, cx| {
+        Editor::from_source_backed_file(cx, path, probe, source)
+    });
+    visual.simulate_resize(size(px(720.0), px(520.0)));
+    visual.run_until_parked();
+    redraw(visual);
+    let host = editor
+        .read_with(visual, |editor, _cx| editor.document_host.clone())
+        .expect("source edge drag Host");
+    host.update(visual, |host, _cx| {
+        host.select_source_range_for_test(4..5, false);
+    });
+
+    for (direction, expected_head) in [(-1, 0), (1, text.len() as u64)] {
+        host.update(visual, |host, cx| {
+            host.start_drag_autoscroll_for_test(direction, cx);
+            assert!(
+                !host.drag_autoscroll_tick_for_test(cx),
+                "a drag already at the file edge must stop its timer"
+            );
+            let selection = host.source_selection_for_test().expect("edge selection");
+            assert_eq!(selection.anchor.byte_offset, 4, "preserve the drag anchor");
+            assert_eq!(selection.head.byte_offset, expected_head);
+            assert!(
+                !host.drag_autoscroll_tick_for_test(cx),
+                "a stopped timer must stay idle until the pointer changes direction"
+            );
+            assert_eq!(host.source_selection_for_test(), Some(selection));
+            assert_eq!(host.scroll_top_line_for_test(), 0);
+            assert_eq!(host.source_text_for_test(), text);
+        });
+        redraw(visual);
+    }
+}
+
+/// Verifies the first Ctrl+A waits for Source IME completion and selects committed document bytes.
+#[cfg(target_os = "windows")]
 #[gpui::test]
 async fn large_source_ime_composition_commits_one_piece_tree_undo_transaction(
     cx: &mut TestAppContext,
@@ -290,6 +346,17 @@ async fn large_source_ime_composition_commits_one_piece_tree_undo_transaction(
         });
     });
     visual.run_until_parked();
+    block.read_with(visual, |block, _cx| {
+        assert_eq!(block.display_text(), "alpha");
+        assert!(block.has_ime_composition());
+        assert_eq!(
+            block
+                .ime_visible_text(&crate::components::BlockImeCompositionOwner::BlockText)
+                .as_deref(),
+            Some("alpha拼音🙂"),
+            "unconfirmed candidate text should remain a virtual Source surface"
+        );
+    });
     assert_eq!(
         large_view.read_with(visual, |view, _cx| view.recovered_text_for_test()),
         Some(b"alpha\n".to_vec()),
@@ -308,10 +375,43 @@ async fn large_source_ime_composition_commits_one_piece_tree_undo_transaction(
         });
     });
     visual.run_until_parked();
+    block.read_with(visual, |block, _cx| {
+        assert_eq!(block.display_text(), "alpha");
+        assert!(block.has_ime_composition());
+        assert_eq!(
+            block
+                .ime_visible_text(&crate::components::BlockImeCompositionOwner::BlockText)
+                .as_deref(),
+            Some("alpha中文🙂"),
+            "confirmed result remains staged until the native terminal event"
+        );
+    });
+    assert_eq!(
+        large_view.read_with(visual, |view, _cx| view.recovered_text_for_test()),
+        Some(b"alpha\n".to_vec()),
+        "PieceTree must not receive IME text before composition end"
+    );
+    visual.simulate_keystrokes("ctrl-a");
+
+    visual.update(|window, cx| {
+        block.update(cx, |block, block_cx| {
+            <crate::components::Block as EntityInputHandler>::composition_ended(
+                block,
+                gpui::CompositionEnd::Committed,
+                window,
+                block_cx,
+            );
+        });
+    });
+    visual.run_until_parked();
     assert_eq!(
         large_view.read_with(visual, |view, _cx| view.recovered_text_for_test()),
         Some("alpha中文🙂\n".as_bytes().to_vec())
     );
+    let selection = large_view
+        .read_with(visual, |view, _cx| view.source_selection_for_test())
+        .expect("whole-document selection after IME terminal");
+    assert_eq!(selection.range(), 0.."alpha中文🙂\n".len() as u64);
 
     visual.update(|window, cx| {
         large_view.update(cx, |view, cx| view.undo_for_test(window, cx));
@@ -397,10 +497,9 @@ async fn large_source_cross_line_paste_is_one_reversible_source_transaction(
     );
 }
 
+/// Verifies the first Ctrl+A selects the entire virtual Source document.
 #[gpui::test]
-async fn large_source_select_all_upgrades_from_active_line_to_lazy_document_range(
-    cx: &mut TestAppContext,
-) {
+async fn large_source_first_ctrl_a_selects_lazy_document_range(cx: &mut TestAppContext) {
     init_editor_test_app(cx);
     let temp = tempfile::tempdir().expect("large select-all tempdir");
     let path = temp.path().join("select-all-source.txt");
@@ -427,12 +526,6 @@ async fn large_source_select_all_upgrades_from_active_line_to_lazy_document_rang
         large_view.update(cx, |view, cx| view.begin_line_edit_for_test(0, window, cx));
     });
     redraw(visual);
-
-    visual.simulate_keystrokes("ctrl-a");
-    let line_selection = large_view
-        .read_with(visual, |view, _cx| view.source_selection_for_test())
-        .expect("active-line selection");
-    assert_eq!(line_selection.range(), 0..5);
 
     visual.simulate_keystrokes("ctrl-a");
     let document_selection = large_view

@@ -244,6 +244,7 @@ impl DocumentHost {
         });
     }
 
+    /// Retains the native IME owner while invalidating row entities after the fold projection changes.
     pub(crate) fn toggle_fold_at_source_line(&mut self, line: usize, cx: &mut Context<Self>) {
         let Some(id) = self
             .fold_projection
@@ -259,12 +260,13 @@ impl DocumentHost {
                 self.pending_source_collapsed_folds.remove(&id);
             }
             self.active_edit = None;
-            self.source_row_blocks.clear();
+            self.clear_source_row_blocks_except_ime_owner();
             cx.emit(DocumentHostEvent::StateChanged);
             cx.notify();
         }
     }
 
+    /// Preserves the composing Block across fold invalidation until its native terminal event arrives.
     fn set_fold_at_source_line(&mut self, line: usize, collapsed: bool, cx: &mut Context<Self>) {
         let region = self.fold_projection.region_starting(line).or_else(|| {
             self.fold_projection
@@ -283,7 +285,7 @@ impl DocumentHost {
                 self.pending_source_collapsed_folds.remove(&id);
             }
             self.active_edit = None;
-            self.source_row_blocks.clear();
+            self.clear_source_row_blocks_except_ime_owner();
             cx.emit(DocumentHostEvent::StateChanged);
             cx.notify();
         }
@@ -327,6 +329,7 @@ impl DocumentHost {
         self.expand_all_source_folds(cx);
     }
 
+    /// Collapses the projection without unmounting the row that still owns native composition.
     pub(super) fn collapse_all_source_folds(&mut self, cx: &mut Context<Self>) {
         self.active_edit = None;
         self.fold_projection.collapse_all();
@@ -336,22 +339,24 @@ impl DocumentHost {
             .iter()
             .map(|region| region.id)
             .collect();
-        self.source_row_blocks.clear();
+        self.clear_source_row_blocks_except_ime_owner();
         cx.emit(DocumentHostEvent::StateChanged);
         cx.notify();
     }
 
+    /// Rebuilds expanded row surfaces while retaining any Block awaiting its composition terminal event.
     pub(super) fn expand_all_source_folds(&mut self, cx: &mut Context<Self>) {
         self.fold_projection.expand_all();
         self.pending_source_collapsed_folds.clear();
-        self.source_row_blocks.clear();
+        self.clear_source_row_blocks_except_ime_owner();
         cx.emit(DocumentHostEvent::StateChanged);
         cx.notify();
     }
 
+    /// Unfolds a target line while keeping the native composition owner addressable through the rerender.
     pub(super) fn ensure_source_line_visible(&mut self, line: usize) {
         if self.fold_projection.ensure_line_visible(line) {
-            self.source_row_blocks.clear();
+            self.clear_source_row_blocks_except_ime_owner();
         }
     }
 

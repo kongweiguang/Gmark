@@ -5,8 +5,10 @@
 use super::*;
 
 impl Render for Editor {
+    /// 先处理平台终态与共享事件，并将编辑动作留在 Editor IME 门控之后执行。
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_shared_document_events(cx);
+        self.sync_pending_ime_operations(window, cx);
         self.ensure_markdown_view_state();
         if self.pane_canvas {
             // Pane canvases skip the window chrome below, but they still own
@@ -55,9 +57,11 @@ impl Render for Editor {
             window.defer(cx, move |window, _cx| focus_handle.focus(window));
         }
         self.apply_pending_scroll_into_view(window, cx);
-        self.last_selection_snapshot = self.capture_source_selection_snapshot(cx);
-        self.source_document
-            .sync_source_selection(self.last_selection_snapshot.source_selection());
+        if !self.has_active_ime_composition(cx) {
+            self.last_selection_snapshot = self.capture_source_selection_snapshot(cx);
+            self.source_document
+                .sync_source_selection(self.last_selection_snapshot.source_selection());
+        }
         self.refresh_find_if_stale(cx);
         self.sync_workspace_session_view_state(cx);
         self.sync_pending_save(window, cx);
@@ -183,6 +187,20 @@ impl Render for Editor {
             .on_action(cx.listener(Self::on_toggle_typewriter_mode_action))
             .on_action(cx.listener(Self::on_page_up))
             .on_action(cx.listener(Self::on_page_down))
+            .on_action(cx.listener(Self::on_select_page_up))
+            .on_action(cx.listener(Self::on_select_page_down))
+            .on_action(cx.listener(Self::on_move_to_document_start))
+            .on_action(cx.listener(Self::on_move_to_document_end))
+            .on_action(cx.listener(Self::on_select_to_document_start))
+            .on_action(cx.listener(Self::on_select_to_document_end))
+            .on_action(cx.listener(Self::on_select_up))
+            .on_action(cx.listener(Self::on_select_down))
+            .capture_action(cx.listener(Self::on_duplicate_line))
+            .capture_action(cx.listener(Self::on_delete_line))
+            .capture_action(cx.listener(Self::on_move_line_up))
+            .capture_action(cx.listener(Self::on_move_line_down))
+            .capture_action(cx.listener(Self::on_indent_block))
+            .capture_action(cx.listener(Self::on_outdent_block))
             .on_action(cx.listener(Self::on_jump_to_top))
             .on_action(cx.listener(Self::on_jump_to_bottom))
             .on_action(cx.listener(Self::on_dismiss_transient_ui))

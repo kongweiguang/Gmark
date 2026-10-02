@@ -22,8 +22,8 @@ impl Editor {
         document
     }
 
-    /// 返回当前 SourceDocument revision 的共享纯投影；旧缓存只作为增量基线。
-    fn prepare_current_projection(&mut self) -> Arc<PreparedSplitProjection> {
+    /// 切换模式和显式导航需要当前 revision 的完整语义；共用增量投影避免读取尚未发布的后台缓存。
+    pub(in crate::editor) fn prepare_current_projection(&mut self) -> Arc<PreparedSplitProjection> {
         self.projection_cache_task = None;
         self.projection_cache_scheduled_revision = None;
         let snapshot = self.source_document.snapshot();

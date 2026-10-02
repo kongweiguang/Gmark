@@ -584,6 +584,26 @@ impl Block {
         mark_inserted_text: bool,
         cx: &mut Context<Self>,
     ) {
+        self.replace_text_in_visible_range_with_direction(
+            visible_range,
+            new_text,
+            selected_range_relative,
+            mark_inserted_text,
+            None,
+            cx,
+        );
+    }
+
+    /// Applies a replacement with an optional anchor direction for operations that move whole raw rows.
+    pub(crate) fn replace_text_in_visible_range_with_direction(
+        &mut self,
+        visible_range: Range<usize>,
+        new_text: &str,
+        selected_range_relative: Option<Range<usize>>,
+        mark_inserted_text: bool,
+        selected_range_reversed: Option<bool>,
+        cx: &mut Context<Self>,
+    ) {
         if self.kind().is_separator() && !self.uses_raw_text_editing() {
             return;
         }
@@ -745,9 +765,9 @@ impl Block {
             cursor,
             marked_range,
             selected_range.clone(),
-            selected_range
-                .as_ref()
-                .and_then(|range| (!range.is_empty()).then_some(false)),
+            selected_range.as_ref().and_then(|range| {
+                (!range.is_empty()).then_some(selected_range_reversed.unwrap_or(false))
+            }),
             caret_may_have_closed_span,
             caret_before_existing_closer,
             cx,

@@ -8,6 +8,7 @@
 //! their UTF-16 contract while the source field remains a normal text input.
 
 use super::*;
+use crate::components::block::BlockImeCompositionOwner;
 use crate::components::{Copy, Cut, End, Home, Paste, SelectAll};
 use crate::theme::ThemeManager;
 use crate::ui::actions::ExitCodeBlock;
@@ -75,6 +76,7 @@ impl Element for MathSourceInputElement {
         (window.request_layout(style, [], cx), ())
     }
 
+    /// Shapes virtual MathSource preedit and derives caret geometry in the same UTF-8 space.
     fn prepaint(
         &mut self,
         _id: Option<&GlobalElementId>,
@@ -87,12 +89,15 @@ impl Element for MathSourceInputElement {
         let theme = cx.global::<ThemeManager>().current_arc();
         let colors = &theme.colors;
         let input = self.input.read(cx);
-        let text = input.math_source_text();
+        let owner = BlockImeCompositionOwner::MathSource;
+        let text = input
+            .ime_visible_text(&owner)
+            .unwrap_or_else(|| input.math_source_text());
         let display_text: SharedString = compact_math_source_display_text(&text).into();
         debug_assert_eq!(display_text.len(), text.len());
         let focused = input.math_source_focus_handle.is_focused(window);
         let style = window.text_style();
-        let run = TextRun {
+        let base_run = TextRun {
             len: display_text.len(),
             font: style.font(),
             color: colors.code_language_input_text,
@@ -100,17 +105,48 @@ impl Element for MathSourceInputElement {
             underline: None,
             strikethrough: None,
         };
+        let marked_range = input.ime_marked_range(&owner);
+        let runs = if let Some(range) = marked_range.as_ref().filter(|_| !display_text.is_empty()) {
+            vec![
+                TextRun {
+                    len: range.start,
+                    ..base_run.clone()
+                },
+                TextRun {
+                    len: range.end.saturating_sub(range.start),
+                    underline: Some(UnderlineStyle {
+                        color: Some(colors.code_language_input_text),
+                        thickness: px(theme.dimensions.underline_thickness),
+                        wavy: false,
+                    }),
+                    ..base_run.clone()
+                },
+                TextRun {
+                    len: display_text.len().saturating_sub(range.end),
+                    ..base_run
+                },
+            ]
+            .into_iter()
+            .filter(|run| run.len > 0)
+            .collect::<Vec<_>>()
+        } else {
+            vec![base_run]
+        };
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line = window
             .text_system()
-            .shape_line(display_text, font_size, &[run], None);
-        let selected = input
-            .math_source_selected_range
-            .clone()
-            .start
-            .min(text.len())
-            ..input.math_source_selected_range.end.min(text.len());
-        let focus_index = if input.math_source_selection_reversed {
+            .shape_line(display_text, font_size, &runs, None);
+        let ime_selection = input.ime_render_selection(&owner);
+        let source_selection = input.math_source_selection();
+        let selected = ime_selection
+            .as_ref()
+            .map(|(range, _)| range.clone())
+            .unwrap_or(source_selection.0);
+        let reversed = ime_selection
+            .as_ref()
+            .map(|(_, reversed)| *reversed)
+            .unwrap_or(source_selection.1);
+        let focus_index = if reversed {
             selected.start
         } else {
             selected.end
@@ -140,8 +176,7 @@ impl Element for MathSourceInputElement {
         let cursor = (focused && selected.is_empty()).then(|| {
             let mut cursor_color = colors.cursor;
             cursor_color.a *= input.cursor_opacity();
-            let left = line_origin.x
-                + line.x_for_index(input.math_source_selected_range.end.min(text.len()));
+            let left = line_origin.x + line.x_for_index(focus_index.min(text.len()));
             fill(
                 Bounds::from_corners(
                     point(left, bounds.top()),
@@ -160,6 +195,7 @@ impl Element for MathSourceInputElement {
         }
     }
 
+    /// Paints the compact source line and drains only this block's native composition trace.
     fn paint(
         &mut self,
         _id: Option<&GlobalElementId>,
@@ -174,7 +210,13 @@ impl Element for MathSourceInputElement {
             window.set_cursor_style(CursorStyle::IBeam, &prepaint.hitbox);
         }
 
-        let focus_handle = self.input.read(cx).math_source_focus_handle.clone();
+        let (focus_handle, input_snapshot) = {
+            let input = self.input.read(cx);
+            (
+                input.math_source_focus_handle.clone(),
+                input.input_paint_snapshot(crate::perf::InputPaintSurface::MathSource),
+            )
+        };
         if focus_handle.is_focused(window) {
             window.handle_input(
                 &focus_handle,
@@ -190,6 +232,12 @@ impl Element for MathSourceInputElement {
         if let Some(line) = layout.as_ref() {
             line.paint(prepaint.line_origin, bounds.size.height, window, cx)
                 .ok();
+        }
+        for trace in crate::perf::take_input_to_gpui_paint(self.input.entity_id(), input_snapshot)
+            .into_iter()
+            .flatten()
+        {
+            trace.record_gpui_text_paint();
         }
         if focus_handle.is_focused(window)
             && let Some(cursor) = prepaint.cursor.take()
@@ -207,6 +255,8 @@ impl Element for MathSourceInputElement {
 }
 
 impl Block {
+    /// Lets bound history actions reach the Editor first so nested source focus uses the owning
+    /// document transaction without a duplicate Block-to-host dispatch from the raw key event.
     pub(crate) fn on_math_source_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -231,24 +281,6 @@ impl Block {
             self.focus_handle.focus(window);
             self.on_exit_code_block(&ExitCodeBlock, window, cx);
             cx.stop_propagation();
-            return;
-        }
-        if (modifiers.platform || modifiers.control) && !modifiers.alt {
-            match key {
-                "z" if modifiers.shift => {
-                    self.on_host_redo(&crate::components::Redo, window, cx);
-                    cx.stop_propagation();
-                }
-                "z" => {
-                    self.on_host_undo(&crate::components::Undo, window, cx);
-                    cx.stop_propagation();
-                }
-                "y" => {
-                    self.on_host_redo(&crate::components::Redo, window, cx);
-                    cx.stop_propagation();
-                }
-                _ => {}
-            }
         }
     }
 

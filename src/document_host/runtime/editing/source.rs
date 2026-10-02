@@ -49,15 +49,40 @@ impl DocumentHost {
         let _ = document.set_source_selection(selection);
     }
 
+    /// Captures Ctrl+A on Source text before a compact row can consume the first press locally.
+    pub(super) fn on_select_all_capture(
+        &mut self,
+        action: &SelectAll,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(
+            self.view_mode,
+            DocumentHostViewMode::Source | DocumentHostViewMode::Split
+        ) || !self.source_text_surface_has_focus(window, cx)
+        {
+            cx.propagate();
+            return;
+        }
+        self.on_select_all(action, window, cx);
+        cx.stop_propagation();
+    }
+
+    /// Waits for native Source composition before replacing the active row selection with the whole document.
     pub(super) fn on_select_all(
         &mut self,
         _: &SelectAll,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.active_edit.is_some() {
+        if self.defer_source_action_for_ime(
+            super::source_ime::DeferredSourceAction::SelectAll,
+            window,
+            cx,
+        ) {
             return;
         }
+        self.active_edit = None;
         let line_count = self.line_count();
         if line_count == 0 {
             return;
@@ -67,7 +92,15 @@ impl DocumentHost {
         cx.notify();
     }
 
-    pub(super) fn on_copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+    /// Copies the final Source selection after native composition settles, while retaining structured-view copy behavior.
+    pub(super) fn on_copy(&mut self, _: &Copy, window: &mut Window, cx: &mut Context<Self>) {
+        if self.defer_source_action_for_ime(
+            super::source_ime::DeferredSourceAction::Copy,
+            window,
+            cx,
+        ) {
+            return;
+        }
         if self.view_mode != DocumentHostViewMode::Source {
             if self.is_json_document()
                 && let Some(range) = self
@@ -265,12 +298,18 @@ impl DocumentHost {
         self.replace_source_range(range, "", cx);
     }
 
+    /// Rejects shared Source writes during native composition before issuing one replacement transaction.
     fn replace_source_range(
         &mut self,
         range: Range<u64>,
         replacement: &str,
         cx: &mut Context<Self>,
     ) {
+        if self.has_active_ime_composition(cx) {
+            self.error = Some("请先确认或取消输入法候选，再执行文档修改。".into());
+            cx.notify();
+            return;
+        }
         let Some(document) = self.document.as_ref() else {
             return;
         };
@@ -356,12 +395,34 @@ impl DocumentHost {
         true
     }
 
-    /// Finish a committed source edit and enqueue its resulting recovery
-    /// transaction after all Controller reads have left the edit callback.
+    /// Finishes a committed source edit with a collapsed caret for ordinary replace commands.
     pub(super) fn install_source_replacement(
         &mut self,
         range: Range<u64>,
         replacement: &str,
+        preserve_view: bool,
+        preserve_structure: bool,
+        preserve_folds: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let caret = range.start.saturating_add(replacement.len() as u64);
+        self.install_source_replacement_with_selection(
+            range,
+            replacement,
+            Some(SourceSelection::collapsed(caret, SourceAffinity::After)),
+            preserve_view,
+            preserve_structure,
+            preserve_folds,
+            cx,
+        );
+    }
+
+    /// Completes a committed source edit and records its explicit selection so undo restores the user's range.
+    pub(super) fn install_source_replacement_with_selection(
+        &mut self,
+        range: Range<u64>,
+        replacement: &str,
+        selection: Option<SourceSelection>,
         preserve_view: bool,
         preserve_structure: bool,
         preserve_folds: bool,
@@ -383,8 +444,10 @@ impl DocumentHost {
                 replacement,
             );
         }
-        let caret = range.start.saturating_add(replacement.len() as u64);
-        let selection = Some(SourceSelection::collapsed(caret, SourceAffinity::After));
+        let selection_offset = selection.map_or_else(
+            || range.start.saturating_add(replacement.len() as u64),
+            |selection| selection.head.byte_offset,
+        );
         if let Some(document) = self.document.clone() {
             // Read the base revision before entering the recovery queue.  The
             // queue owns all journal I/O, so a recovery failure cannot re-lock
@@ -404,7 +467,7 @@ impl DocumentHost {
             return;
         };
         let line = document
-            .line_for_offset(caret.min(document.len()))
+            .line_for_offset(selection_offset.min(document.len()))
             .and_then(|line| usize::try_from(line).ok())
             .unwrap_or_default();
         self.active_edit = None;
@@ -429,6 +492,9 @@ impl DocumentHost {
         self.derived_projection_stale = self.derived_projection_snapshot.is_some();
         self.schedule_json_graph_projection(cx);
         self.schedule_delimited_snapshot_rebuild(cx);
+        if let Some(selection) = selection {
+            self.set_source_selection(selection, cx);
+        }
         if preserve_structure {
             // 单格编辑期间旧索引与覆盖值仍可用，后台追平不应显示成整表刷新状态。
             self.clear_structure_error();
@@ -437,7 +503,15 @@ impl DocumentHost {
         cx.notify();
     }
 
-    pub(super) fn on_paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
+    /// Defers clipboard replacement until the Source composition has either committed or cancelled.
+    pub(super) fn on_paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        if self.defer_source_action_for_ime(
+            super::source_ime::DeferredSourceAction::Paste,
+            window,
+            cx,
+        ) {
+            return;
+        }
         // 聚焦行由 Block 的 EntityInputHandler 处理；宿主只处理跨行或卸载选区。
         if self.active_edit.is_some() || self.saving || self.reloading {
             return;
@@ -465,7 +539,15 @@ impl DocumentHost {
         self.replace_source_range(range, &text, cx);
     }
 
-    pub(super) fn on_cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
+    /// Defers cut until native composition settles, then lets the asynchronous clipboard read guard the eventual write.
+    pub(super) fn on_cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
+        if self.defer_source_action_for_ime(
+            super::source_ime::DeferredSourceAction::Cut,
+            window,
+            cx,
+        ) {
+            return;
+        }
         if self.saving || self.reloading || self.active_edit.is_some() {
             return;
         }
@@ -490,16 +572,32 @@ impl DocumentHost {
         self.start_clipboard_read(document, range, true, cx);
     }
 
-    pub(super) fn on_delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
+    /// Defers range deletion until the Source composition has delivered its terminal event.
+    pub(super) fn on_delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
+        if self.defer_source_action_for_ime(
+            super::source_ime::DeferredSourceAction::Delete,
+            window,
+            cx,
+        ) {
+            return;
+        }
         self.delete_selected_source(cx);
     }
 
+    /// Defers backward range deletion until the Source composition has delivered its terminal event.
     pub(super) fn on_delete_back(
         &mut self,
         _: &DeleteBack,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.defer_source_action_for_ime(
+            super::source_ime::DeferredSourceAction::DeleteBack,
+            window,
+            cx,
+        ) {
+            return;
+        }
         self.delete_selected_source(cx);
     }
 }

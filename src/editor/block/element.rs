@@ -7,7 +7,10 @@ use std::sync::Arc;
 
 use gpui::*;
 
-use super::{Block, InlineFootnoteHit, InlineLinkHit, SourceLayoutCacheKey, code_highlight_color};
+use super::{
+    Block, BlockImeCompositionOwner, InlineFootnoteHit, InlineLinkHit, SourceLayoutCacheKey,
+    code_highlight_color,
+};
 use crate::components::HtmlCssColor;
 use crate::theme::{ThemeColors, ThemeManager};
 
@@ -55,6 +58,7 @@ fn source_line_number_tops(lines: &[WrappedLine], line_height: Pixels) -> Vec<Pi
     tops
 }
 
+/// Builds inline styling with candidate ranges resolved in the same virtual text coordinates as layout.
 fn build_text_runs(
     input: &Block,
     display_text: &SharedString,
@@ -65,13 +69,24 @@ fn build_text_runs(
     spelling_color: Hsla,
     show_inline_code_backgrounds: bool,
 ) -> Vec<TextRun> {
-    let spans = input.inline_spans();
+    let spans = input
+        .inline_spans()
+        .iter()
+        .map(|span| {
+            (
+                input.ime_visible_range(&BlockImeCompositionOwner::BlockText, span.range.clone()),
+                span,
+            )
+        })
+        .collect::<Vec<_>>();
+    let ime_marked_range = input.ime_marked_range(&BlockImeCompositionOwner::BlockText);
+    let marked_range = ime_marked_range.as_ref().or(input.marked_range.as_ref());
     let mut boundaries = vec![0, display_text.len()];
-    for span in spans {
-        boundaries.push(span.range.start);
-        boundaries.push(span.range.end);
+    for (range, _) in &spans {
+        boundaries.push(range.start);
+        boundaries.push(range.end);
     }
-    if let Some(marked_range) = input.marked_range.as_ref() {
+    if let Some(marked_range) = marked_range {
         boundaries.push(marked_range.start);
         boundaries.push(marked_range.end);
     }
@@ -88,7 +103,6 @@ fn build_text_runs(
     boundaries.sort_unstable();
     boundaries.dedup();
 
-    let marked_range = input.marked_range.as_ref();
     let mut runs = Vec::new();
     let mut span_idx = 0usize;
     for boundary_pair in boundaries.windows(2) {
@@ -100,12 +114,13 @@ fn build_text_runs(
 
         // Spans are stored in ascending order and boundaries are sorted, so
         // we can advance a single index instead of re-scanning per boundary.
-        while span_idx < spans.len() && spans[span_idx].range.end <= start {
+        while span_idx < spans.len() && spans[span_idx].0.end <= start {
             span_idx += 1;
         }
         let active_span = spans
             .get(span_idx)
-            .filter(|span| span.range.start <= start && start < span.range.end);
+            .filter(|(range, _)| range.start <= start && start < range.end)
+            .map(|(_, span)| *span);
 
         let inline_style = active_span.map(|s| s.style).unwrap_or_default();
         let html_style = active_span.and_then(|s| s.html_style);
@@ -201,6 +216,7 @@ fn html_css_color_to_hsla(color: HtmlCssColor, current_color: Hsla) -> Hsla {
     }
 }
 
+/// Builds syntax runs while applying the staged preedit underline in virtual source coordinates.
 fn build_code_text_runs(
     input: &Block,
     display_text: &SharedString,
@@ -210,14 +226,30 @@ fn build_code_text_runs(
 ) -> Vec<TextRun> {
     let highlight_spans = input
         .code_highlight_result()
-        .map(|r| r.spans.as_slice())
-        .unwrap_or(&[]);
+        .map(|result| {
+            result
+                .spans
+                .iter()
+                .map(|span| {
+                    (
+                        input.ime_visible_range(
+                            &BlockImeCompositionOwner::BlockText,
+                            span.range.clone(),
+                        ),
+                        span,
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let mut boundaries = vec![0, display_text.len()];
-    for span in highlight_spans {
-        boundaries.push(span.range.start);
-        boundaries.push(span.range.end);
+    for (range, _) in &highlight_spans {
+        boundaries.push(range.start);
+        boundaries.push(range.end);
     }
-    if let Some(marked_range) = input.marked_range.as_ref() {
+    let ime_marked_range = input.ime_marked_range(&BlockImeCompositionOwner::BlockText);
+    let marked_range = ime_marked_range.as_ref().or(input.marked_range.as_ref());
+    if let Some(marked_range) = marked_range {
         boundaries.push(marked_range.start);
         boundaries.push(marked_range.end);
     }
@@ -225,7 +257,6 @@ fn build_code_text_runs(
     boundaries.sort_unstable();
     boundaries.dedup();
 
-    let marked_range = input.marked_range.as_ref();
     let mut runs = Vec::new();
     let mut span_idx = 0usize;
     for boundary_pair in boundaries.windows(2) {
@@ -238,12 +269,13 @@ fn build_code_text_runs(
         let is_marked = marked_range
             .map(|range| start < range.end && range.start < end)
             .unwrap_or(false);
-        while span_idx < highlight_spans.len() && highlight_spans[span_idx].range.end <= start {
+        while span_idx < highlight_spans.len() && highlight_spans[span_idx].0.end <= start {
             span_idx += 1;
         }
         let run_color = highlight_spans
             .get(span_idx)
-            .filter(|span| span.range.start <= start && start < span.range.end)
+            .filter(|(range, _)| range.start <= start && start < range.end)
+            .map(|(_, span)| *span)
             .map(|span| code_highlight_color(colors, span.class))
             .unwrap_or(base_run.color);
 
@@ -360,6 +392,24 @@ fn wrapped_row_offsets(line: &WrappedLine) -> Vec<usize> {
     offsets.push(line.len());
     offsets.dedup();
     offsets
+}
+
+/// Resolves the visual row containing a caret, treating a wrap boundary as the next row's start.
+pub(super) fn visual_row_range_for_offset(
+    line: &WrappedLine,
+    offset: usize,
+) -> Option<Range<usize>> {
+    let offsets = wrapped_row_offsets(line);
+    if offsets.len() < 2 {
+        return Some(0..line.len());
+    }
+
+    let offset = offset.min(line.len());
+    let row_count = offsets.len() - 1;
+    let row = (0..row_count)
+        .find(|row| offset < offsets[row + 1])
+        .unwrap_or(row_count - 1);
+    Some(offsets[row]..offsets[row + 1])
 }
 
 fn wrapped_row_origin_x(

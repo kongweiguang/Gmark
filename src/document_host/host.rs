@@ -9,15 +9,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use unicode_segmentation::UnicodeSegmentation;
 
 use gmark_document_core::{
     DEFAULT_DELIMITED_COLUMN_WINDOW, DEFAULT_DELIMITED_ROW_WINDOW, DerivedProjectionProvider,
     DerivedProjectionRequest, DerivedProjectionSnapshot, DerivedProjectionStatus, DocumentFormat,
-    DocumentSnapshot, DocumentViewId, DocumentViewRegistry, DocumentViewState,
-    ProjectionCancellation, ProjectionError, RecoveryAction, RecoveryBackend, RecoveryRecord,
-    SourceAffinity, SourceAnchor, SourceEdit, SourceLocator, SourceSelection, TextEncoding,
-    Transaction, ViewDescriptor, ViewFormat,
+    DocumentMutationMap, DocumentRevision, DocumentSnapshot, DocumentViewId, DocumentViewRegistry,
+    DocumentViewState, ProjectionCancellation, ProjectionError, RecoveryAction, RecoveryBackend,
+    RecoveryRecord, SourceAffinity, SourceAnchor, SourceEdit, SourceLocator, SourceSelection,
+    TextEncoding, Transaction, ViewDescriptor, ViewFormat,
 };
 use gmark_document_runtime::{
     ControllerError, DocumentController, DocumentEvent, DocumentEventSubscription, DocumentHandle,
@@ -51,10 +50,13 @@ use gpui::{
 
 use crate::components::{
     Block, BlockEvent, BlockHostAction, BlockKind, BlockRecord, CancelFormatting, CollapseAllFolds,
-    CollapseFold, Copy, Cut, Delete, DeleteBack, DismissTransientUi, ExpandAllFolds, ExpandFold,
-    ExportSelection, FindInDocument, FindNext, FindPrevious, FormatDocument, FormatSelection,
-    GoToLine, JumpToBottom, JumpToTop, PageDown, PageUp, Paste, Redo, SaveDocument, SelectAll,
-    SourceLayoutIdentity, Undo, source_line_number_gutter_width,
+    CollapseFold, Copy, Cut, Delete, DeleteBack, DeleteLine, DismissTransientUi, DuplicateLine,
+    ExpandAllFolds, ExpandFold, ExportSelection, FindInDocument, FindNext, FindPrevious,
+    FormatDocument, FormatSelection, GoToLine, IndentBlock, JumpToBottom, JumpToTop, MoveLineDown,
+    MoveLineUp, MoveToDocumentEnd, MoveToDocumentStart, OutdentBlock, PageDown, PageUp, Paste,
+    Redo, SaveDocument, SaveDocumentAs, SelectAll, SelectDown, SelectPageDown, SelectPageUp,
+    SelectToDocumentEnd, SelectToDocumentStart, SelectUp, SourceLayoutIdentity, Undo,
+    source_line_number_gutter_width,
 };
 use crate::source_tools::{FoldProjectionIndex, ResidentFoldParser, SourceLanguageId};
 
@@ -139,6 +141,8 @@ pub(crate) struct DocumentHost {
     structure_error_byte: Option<u64>,
     structured_filter_input: Entity<Block>,
     structured_cell_input: Entity<Block>,
+    /// Keeps structured-table focus distinct from Source command ownership.
+    structured_focus_handle: FocusHandle,
     structured_cell_edit: Option<StructuredCellEdit>,
     structured_selected_cell: Option<StructuredCellEdit>,
     /// 单元格提交后，旧索引继续稳定渲染到后台快照完成；覆盖值与基线区间偏移
@@ -211,6 +215,8 @@ pub(crate) struct DocumentHost {
     /// 从 Host 构造到首个真实 Source 窗口绘制的耗时；仅在本地诊断显式开启时分配。
     first_render_started: Option<Instant>,
     source_row_blocks: BTreeMap<usize, Entity<Block>>,
+    /// Pending host actions remain pinned to the Block that owns the native composition.
+    pending_source_ime_action: Option<source_ime::PendingSourceImeAction>,
     source_syntax_contexts: BTreeMap<usize, SourceSyntaxContext>,
     source_row_epochs: BTreeMap<usize, u64>,
     source_cache_epoch: u64,
@@ -592,6 +598,26 @@ impl DocumentHost {
                                 )
                             });
                             if body_changed {
+                                // Rebase the active Source row before invalidating its rendered snapshot;
+                                // conflicting peer edits must lose the stale input surface first.
+                                for event in &events {
+                                    if let DocumentEvent::RevisionChanged {
+                                        document_id: id,
+                                        view_id,
+                                        revision,
+                                        mutation,
+                                        ..
+                                    } = event
+                                        && *id == document_id
+                                    {
+                                        view.rebase_pending_source_pointer_actions(
+                                            *view_id, *revision, mutation, cx,
+                                        );
+                                        view.rebase_active_source_edit(
+                                            *view_id, *revision, mutation, cx,
+                                        );
+                                    }
+                                }
                                 let expanded = view.json_expanded_nodes.clone();
                                 let hidden_columns = view.hidden_structured_columns.clone();
                                 let column_window = view.structured_column_window_start;
@@ -691,6 +717,12 @@ mod source_context;
 mod source_folding;
 #[path = "views/source_formatting.rs"]
 mod source_formatting;
+#[path = "views/source_ime.rs"]
+mod source_ime;
+#[path = "views/source_line_operations.rs"]
+mod source_line_operations;
+#[path = "views/source_pointer.rs"]
+mod source_pointer;
 #[path = "views/source_rows.rs"]
 mod source_rows;
 #[path = "views/source_selection.rs"]

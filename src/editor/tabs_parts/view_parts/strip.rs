@@ -3,6 +3,7 @@
 use super::*;
 
 impl Editor {
+    /// Renders stable tab chrome; toolbar focus is deferred before pointer focus can displace an IME owner.
     pub(in crate::editor) fn render_tab_strip(
         &mut self,
         theme: &crate::theme::Theme,
@@ -104,7 +105,18 @@ impl Editor {
                 .tooltip(move |_window, cx| crate::ui::ui_tooltip(tooltip.clone(), cx))
                 .child(svg().path(icon).size(px(15.0)).text_color(icon_color))
                 .on_click(move |event, window, cx| {
-                    pointer_focus_handle.focus(window);
+                    let deferred = click_editor
+                        .update(cx, |editor, cx| {
+                            editor.defer_document_toolbar_action_for_ime(action, window, cx)
+                        })
+                        .unwrap_or(false);
+                    if !deferred {
+                        pointer_focus_handle.focus(window);
+                    }
+                    if deferred {
+                        cx.stop_propagation();
+                        return;
+                    }
                     let _ = click_editor.update(cx, |editor, cx| {
                         editor.activate_document_toolbar_action(
                             action,

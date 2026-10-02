@@ -4,12 +4,14 @@
 
 use super::*;
 
+/// Paints semantic selection, IME preedit underline, and caret over the generated formula image.
 pub(super) fn render_math_editing_svg_content(
     rendered: &crate::components::LatexSvgRender,
     theme: &Theme,
     projection: &gmark_math_edit::MathVisualProjection,
     cursor: &gmark_math_edit::MathCursor2D,
     selection: &gmark_math_edit::MathSelection,
+    ime_marked_selection: Option<&gmark_math_edit::MathSelection>,
 ) -> AnyElement {
     let font_size = display_math_font_size(theme.typography.text_size);
     let padding = (font_size * 0.35).max(4.0);
@@ -17,6 +19,7 @@ pub(super) fn render_math_editing_svg_content(
     let height =
         ((projection.height() + projection.depth()) as f32 * font_size + padding * 2.0).max(28.0);
     let selection_rect = projection.selection_rect(selection);
+    let marked_rect = ime_marked_selection.and_then(|marked| projection.selection_rect(marked));
     let caret_rect = projection.caret_rect(cursor);
     let wb = &theme.colors.workbench;
 
@@ -51,6 +54,17 @@ pub(super) fn render_math_editing_svg_content(
                         .h(px(height))
                         .object_fit(ObjectFit::Contain),
                 )
+                .when_some(marked_rect, |this, rect| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .left(px(padding + rect.x as f32 * font_size))
+                            .top(px(padding + (rect.y + rect.h) as f32 * font_size - 1.0))
+                            .w(px((rect.w as f32 * font_size).max(2.0)))
+                            .h(px(1.5))
+                            .bg(wb.accent),
+                    )
+                })
                 .when_some(caret_rect, |this, rect| {
                     this.child(
                         div()

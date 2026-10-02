@@ -298,6 +298,7 @@ impl Editor {
         Ok(editor)
     }
 
+    /// 共享正文复用既有会话；输入法队列、选择与拖选任务属于视图，不能随正文共享或恢复。
     pub(in crate::editor) fn from_markdown_internal(
         cx: &mut Context<Self>,
         markdown: String,
@@ -479,8 +480,13 @@ impl Editor {
             pending_scroll_recheck_after_layout: true,
             pending_save: false,
             pending_save_as: false,
+            pending_ime_operations: std::collections::VecDeque::new(),
+            ime_completion_requested: false,
+            ime_completion_failed: false,
+            ime_detached_targets: Vec::new(),
             pending_resource_insertion: None,
             save_task: None,
+            save_prompt_task: None,
             save_queued: false,
             auto_save_task: None,
             spellcheck_task: None,
@@ -558,6 +564,15 @@ impl Editor {
             workspace_link_completion: None,
             cross_block_selection: None,
             cross_block_drag: None,
+            active_selection_surface: selection_surface::SelectionSurface::Main,
+            split_preview_cross_block_selection: None,
+            split_preview_cross_block_drag: None,
+            split_preview_table_cell_rectangle: None,
+            split_preview_table_cell_drag_anchor: None,
+            selection_autoscroll_task: None,
+            selection_autoscroll_generation: 0,
+            selection_autoscroll_pointer: None,
+            selection_autoscroll_surface: selection_surface::SelectionSurface::Main,
             rendered_select_all_cycle: None,
             // 桌面 Markdown 编辑器的高频导航需始终可见；G 启动器仍可由用户手动收纳。
             menu_bar_expanded: true,

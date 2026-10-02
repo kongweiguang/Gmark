@@ -31,6 +31,7 @@ impl JsonNode {
 pub(super) struct SourceLineEdit {
     pub(super) line: usize,
     pub(super) range: std::ops::Range<u64>,
+    pub(super) base_revision: u64,
     pub(super) ending: String,
     pub(super) leading_truncated: bool,
     pub(super) trailing_truncated: bool,

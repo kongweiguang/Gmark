@@ -48,7 +48,15 @@ impl Block {
         })
     }
 
+    /// 先完成原输入法会话并再次校验只读状态，避免普通删除被解释为候选结果。
     pub(crate) fn on_delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
+        if self.guard_input_command(
+            crate::components::block::BlockInputCommand::Delete,
+            window,
+            cx,
+        ) {
+            return;
+        }
         if self.kind() == BlockKind::MermaidBlock
             && self.mermaid_view_mode() == MermaidViewMode::Preview
         {
@@ -93,12 +101,20 @@ impl Block {
         self.replace_text_in_range(None, "", window, cx);
     }
 
+    /// 先完成原输入法会话并再次校验只读状态，避免普通删除被解释为候选结果。
     pub(crate) fn on_word_delete_back(
         &mut self,
         _: &WordDeleteBack,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.guard_input_command(
+            crate::components::block::BlockInputCommand::WordDeleteBack,
+            window,
+            cx,
+        ) {
+            return;
+        }
         if self.selected_range.is_empty() {
             if self.cursor_offset() == 0 {
                 // Nothing to the left in this block; defer to grapheme
@@ -111,12 +127,20 @@ impl Block {
         self.replace_text_in_range(None, "", window, cx);
     }
 
+    /// 先完成原输入法会话并再次校验只读状态，避免普通删除被解释为候选结果。
     pub(crate) fn on_word_delete_forward(
         &mut self,
         _: &WordDeleteForward,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.guard_input_command(
+            crate::components::block::BlockInputCommand::WordDeleteForward,
+            window,
+            cx,
+        ) {
+            return;
+        }
         if self.selected_range.is_empty() {
             if self.cursor_offset() == self.visible_len() {
                 // Nothing to the right in this block; defer to grapheme
@@ -129,6 +153,8 @@ impl Block {
         self.replace_text_in_range(None, "", window, cx);
     }
 
+    /// Keeps a collapsed local caret as text input; selected rows and hosted fields
+    /// retain owner routing.
     pub(crate) fn on_indent_block(
         &mut self,
         _: &IndentBlock,
@@ -136,6 +162,18 @@ impl Block {
         cx: &mut Context<Self>,
     ) {
         if self.handle_contextual_editing_action("tab", window, cx) {
+            return;
+        }
+        if self.uses_raw_text_editing() || self.kind().is_code_block() {
+            if self.selected_range.is_empty() && !self.compact_source_host() {
+                self.replace_text_in_range(None, "    ", window, cx);
+            } else {
+                self.apply_raw_line_operation(
+                    crate::components::block::LineOperation::Indent,
+                    window,
+                    cx,
+                );
+            }
             return;
         }
         if self.is_table_cell() {
@@ -151,12 +189,21 @@ impl Block {
         }
     }
 
+    /// Uses the same row planner as multi-line Outdent so CRLF and the active selection remain stable.
     pub(crate) fn on_outdent_block(
         &mut self,
         _: &OutdentBlock,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.uses_raw_text_editing() || self.kind().is_code_block() {
+            self.apply_raw_line_operation(
+                crate::components::block::LineOperation::Outdent,
+                window,
+                cx,
+            );
+            return;
+        }
         if self.is_table_cell() {
             cx.emit(BlockEvent::RequestTableCellMoveHorizontal { delta: -1 });
             return;
@@ -335,18 +382,28 @@ impl Block {
         }
     }
 
+    /// Keeps Home inside the active wrapped row and leaves an in-progress IME candidate untouched.
     pub(crate) fn on_home(&mut self, _: &Home, window: &mut Window, cx: &mut Context<Self>) {
+        if self.has_ime_composition() {
+            cx.stop_propagation();
+            return;
+        }
         if self.handle_contextual_editing_action("home", window, cx) {
             return;
         }
-        self.move_to(0, cx);
+        self.move_to(self.current_visual_line_boundary(false), cx);
     }
 
+    /// Keeps End inside the active wrapped row and leaves an in-progress IME candidate untouched.
     pub(crate) fn on_end(&mut self, _: &End, window: &mut Window, cx: &mut Context<Self>) {
+        if self.has_ime_composition() {
+            cx.stop_propagation();
+            return;
+        }
         if self.handle_contextual_editing_action("end", window, cx) {
             return;
         }
-        self.move_to(self.visible_len(), cx);
+        self.move_to(self.current_visual_line_boundary(true), cx);
     }
 
     pub(crate) fn on_select_left(
@@ -434,15 +491,22 @@ impl Block {
         self.select_to(self.visible_len(), cx);
     }
 
+    /// 文档全选等待原候选结束；独立输入字段仍只选择本地文字。
     pub(crate) fn on_select_all(
         &mut self,
         _: &SelectAll,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.guard_input_command(
+            crate::components::block::BlockInputCommand::SelectAll,
+            _window,
+            cx,
+        ) {
+            return;
+        }
         if self.is_read_only() {
-            // 本地全选保证 Split 右栏始终可用；事件让普通 Preview 沿用 Live 的
-            // 两段式语义，第二次 Ctrl/Cmd+A 再升级为整份文档选择。
+            // 只读表面仍允许选择；事件一次升级为所属文档的全文选区。
             self.select_all_text(cx);
             cx.emit(BlockEvent::RequestRenderedSelectAll);
             return;
@@ -462,22 +526,32 @@ impl Block {
         }
     }
 
+    /// Extends from the existing anchor to the current visual row start without displacing IME preedit.
     pub(crate) fn on_select_home(
         &mut self,
         _: &SelectHome,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.select_to(0, cx);
+        if self.has_ime_composition() {
+            cx.stop_propagation();
+            return;
+        }
+        self.select_to(self.current_visual_line_boundary(false), cx);
     }
 
+    /// Extends from the existing anchor to the current visual row end without displacing IME preedit.
     pub(crate) fn on_select_end(
         &mut self,
         _: &SelectEnd,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.select_to(self.visible_len(), cx);
+        if self.has_ime_composition() {
+            cx.stop_propagation();
+            return;
+        }
+        self.select_to(self.current_visual_line_boundary(true), cx);
     }
 
     pub(crate) fn on_copy(&mut self, _: &Copy, _window: &mut Window, cx: &mut Context<Self>) {
@@ -507,139 +581,6 @@ impl Block {
             selected.serialize_markdown()
         };
         cx.write_to_clipboard(ClipboardItem::new_string(markdown));
-    }
-
-    pub(crate) fn on_cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
-            self.prepare_undo_capture(UndoCaptureKind::NonCoalescible, cx);
-            cx.write_to_clipboard(ClipboardItem::new_string(
-                self.display_text()[self.selected_range.clone()].to_string(),
-            ));
-            self.replace_text_in_range(None, "", window, cx);
-        }
-    }
-
-    /// 在识别图片路径或派发结构化粘贴前先验证最终块大小，避免超限输入触发多份中间拷贝。
-    pub(crate) fn on_paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        if self.kind().is_separator() && !self.uses_raw_text_editing() {
-            return;
-        }
-
-        if let Some(item) = cx.read_from_clipboard() {
-            if Self::clipboard_image_exceeds_limit(&item) {
-                self.show_paste_limit_error(window, cx);
-                return;
-            }
-            if let Some(source) = Self::pasted_image_source_from_clipboard(&item) {
-                let (leading, trailing) = self.paste_resource_split();
-                cx.emit(BlockEvent::RequestPasteImage {
-                    leading,
-                    source,
-                    trailing,
-                });
-                return;
-            }
-
-            let Some(text) = item.text() else {
-                return;
-            };
-            if self.paste_output_exceeds_limit(&text) {
-                self.show_paste_limit_error(window, cx);
-                return;
-            }
-            if let Some(source) = Self::pasted_image_source_from_text(&text) {
-                let (leading, trailing) = self.paste_resource_split();
-                cx.emit(BlockEvent::RequestPasteImage {
-                    leading,
-                    source,
-                    trailing,
-                });
-                return;
-            }
-
-            self.paste_text(text, window, cx);
-        }
-    }
-
-    /// 纯文本入口复用同一结果上限，保证绕过富文本识别也不会部分写入超大内容。
-    pub(crate) fn on_paste_as_plain_text(
-        &mut self,
-        _: &PasteAsPlainText,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.kind().is_separator() && !self.uses_raw_text_editing() {
-            return;
-        }
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
-            return;
-        };
-        if self.paste_output_exceeds_limit(&text) {
-            self.show_paste_limit_error(window, cx);
-            return;
-        }
-        self.paste_text(text, window, cx);
-    }
-
-    /// 所有内部粘贴调用再次校验结果长度，防止未来新增调用方绕过剪贴板入口门禁。
-    fn paste_text(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
-        if self.paste_output_exceeds_limit(&text) {
-            self.show_paste_limit_error(window, cx);
-            return;
-        }
-        // Only rendered rich-text blocks apply paste correction. Raw/code
-        // contexts preserve bytes, and table cells flatten newlines so the
-        // surrounding table structure is not accidentally split.
-        if self.editor_selection_range.is_some() {
-            cx.emit(BlockEvent::RequestReplaceCrossBlockSelection {
-                text,
-                selected_range_relative: None,
-                mark_inserted_text: false,
-                undo_kind: UndoCaptureKind::NonCoalescible,
-            });
-            return;
-        }
-
-        if self.is_table_cell() {
-            let flattened = text.replace("\r\n", " ").replace(['\r', '\n'], " ");
-            self.prepare_undo_capture(UndoCaptureKind::NonCoalescible, cx);
-            self.replace_text_in_range(None, &flattened, window, cx);
-            return;
-        }
-
-        if self.uses_raw_text_editing() {
-            self.prepare_undo_capture(UndoCaptureKind::NonCoalescible, cx);
-            self.replace_text_in_range(None, &text, window, cx);
-            return;
-        }
-
-        if text.contains('\n') || text.contains('\r') {
-            let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-            if self.quote_depth > 0 {
-                self.prepare_undo_capture(UndoCaptureKind::NonCoalescible, cx);
-                self.replace_text_in_range(None, &normalized, window, cx);
-                return;
-            }
-            let clean_selected = self.selection_clean_range();
-            let (leading, tail) = self.record.title.split_at(clean_selected.start);
-            let (_, trailing) =
-                tail.split_at(clean_selected.end.saturating_sub(clean_selected.start));
-            let lines = normalized
-                .split('\n')
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>();
-            let split_physical_lines = should_split_plain_multiline_paste(&lines);
-            cx.emit(BlockEvent::RequestPasteMultiline {
-                leading,
-                lines,
-                trailing,
-                split_physical_lines,
-            });
-            return;
-        }
-
-        self.prepare_undo_capture(UndoCaptureKind::NonCoalescible, cx);
-        self.replace_text_in_range(None, &text, window, cx);
     }
 
     pub(crate) fn on_code_language_newline(
@@ -717,6 +658,13 @@ impl Block {
     }
 }
 
+#[path = "deletion_clipboard.rs"]
+mod clipboard;
+
 #[cfg(test)]
 #[path = "../../../../tests/unit/editor/paste_limits.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../../../tests/unit/components/block/visual_line_navigation.rs"]
+mod visual_line_navigation_tests;

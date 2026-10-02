@@ -73,6 +73,7 @@ impl Element for CodeLanguageInputElement {
         (window.request_layout(style, [], cx), ())
     }
 
+    /// Shapes the pinned virtual language text so its candidate and native offsets stay aligned.
     fn prepaint(
         &mut self,
         _id: Option<&GlobalElementId>,
@@ -85,7 +86,10 @@ impl Element for CodeLanguageInputElement {
         let theme = cx.global::<ThemeManager>().current_arc();
         let colors = &theme.colors;
         let input = self.input.read(cx);
-        let content = input.code_language_text().to_string();
+        let owner = BlockImeCompositionOwner::CodeLanguage;
+        let content = input
+            .ime_visible_text(&owner)
+            .unwrap_or_else(|| input.code_language_text().to_owned());
         let is_placeholder = content.is_empty();
         let display_text: SharedString = if is_placeholder {
             self.placeholder.clone()
@@ -108,11 +112,10 @@ impl Element for CodeLanguageInputElement {
             strikethrough: None,
         };
 
-        let runs = if let Some(marked_range) = input
-            .code_language_marked_range
-            .as_ref()
-            .filter(|_| !is_placeholder)
-        {
+        let marked_range = input
+            .ime_marked_range(&owner)
+            .or_else(|| input.code_language_marked_range.clone());
+        let runs = if let Some(marked_range) = marked_range.as_ref().filter(|_| !is_placeholder) {
             vec![
                 TextRun {
                     len: marked_range.start,
@@ -143,9 +146,14 @@ impl Element for CodeLanguageInputElement {
         let line = window
             .text_system()
             .shape_line(display_text, font_size, &runs, None);
-        let selection = if focused && !input.code_language_selected_range.is_empty() {
-            let start = line.x_for_index(input.code_language_selected_range.start);
-            let end = line.x_for_index(input.code_language_selected_range.end);
+        let ime_selection = input.ime_render_selection(&owner);
+        let selected_range = ime_selection
+            .as_ref()
+            .map(|(range, _)| range.clone())
+            .unwrap_or_else(|| input.code_language_selected_range.clone());
+        let selection = if focused && !selected_range.is_empty() {
+            let start = line.x_for_index(selected_range.start);
+            let end = line.x_for_index(selected_range.end);
             Some(fill(
                 Bounds::from_corners(
                     point(bounds.left() + start, bounds.top()),
@@ -156,8 +164,12 @@ impl Element for CodeLanguageInputElement {
         } else {
             None
         };
-        let cursor = if focused && input.code_language_selected_range.is_empty() {
-            let cursor_x = line.x_for_index(input.code_language_cursor_offset());
+        let cursor = if focused && selected_range.is_empty() {
+            let cursor_offset = ime_selection
+                .as_ref()
+                .map(|(range, reversed)| if *reversed { range.start } else { range.end })
+                .unwrap_or_else(|| input.code_language_cursor_offset());
+            let cursor_x = line.x_for_index(cursor_offset);
             let mut cursor_color = colors.cursor;
             cursor_color.a *= input.cursor_opacity();
             Some(fill(
@@ -182,6 +194,7 @@ impl Element for CodeLanguageInputElement {
         }
     }
 
+    /// Paints the language field and consumes only traces owned by its current selection state.
     fn paint(
         &mut self,
         _id: Option<&GlobalElementId>,
@@ -198,7 +211,13 @@ impl Element for CodeLanguageInputElement {
             window.set_cursor_style(CursorStyle::IBeam, hitbox);
         }
 
-        let focus_handle = self.input.read(cx).code_language_focus_handle.clone();
+        let (focus_handle, input_snapshot) = {
+            let input = self.input.read(cx);
+            (
+                input.code_language_focus_handle.clone(),
+                input.input_paint_snapshot(crate::perf::InputPaintSurface::CodeLanguage),
+            )
+        };
         if focus_handle.is_focused(window) {
             window.handle_input(
                 &focus_handle,
@@ -214,6 +233,13 @@ impl Element for CodeLanguageInputElement {
         let line = prepaint.line.take().expect("line should be shaped");
         line.paint(bounds.origin, bounds.size.height, window, cx)
             .ok();
+
+        for trace in crate::perf::take_input_to_gpui_paint(self.input.entity_id(), input_snapshot)
+            .into_iter()
+            .flatten()
+        {
+            trace.record_gpui_text_paint();
+        }
 
         if focus_handle.is_focused(window)
             && let Some(cursor) = prepaint.cursor.take()

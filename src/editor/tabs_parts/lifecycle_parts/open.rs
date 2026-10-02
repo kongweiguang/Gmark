@@ -9,6 +9,7 @@ impl Editor {
         cx.notify();
     }
 
+    /// 后台打开结果也经统一导航入口，避免候选尚未结束就拆卸原输入目标。
     pub(crate) fn install_new_tab(
         &mut self,
         opened: crate::document_io::OpenedMarkdown,
@@ -18,19 +19,11 @@ impl Editor {
         if !self.can_switch_tabs() {
             return;
         }
-        let current = self.capture_active_tab(cx);
-        self.tabs.records[self.tabs.active].snapshot = Some(current);
         let snapshot = Self::snapshot_for_opened_document(opened, path);
-        self.tabs.records.push(TabRecord {
-            id: uuid::Uuid::new_v4(),
-            pinned: false,
-            snapshot: None,
-        });
-        self.tabs.active = self.tabs.records.len() - 1;
-        self.install_tab_snapshot(snapshot, cx);
-        self.schedule_workspace_session_save(cx);
+        self.new_tab_from_snapshot(snapshot, cx);
     }
 
+    /// Source Host 可以提前准备，但激活前必须等待旧视图的输入终态。
     pub(in crate::editor) fn install_new_source_backed_tab(
         &mut self,
         path: PathBuf,
@@ -47,8 +40,6 @@ impl Editor {
                 gmark_document_core::DocumentFormat::Json
                     | gmark_document_core::DocumentFormat::Delimited { .. }
             );
-        let current = self.capture_active_tab(cx);
-        self.tabs.records[self.tabs.active].snapshot = Some(current);
         let mut snapshot = Self::snapshot_for_untitled_document(DocumentKind::from_path(&path));
         snapshot.file_path = Some(path.clone());
         snapshot.saved_file_fingerprint = crate::recovery::fingerprint_file(&path).ok();
@@ -62,14 +53,7 @@ impl Editor {
             cx.new(move |cx| crate::document_host::DocumentHost::new(path, probe, source, cx));
         Self::subscribe_document_host(&source_backed_view, cx);
         snapshot.document_host = Some(source_backed_view);
-        self.tabs.records.push(TabRecord {
-            id: uuid::Uuid::new_v4(),
-            pinned: false,
-            snapshot: None,
-        });
-        self.tabs.active = self.tabs.records.len() - 1;
-        self.install_tab_snapshot(snapshot, cx);
-        self.schedule_workspace_session_save(cx);
+        self.new_tab_from_snapshot(snapshot, cx);
     }
 
     pub(crate) fn install_file_open_failure_tab(
@@ -323,11 +307,19 @@ impl Editor {
         self.new_tab_from_snapshot(snapshot, cx)
     }
 
+    /// 新标签数据准备完成也先等待输入终态，不能拆卸正在接收系统回调的旧视图。
     pub(crate) fn new_tab_from_snapshot(
         &mut self,
         snapshot: DocumentTabSnapshot,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.has_active_ime_composition(cx) {
+            self.queue_ime_operation(
+                crate::editor::ime_lifecycle::DeferredImeOperation::NewTab(Box::new(snapshot)),
+                cx,
+            );
+            return false;
+        }
         if !self.can_switch_tabs() {
             return false;
         }

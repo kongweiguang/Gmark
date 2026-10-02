@@ -15,6 +15,9 @@ use pulldown_cmark::{Event, Options, Parser, Tag};
 use super::projection::{PreparedSplitProjection, ProjectionRegionKind};
 use super::{Block, Editor};
 
+#[path = "virtual_surface_selection.rs"]
+mod selection;
+
 const MIN_REGION_HEIGHT: f32 = 1.0;
 
 #[cfg(test)]
@@ -313,47 +316,6 @@ impl VirtualSurfaceState {
 }
 
 impl Editor {
-    /// 根据全局滚动位置替换 viewport DocumentTree；pinned region 仍由 surface 单独持有。
-    pub(super) fn sync_virtual_surface_mounts(
-        &mut self,
-        scroll_y: f32,
-        viewport_height: f32,
-        overdraw: f32,
-        cx: &mut gpui::Context<Self>,
-    ) -> bool {
-        let Some(mut surface) = self.virtual_surface.take() else {
-            return false;
-        };
-        let focused_region = self
-            .active_entity_id
-            .and_then(|entity_id| surface.region_for_entity(entity_id));
-        let target =
-            surface.desired_window(scroll_y, viewport_height.max(1.0), overdraw, focused_region);
-        if surface.mount_window() == &target {
-            self.virtual_surface = Some(surface);
-            return false;
-        }
-
-        surface.reconcile_mounts(target, cx);
-        let roots = surface.viewport_roots();
-        self.virtual_surface = Some(surface);
-        if roots.is_empty() {
-            return false;
-        }
-        self.document.replace_roots(roots, cx);
-        self.prev_visible_block_ids.clear();
-        self.prev_render_window = None;
-        self.row_stride_cache.clear();
-        self.render_row_cache = None;
-        self.rebuild_virtual_table_runtimes(cx);
-        if self.view_mode == super::ViewMode::Preview {
-            self.set_projection_read_only(true, cx);
-        }
-        self.apply_pending_virtual_footnote_focus(cx);
-        self.apply_pending_virtual_footnote_backref_focus(cx);
-        true
-    }
-
     pub(super) fn virtual_surface_layout(&self) -> Option<VirtualSurfaceLayout> {
         let surface = self.virtual_surface.as_ref()?;
         Some(VirtualSurfaceLayout {

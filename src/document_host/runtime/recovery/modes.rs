@@ -152,11 +152,13 @@ impl DocumentHost {
         cx.emit(DocumentHostEvent::ViewModeChanged(DocumentHostMode::Source));
     }
 
+    /// 切入结构视图时同步终止 Source 拖选，JSON 的专用分支也会替换输入坐标空间。
     pub(crate) fn show_structure_view(&mut self, cx: &mut Context<Self>) {
         self.dismiss_view_context_menus();
         self.mode_notice = None;
         self.request_registered_projection(cx);
         if self.probe.format == DocumentFormat::Json {
+            self.end_source_pointer_selection();
             self.active_edit = None;
             self.graph_needs_fit |= self.view_mode != DocumentHostViewMode::Structure;
             self.view_mode = DocumentHostViewMode::Structure;
@@ -184,11 +186,13 @@ impl DocumentHost {
         cx.emit(DocumentHostEvent::ViewModeChanged(DocumentHostMode::Live));
     }
 
+    /// 切入 Split 前结束 Source 拖选，避免另一侧开始接收事件后旧滚动任务仍运行。
     pub(crate) fn show_split_view(&mut self, cx: &mut Context<Self>) {
         self.dismiss_view_context_menus();
         self.mode_notice = None;
         if self.probe.format == DocumentFormat::Json || self.structured_index.is_some() {
             self.request_registered_projection(cx);
+            self.end_source_pointer_selection();
             self.active_edit = None;
             self.graph_needs_fit |= self.view_mode != DocumentHostViewMode::Split;
             self.view_mode = DocumentHostViewMode::Split;
@@ -219,7 +223,9 @@ impl DocumentHost {
         self.view_mode == DocumentHostViewMode::Split
     }
 
+    /// 模式不可用时仍切回稳定 Source 表面，因此先结束旧视图的拖选任务。
     pub(crate) fn show_mode_unavailable(&mut self, mode: &'static str, cx: &mut Context<Self>) {
+        self.end_source_pointer_selection();
         self.view_mode = DocumentHostViewMode::Source;
         self.sync_tab_active_view();
         self.mode_notice = Some(
