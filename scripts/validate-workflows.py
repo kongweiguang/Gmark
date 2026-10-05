@@ -47,7 +47,7 @@ def joined_run_scripts(steps: object) -> str:
 def validate_release_contract(
     path: Path, document: dict[str, object], jobs: dict[str, object]
 ) -> None:
-    """锁定不可变发布、统一品牌标题与签名清单，避免重跑产生可见漂移。"""
+    """锁定不可变发布与签名清单，并允许跳过门禁但禁止取消后继续发布。"""
 
     triggers = document.get("on")
     dispatch = triggers.get("workflow_dispatch") if isinstance(triggers, dict) else None
@@ -237,13 +237,13 @@ def validate_release_contract(
         job = jobs.get(platform)
         condition = job.get("if") if isinstance(job, dict) else None
         required = (
-            "always()",
+            "!cancelled()",
             "needs.validate.result == 'success'",
             "needs.quality.result == 'skipped'",
             "needs.updater-quality.result == 'skipped'",
         )
         if not isinstance(condition, str) or any(part not in condition for part in required):
-            fail(path, f"{platform} artifacts must run after skipped repeat-release gates")
+            fail(path, f"{platform} artifacts must allow skipped gates and stop on cancellation")
 
     needs = release.get("needs")
     if not isinstance(needs, list) or set(needs) != {
@@ -255,7 +255,7 @@ def validate_release_contract(
         fail(path, "release job must depend on validation and every platform artifact")
     condition = release.get("if")
     required_conditions = (
-        "always()",
+        "!cancelled()",
         "needs.validate.result == 'success'",
         "needs.windows.result == 'success'",
         "needs.linux.result == 'success'",
@@ -264,7 +264,7 @@ def validate_release_contract(
     if not isinstance(condition, str) or any(
         required not in condition for required in required_conditions
     ):
-        fail(path, "release job must explicitly allow skipped non-release gates")
+        fail(path, "release job must allow skipped gates and reject cancelled publication")
 
 
 def validate_quality_contract(path: Path, jobs: dict[str, object]) -> None:

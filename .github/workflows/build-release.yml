@@ -130,7 +130,7 @@ jobs:
     needs: [validate, quality, updater-quality]
     if: >-
       ${{
-        always() &&
+        !cancelled() &&
         needs.validate.result == 'success' &&
         (needs.quality.result == 'success' || needs.quality.result == 'skipped') &&
         (needs.updater-quality.result == 'success' || needs.updater-quality.result == 'skipped')
@@ -201,7 +201,7 @@ jobs:
     needs: [validate, quality, updater-quality]
     if: >-
       ${{
-        always() &&
+        !cancelled() &&
         needs.validate.result == 'success' &&
         (needs.quality.result == 'success' || needs.quality.result == 'skipped') &&
         (needs.updater-quality.result == 'success' || needs.updater-quality.result == 'skipped')
@@ -249,7 +249,7 @@ jobs:
     needs: [validate, quality, updater-quality]
     if: >-
       ${{
-        always() &&
+        !cancelled() &&
         needs.validate.result == 'success' &&
         (needs.quality.result == 'success' || needs.quality.result == 'skipped') &&
         (needs.updater-quality.result == 'success' || needs.updater-quality.result == 'skipped')
@@ -304,7 +304,7 @@ jobs:
     needs: [validate, windows, linux, macos]
     if: >-
       ${{
-        always() &&
+        !cancelled() &&
         needs.validate.result == 'success' &&
         needs.windows.result == 'success' &&
         needs.linux.result == 'success' &&

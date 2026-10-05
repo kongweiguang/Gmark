@@ -739,8 +739,11 @@ impl Editor {
             }));
     }
 
-    /// Returns (line, col), both 1-based, from the source-mode selection snapshot.
+    /// 窗口壳不持有活动文字选区，先查询当前窗格；局部坐标按 Source 逻辑行和完整字素计算。
     pub(super) fn compute_source_cursor_position(&self, cx: &App) -> (usize, usize) {
+        if let Some(editor) = self.focused_pane_entities(cx).0 {
+            return editor.read(cx).compute_source_cursor_position(cx);
+        }
         let snapshot = self.capture_source_selection_snapshot(cx);
         let cursor_offset =
             super::saturating_source_offset(snapshot.source_selection().head.byte_offset);

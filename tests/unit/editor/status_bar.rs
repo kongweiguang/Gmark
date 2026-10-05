@@ -6,6 +6,7 @@ use super::{
 };
 use crate::i18n::I18nStrings;
 use gmark_document::Revision;
+use gpui::{AppContext, TestAppContext, VisualTestContext};
 
 #[test]
 fn action_names_normalize_to_stable_status_button_ids() {
@@ -125,4 +126,115 @@ fn source_format_labels_cover_bom_uniform_empty_and_mixed_documents() {
         .0,
         "GB18030"
     );
+}
+
+/// 窗口壳的坐标必须来自活动窗格；Live 撤销后的 Source 选区仍按逻辑行和完整字素显示。
+#[gpui::test]
+async fn source_cursor_tracks_restored_reverse_selection_after_live_undo(cx: &mut TestAppContext) {
+    init_status_bar_test_app(cx);
+    let wrapped_prefix = "x".repeat(240);
+    let original =
+        format!("first\nsecond\nthird\nfourth\n{wrapped_prefix}👨‍👩‍👧‍👦e\u{301}alpha_beta tail");
+    let document_source = original.clone();
+    let (root, visual) = cx.add_window_view(move |_window, cx| {
+        crate::editor::Editor::from_markdown(cx, document_source, None)
+    });
+    root.update(visual, |root, cx| {
+        root.split_pane_toward(crate::editor::panes::PaneSplitDirection::Right, cx);
+    });
+    redraw_status_bar_test(visual);
+    let editor = root.read_with(visual, |root, cx| {
+        root.focused_pane_entities(cx)
+            .0
+            .expect("active Markdown pane")
+    });
+
+    editor.update_in(visual, |editor, window, cx| {
+        let block = editor
+            .document
+            .root_blocks()
+            .iter()
+            .find(|block| block.read(cx).display_text().contains("alpha_beta"))
+            .cloned()
+            .expect("Live paragraph containing selected word");
+        let start = block
+            .read(cx)
+            .display_text()
+            .find("alpha_beta")
+            .expect("selected word offset");
+        editor.focus_block(block.entity_id());
+        block.update(cx, |block, cx| {
+            block.selected_range = start..start + "alpha_beta".len();
+            block.selection_reversed = true;
+            block.focus_handle.focus(window);
+            cx.notify();
+        });
+    });
+    redraw_status_bar_test(visual);
+
+    visual.simulate_input("S29");
+    redraw_status_bar_test(visual);
+    visual.simulate_keystrokes("ctrl-z");
+    redraw_status_bar_test(visual);
+    editor.read_with(visual, |editor, cx| {
+        assert_eq!(editor.source_document.text(), original);
+        let selected = editor
+            .document
+            .root_blocks()
+            .iter()
+            .find(|block| block.read(cx).display_text().contains("alpha_beta"))
+            .expect("restored Live paragraph")
+            .read(cx);
+        assert_eq!(
+            &selected.display_text()[selected.selected_range.clone()],
+            "alpha_beta"
+        );
+        assert!(selected.selection_reversed);
+    });
+
+    root.update(visual, |root, cx| {
+        root.set_view_mode(super::super::ViewMode::Source, cx);
+    });
+    redraw_status_bar_test(visual);
+    let source_start = original.find("alpha_beta").expect("source word offset");
+    editor.read_with(visual, |editor, cx| {
+        let source = editor.document.first_root().expect("Source block").read(cx);
+        assert_eq!(
+            source.selected_range,
+            source_start..source_start + "alpha_beta".len()
+        );
+        assert!(source.selection_reversed);
+        assert_eq!(editor.compute_source_cursor_position(cx), (5, 243));
+    });
+    root.read_with(visual, |root, cx| {
+        assert_eq!(root.compute_source_cursor_position(cx), (5, 243));
+    });
+
+    visual.simulate_input("S29");
+    redraw_status_bar_test(visual);
+    editor.read_with(visual, |editor, cx| {
+        assert_eq!(
+            editor.source_document.text(),
+            original.replacen("alpha_beta", "S29", 1)
+        );
+        assert_eq!(editor.compute_source_cursor_position(cx), (5, 246));
+    });
+    root.read_with(visual, |root, cx| {
+        assert_eq!(root.compute_source_cursor_position(cx), (5, 246));
+    });
+}
+
+/// 初始化编辑器渲染与输入依赖，确保回归走真实 GPUI 的焦点、按键和撤销路径。
+fn init_status_bar_test_app(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        crate::i18n::I18nManager::init(cx);
+        crate::theme::ThemeManager::init(cx);
+        crate::components::init(cx);
+    });
+}
+
+/// 等待异步投影和键盘事件完成，使光标断言观察到稳定编辑状态。
+fn redraw_status_bar_test(cx: &mut VisualTestContext) {
+    cx.update(|window, cx| window.draw(cx).clear());
+    cx.run_until_parked();
 }
