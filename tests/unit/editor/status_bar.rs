@@ -238,3 +238,115 @@ fn redraw_status_bar_test(cx: &mut VisualTestContext) {
     cx.update(|window, cx| window.draw(cx).clear());
     cx.run_until_parked();
 }
+
+/// 切到新文档后，底栏必须显示当前页的格式，不能沿用后台文档的 CRLF 与 BOM。
+#[gpui::test]
+async fn source_format_labels_follow_active_pane_document(cx: &mut TestAppContext) {
+    init_status_bar_test_app(cx);
+    let (root, visual) = cx.add_window_view(|_window, cx| {
+        crate::editor::Editor::from_markdown(cx, "\u{feff}background\r\ntext\r\n".into(), None)
+    });
+    root.update(visual, |root, cx| {
+        root.split_pane_toward(crate::editor::panes::PaneSplitDirection::Right, cx);
+    });
+    redraw_status_bar_test(visual);
+    root.read_with(visual, |root, cx| {
+        assert_eq!(
+            root.current_source_format_labels(&I18nStrings::en_us(), cx),
+            (
+                I18nStrings::en_us().status_bar_encoding_utf8_bom,
+                "CRLF".into()
+            )
+        );
+    });
+    root.update(visual, |root, cx| {
+        let focused = root
+            .pane_workspace
+            .as_ref()
+            .expect("workspace")
+            .read(cx)
+            .workspace()
+            .focused_pane();
+        assert!(root.new_document_tab_in_pane(focused, crate::editor::DocumentKind::Markdown, cx));
+    });
+    redraw_status_bar_test(visual);
+    root.read_with(visual, |root, cx| {
+        assert_eq!(
+            root.current_source_format_labels(&I18nStrings::en_us(), cx),
+            ("UTF-8".into(), "LF".into())
+        );
+    });
+}
+
+/// 底栏菜单调用必须仅改变活动文档，并沿用其格式历史；后台文档和只读视图不得受影响。
+#[gpui::test]
+async fn pane_line_ending_menu_targets_active_document_and_undo(cx: &mut TestAppContext) {
+    init_status_bar_test_app(cx);
+    let original = "background\r\ntext\r\n";
+    let (root, visual) = cx.add_window_view(|_window, cx| {
+        crate::editor::Editor::from_markdown(cx, original.into(), None)
+    });
+    root.update(visual, |root, cx| {
+        root.split_pane_toward(crate::editor::panes::PaneSplitDirection::Right, cx);
+    });
+    redraw_status_bar_test(visual);
+    let background = root.read_with(visual, |root, cx| {
+        root.focused_pane_entities(cx)
+            .0
+            .expect("background Markdown pane")
+    });
+    root.update(visual, |root, cx| {
+        let focused = root
+            .pane_workspace
+            .as_ref()
+            .expect("workspace")
+            .read(cx)
+            .workspace()
+            .focused_pane();
+        assert!(root.new_document_tab_in_pane(focused, crate::editor::DocumentKind::Markdown, cx));
+    });
+    redraw_status_bar_test(visual);
+    let pane = root.read_with(visual, |root, cx| {
+        root.focused_pane_entities(cx)
+            .0
+            .expect("active Markdown pane")
+    });
+    root.update(visual, |root, cx| {
+        root.normalize_line_endings(gmark_document::LineEnding::Cr, cx)
+    });
+    redraw_status_bar_test(visual);
+    background.read_with(visual, |background, _| {
+        assert_eq!(
+            background.source_document.serialized_bytes(),
+            original.as_bytes()
+        );
+    });
+    pane.read_with(visual, |pane, _| {
+        assert_eq!(
+            pane.source_document.source_format().dominant,
+            gmark_document::LineEnding::Cr
+        );
+        assert!(pane.source_document.is_dirty());
+        assert_eq!(pane.undo_history.len(), 1);
+    });
+    pane.update(visual, |pane, cx| pane.undo_document(cx));
+    redraw_status_bar_test(visual);
+    pane.read_with(visual, |pane, _| {
+        assert_eq!(
+            pane.source_document.source_format().dominant,
+            gmark_document::LineEnding::Lf
+        );
+        assert!(pane.source_document.text().is_empty());
+    });
+    root.update(visual, |root, cx| {
+        root.set_view_mode(super::super::ViewMode::Preview, cx)
+    });
+    redraw_status_bar_test(visual);
+    let revision = pane.read_with(visual, |pane, _| pane.source_document.revision());
+    root.update(visual, |root, cx| {
+        root.normalize_line_endings(gmark_document::LineEnding::CrLf, cx)
+    });
+    pane.read_with(visual, |pane, _| {
+        assert_eq!(pane.source_document.revision(), revision)
+    });
+}

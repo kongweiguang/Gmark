@@ -234,66 +234,33 @@ impl Editor {
         self.request_save_document_as(cx);
     }
 
+    /// 路由集中在实际格式入口，保证菜单和快捷动作使用相同文档、只读与历史边界。
     pub(crate) fn on_normalize_line_endings_lf(
         &mut self,
         _: &crate::components::NormalizeLineEndingsLf,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.pane_canvas {
-            let (markdown, host) = self.focused_pane_entities(cx);
-            if let Some(editor) = markdown {
-                editor.update(cx, |editor, cx| {
-                    editor.normalize_line_endings(gmark_document::LineEnding::Lf, cx)
-                });
-                return;
-            }
-            if host.is_some() {
-                return;
-            }
-        }
         self.normalize_line_endings(gmark_document::LineEnding::Lf, cx);
     }
 
+    /// 复用实际格式入口的目标判定，避免动作与底栏菜单各自维护窗格规则。
     pub(crate) fn on_normalize_line_endings_crlf(
         &mut self,
         _: &crate::components::NormalizeLineEndingsCrLf,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.pane_canvas {
-            let (markdown, host) = self.focused_pane_entities(cx);
-            if let Some(editor) = markdown {
-                editor.update(cx, |editor, cx| {
-                    editor.normalize_line_endings(gmark_document::LineEnding::CrLf, cx)
-                });
-                return;
-            }
-            if host.is_some() {
-                return;
-            }
-        }
         self.normalize_line_endings(gmark_document::LineEnding::CrLf, cx);
     }
 
+    /// 同一入口负责活动文档和原子格式历史，CR 仅作为目标样式传入。
     pub(crate) fn on_normalize_line_endings_cr(
         &mut self,
         _: &crate::components::NormalizeLineEndingsCr,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.pane_canvas {
-            let (markdown, host) = self.focused_pane_entities(cx);
-            if let Some(editor) = markdown {
-                editor.update(cx, |editor, cx| {
-                    editor.normalize_line_endings(gmark_document::LineEnding::Cr, cx)
-                });
-                return;
-            }
-            if host.is_some() {
-                return;
-            }
-        }
         self.normalize_line_endings(gmark_document::LineEnding::Cr, cx);
     }
 

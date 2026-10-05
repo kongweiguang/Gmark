@@ -346,11 +346,7 @@ impl Editor {
         }
 
         let viewport_width = viewport_width_for_status(window);
-        let (resident_encoding, line_ending) = source_format_labels(
-            &self.source_document.source_format_summary(),
-            &self.source_encoding,
-            strings,
-        );
+        let (resident_encoding, line_ending) = self.current_source_format_labels(strings, cx);
         let encoding = self
             .document_host
             .as_ref()

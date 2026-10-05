@@ -8,8 +8,18 @@ use gpui::*;
 use super::*;
 
 impl Editor {
-    /// Explicitly normalizes on-disk line endings as one non-coalescible undo transaction.
+    /// 菜单与动作共用活动窗格路由；仅所属可编辑文档提交一次格式历史，不能修改窗口壳。
     pub(crate) fn normalize_line_endings(&mut self, ending: LineEnding, cx: &mut Context<Self>) {
+        if !self.pane_canvas {
+            let (markdown, host) = self.focused_pane_entities(cx);
+            if let Some(editor) = markdown {
+                editor.update(cx, |editor, cx| editor.normalize_line_endings(ending, cx));
+                return;
+            }
+            if host.is_some() {
+                return;
+            }
+        }
         if !self.document_surface_is_editable() || self.has_active_ime_composition(cx) {
             return;
         }

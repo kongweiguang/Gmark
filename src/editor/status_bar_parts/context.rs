@@ -4,11 +4,28 @@
 
 use gpui::App;
 
+use crate::i18n::I18nStrings;
 use crate::preferences::StatusBarPreferences;
 
 use super::Editor;
 
 impl Editor {
+    /// 窗口壳不再持有正文；格式与编码随活动窗格读取，按钮和窄窗菜单共用同一来源。
+    pub(super) fn current_source_format_labels(
+        &self,
+        strings: &I18nStrings,
+        cx: &App,
+    ) -> (String, String) {
+        if let Some(editor) = self.focused_pane_entities(cx).0 {
+            return editor.read(cx).current_source_format_labels(strings, cx);
+        }
+        super::source_format_labels(
+            &self.source_document.source_format_summary(),
+            &self.source_encoding,
+            strings,
+        )
+    }
+
     // Reason: Keep preference access beside the context query so the renderer only coordinates
     // the resulting status-bar regions and does not own lookup details.
     pub(super) fn status_bar_preferences(&self, cx: &App) -> StatusBarPreferences {
