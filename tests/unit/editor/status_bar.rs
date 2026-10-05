@@ -350,3 +350,71 @@ async fn pane_line_ending_menu_targets_active_document_and_undo(cx: &mut TestApp
         assert_eq!(pane.source_document.revision(), revision)
     });
 }
+
+/// 鼠标和键盘选择格式后立即续写，验证菜单移除不会遗留无效焦点，且源码选区不被折叠。
+#[gpui::test]
+async fn pane_line_ending_choice_restores_source_focus_for_immediate_typing(
+    cx: &mut TestAppContext,
+) {
+    init_status_bar_test_app(cx);
+    let (root, visual) = cx.add_window_view(|_window, cx| {
+        crate::editor::Editor::from_markdown(cx, "alpha\nbeta\n".into(), None)
+    });
+    visual.simulate_resize(gpui::size(gpui::px(960.0), gpui::px(640.0)));
+    root.update(visual, |root, cx| {
+        root.split_pane_toward(crate::editor::panes::PaneSplitDirection::Right, cx);
+        root.set_view_mode(super::super::ViewMode::Source, cx);
+    });
+    redraw_status_bar_test(visual);
+    let pane = root.read_with(visual, |root, cx| root.focused_pane_entities(cx).0.unwrap());
+    let source = pane.read_with(visual, |pane, _cx| {
+        pane.document.first_root().unwrap().clone()
+    });
+    source.update_in(visual, |source, window, cx| {
+        source.selected_range = 0..5;
+        source.selection_reversed = true;
+        source.focus_handle.focus(window);
+        cx.notify();
+    });
+    redraw_status_bar_test(visual);
+    let picker = visual
+        .debug_bounds("status-bar-line-ending-button")
+        .unwrap();
+    visual.simulate_click(picker.center(), gpui::Modifiers::default());
+    redraw_status_bar_test(visual);
+    let crlf = visual.debug_bounds("status-bar-line-ending-crlf").unwrap();
+    visual.simulate_click(crlf.center(), gpui::Modifiers::default());
+    redraw_status_bar_test(visual);
+    visual.update(|window, cx| assert!(source.read(cx).focus_handle.is_focused(window)));
+    source.read_with(visual, |source, _cx| {
+        assert_eq!(source.selected_range, 0..5);
+        assert!(source.selection_reversed);
+    });
+    visual.simulate_input("X");
+    redraw_status_bar_test(visual);
+    pane.read_with(visual, |pane, _cx| {
+        assert_eq!(pane.source_document.serialized_bytes(), b"X\r\nbeta\r\n");
+    });
+    pane.update(visual, |pane, cx| pane.undo_document(cx));
+    redraw_status_bar_test(visual);
+    let restored_source = pane.read_with(visual, |pane, _cx| {
+        pane.document.first_root().unwrap().clone()
+    });
+    root.update_in(visual, |root, window, _cx| {
+        root.status_bar
+            .line_ending_button_focus_handle
+            .as_ref()
+            .unwrap()
+            .focus(window);
+    });
+    visual.simulate_keystrokes("enter");
+    redraw_status_bar_test(visual);
+    visual.simulate_keystrokes("enter");
+    redraw_status_bar_test(visual);
+    visual.update(|window, cx| assert!(restored_source.read(cx).focus_handle.is_focused(window)));
+    visual.simulate_input("N");
+    redraw_status_bar_test(visual);
+    pane.read_with(visual, |pane, _cx| {
+        assert_eq!(pane.source_document.serialized_bytes(), b"N\nbeta\n");
+    });
+}

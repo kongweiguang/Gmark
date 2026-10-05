@@ -67,6 +67,8 @@ pub(super) struct StatusBarState {
     /// 下拉入口与菜单项跨 render 保持稳定焦点身份，菜单关闭后可准确回到触发按钮。
     pub(super) mode_menu_open: bool,
     pub(super) line_ending_menu_open: bool,
+    /// 只归还同一窗格输入实体的焦点；菜单期间换文档不能跳回旧输入目标。
+    pub(super) line_ending_restore_focus: Option<(EntityId, FocusHandle)>,
     pub(super) mode_button_focus_handle: Option<FocusHandle>,
     pub(super) mode_focus_handles: Option<[FocusHandle; 4]>,
     pub(super) line_ending_button_focus_handle: Option<FocusHandle>,

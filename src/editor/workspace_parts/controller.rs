@@ -481,7 +481,8 @@ impl Editor {
             .clone()
     }
 
-    pub(super) fn focus_editor_after_workspace(
+    /// 工作区与状态菜单复用既有活动输入实体，仅归还焦点，不改变正文或选区。
+    pub(in crate::editor) fn focus_editor_after_workspace(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,

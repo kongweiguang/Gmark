@@ -4,6 +4,7 @@ use gmark_document::LineEnding;
 
 use super::*;
 
+/// 打开菜单前保存输入焦点，格式选择不应让后续输入或保存落在已经移除的菜单项。
 pub(in crate::editor) fn render_line_ending_picker(
     state: &mut StatusBarState,
     current_label: String,
@@ -81,17 +82,31 @@ pub(in crate::editor) fn render_line_ending_picker(
                 .text_color(theme.colors.workbench.text_secondary)
                 .child(current_label)
                 .on_click(cx.listener(move |editor, _: &ClickEvent, window, cx| {
+                    if !editor.status_bar.line_ending_menu_open {
+                        let owner = editor
+                            .focused_pane_entities(cx)
+                            .0
+                            .map_or(cx.entity_id(), |entity| entity.entity_id());
+                        editor.status_bar.line_ending_restore_focus = window
+                            .focused(cx)
+                            .filter(|_| !pointer_focus_handle.is_focused(window))
+                            .map(|focus| (owner, focus));
+                    }
                     pointer_focus_handle.focus(window);
                     editor.status_bar.format_overflow_open = false;
                     editor.status_bar.mode_menu_open = false;
                     editor.status_bar.line_ending_menu_open =
                         !editor.status_bar.line_ending_menu_open;
+                    if !editor.status_bar.line_ending_menu_open {
+                        editor.status_bar.line_ending_restore_focus = None;
+                    }
                     cx.notify();
                 }))
                 .on_key_down(
                     cx.listener(move |editor, event: &KeyDownEvent, window, cx| {
                         match event.keystroke.key.as_str() {
                             "enter" | "space" => {
+                                editor.status_bar.line_ending_restore_focus = None;
                                 editor.status_bar.format_overflow_open = false;
                                 editor.status_bar.mode_menu_open = false;
                                 editor.status_bar.line_ending_menu_open =
@@ -135,6 +150,7 @@ pub(in crate::editor) fn render_line_ending_picker(
         .into_any_element()
 }
 
+/// 鼠标与键盘确认走同一收尾，先转换格式再恢复原选区所属输入的焦点。
 fn render_line_ending_menu_item(
     id: &'static str,
     label: &'static str,
@@ -147,7 +163,6 @@ fn render_line_ending_menu_item(
     cx: &mut Context<Editor>,
 ) -> AnyElement {
     let focus_handle = focus_handles[index].clone();
-    let pointer_focus_handle = focus_handle.clone();
     let keyboard_focus_handles = focus_handles.clone();
     div()
         .id(SharedString::from(format!("status-bar-line-ending-{id}")))
@@ -185,22 +200,19 @@ fn render_line_ending_menu_item(
                 .text_color(theme.colors.workbench.accent)
         }))
         .on_click(cx.listener(move |editor, _: &ClickEvent, window, cx| {
-            pointer_focus_handle.focus(window);
-            editor.status_bar.line_ending_menu_open = false;
-            editor.normalize_line_endings(ending, cx);
-            cx.notify();
+            editor.finish_line_ending_menu_choice(ending, window, cx);
             cx.stop_propagation();
         }))
         .on_key_down(
             cx.listener(move |editor, event: &KeyDownEvent, window, cx| {
                 match event.keystroke.key.as_str() {
                     "enter" | "space" => {
-                        editor.status_bar.line_ending_menu_open = false;
-                        editor.normalize_line_endings(ending, cx);
+                        editor.finish_line_ending_menu_choice(ending, window, cx);
                         cx.stop_propagation();
                     }
                     "escape" => {
                         editor.status_bar.line_ending_menu_open = false;
+                        editor.status_bar.line_ending_restore_focus = None;
                         button_focus_handle.focus(window);
                         cx.notify();
                         cx.stop_propagation();

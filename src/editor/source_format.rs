@@ -8,6 +8,33 @@ use gpui::*;
 use super::*;
 
 impl Editor {
+    /// 菜单项移除前结束格式动作并归还原输入焦点；键盘入口复用活动正文的既有焦点恢复。
+    pub(in crate::editor) fn finish_line_ending_menu_choice(
+        &mut self,
+        ending: LineEnding,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.status_bar.line_ending_menu_open = false;
+        self.normalize_line_endings(ending, cx);
+        let target = self.focused_pane_entities(cx).0;
+        let owner = target
+            .as_ref()
+            .map_or(cx.entity_id(), |entity| entity.entity_id());
+        if let Some((original_owner, focus)) = self.status_bar.line_ending_restore_focus.take()
+            && original_owner == owner
+        {
+            focus.focus(window);
+        } else if let Some(target) = target {
+            target.update(cx, |editor, cx| {
+                editor.focus_editor_after_workspace(window, cx)
+            });
+        } else {
+            self.focus_editor_after_workspace(window, cx);
+        }
+        cx.notify();
+    }
+
     /// 菜单与动作共用活动窗格路由；仅所属可编辑文档提交一次格式历史，不能修改窗口壳。
     pub(crate) fn normalize_line_endings(&mut self, ending: LineEnding, cx: &mut Context<Self>) {
         if !self.pane_canvas {
