@@ -44,20 +44,28 @@ impl PaneEditorCanvas {
         }
     }
 
+    /// 渲染逐帧同步模式；模式未变时不重走切换收尾，保留所属窗格的浮层和输入状态。
     pub(in crate::editor) fn set_view_mode(
         &mut self,
         mode: crate::editor::ViewMode,
         cx: &mut Context<Self>,
     ) {
+        if self.editor.read(cx).view_mode == mode {
+            return;
+        }
         self.editor
             .update(cx, |editor, cx| editor.set_view_mode(mode, cx));
     }
 
+    /// 焦点与标题共用活动窗格身份；切回来时必须重新发布标题，不能沿用兄弟窗格的窗口状态。
     pub(in crate::editor) fn set_focus_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.editor.update(cx, |editor, cx| {
             let changed = editor.pane_canvas_focus_enabled != enabled;
             editor.pane_canvas_focus_enabled = enabled;
             if enabled {
+                if changed {
+                    editor.pending_window_title_refresh = true;
+                }
                 if changed && editor.pending_focus.is_none() {
                     editor.pending_focus = editor
                         .active_entity_id
@@ -159,9 +167,12 @@ impl Render for PaneEditorCanvas {
 /// lifecycle synchronizer.
 pub struct PaneDocumentHostCanvas {
     host: Entity<DocumentHost>,
+    focus_enabled: bool,
+    published_window_title: Option<String>,
 }
 
 impl PaneDocumentHostCanvas {
+    /// Host 通知同时刷新外层标题；正文仍只由所属实体绘制，不建立第二套文档状态。
     pub(in crate::editor) fn new(
         cx: &mut Context<Self>,
         path: PathBuf,
@@ -169,7 +180,22 @@ impl PaneDocumentHostCanvas {
         detached: DetachedDocumentHostView,
     ) -> Self {
         let host = cx.new(move |cx| DocumentHost::from_detached(path, probe, detached, cx));
-        Self { host }
+        cx.observe(&host, |_canvas, _host, cx| cx.notify()).detach();
+        Self {
+            host,
+            focus_enabled: false,
+            published_window_title: None,
+        }
+    }
+
+    /// 标题归属沿用活动窗格身份；重新激活时强制发布，防止保留兄弟 Markdown 的标题。
+    pub(in crate::editor) fn set_focus_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.focus_enabled == enabled {
+            return;
+        }
+        self.focus_enabled = enabled;
+        self.published_window_title = None;
+        cx.notify();
     }
 
     pub fn host(&self) -> Entity<DocumentHost> {
@@ -201,8 +227,9 @@ impl PaneDocumentHostCanvas {
         self.host.read(cx).accessibility_snapshot(cx)
     }
 
+    /// 与单窗使用同一输入表面身份，避免子窗格读屏内容滞后于候选或当前文字。
     pub(crate) fn accessibility_revision(&self, cx: &gpui::App) -> u64 {
-        self.host.read(cx).accessibility_revision()
+        self.host.read(cx).accessibility_revision(cx)
     }
 
     pub(in crate::editor) fn detach(
@@ -214,7 +241,17 @@ impl PaneDocumentHostCanvas {
 }
 
 impl Render for PaneDocumentHostCanvas {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl gpui::IntoElement {
+    /// 仅活动 Host 发布路径和 dirty，标题未变时跳过系统调用；后台窗格不得覆盖窗口状态。
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        if self.focus_enabled {
+            let host = self.host.read(cx);
+            let strings = cx.global::<crate::i18n::I18nManager>().strings_arc();
+            let title = Editor::window_title(Some(host.path()), host.is_dirty(), &strings);
+            if self.published_window_title.as_ref() != Some(&title) {
+                window.set_window_title(&title);
+                self.published_window_title = Some(title);
+            }
+        }
         div()
             .id("pane-document-host-canvas")
             .w_full()

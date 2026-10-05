@@ -75,6 +75,25 @@ impl DocumentSession {
         Ok(self.store.revision())
     }
 
+    /// 通过共享 store 应用 Controller 标记的输入组，并统一更新 dirty 与 resident 统计。
+    pub fn apply_typing_transaction(
+        &mut self,
+        transaction: &Transaction,
+        group_id: gmark_document_core::TypingGroupId,
+    ) -> Result<DocumentRevision, SessionEditError> {
+        self.store.apply_typing_transaction(transaction, group_id)?;
+        if !transaction.edits.is_empty() {
+            self.dirty = true;
+        }
+        self.refresh_resident_profile();
+        Ok(self.store.revision())
+    }
+
+    /// 结束 Resident 与 Paged 的输入合并资格而不改动已提交的历史项。
+    pub fn break_typing_group(&mut self) {
+        self.store.break_typing_group();
+    }
+
     /// 仅允许 resident 文档规范化行尾，避免 paged 后端丢失原始编码格式信息。
     pub fn normalize_line_endings(&mut self, ending: LineEnding) -> Result<bool, SessionEditError> {
         let Some(document) = self.resident_source_document_mut() else {

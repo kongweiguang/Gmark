@@ -67,6 +67,7 @@ impl DocumentController {
             views: BTreeMap::new(),
             undo_transactions: Vec::new(),
             redo_transactions: Vec::new(),
+            active_typing_group: None,
             next_transaction_id: 1,
         }
     }
@@ -172,6 +173,20 @@ impl DocumentController {
         expected_revision: DocumentRevision,
         expected_identity: &FileIdentity,
     ) -> Result<(), ControllerError> {
+        self.validate_external_reload_baseline(expected_revision, expected_identity)?;
+        if self.session.dirty {
+            self.emit_external_conflict(self.session.file_identity.clone());
+            return Err(ControllerError::DocumentDirty);
+        }
+        Ok(())
+    }
+
+    /// 重载只绕过 dirty 检查；revision 与身份仍必须和 IO 前观察值一致。
+    fn validate_external_reload_baseline(
+        &mut self,
+        expected_revision: DocumentRevision,
+        expected_identity: &FileIdentity,
+    ) -> Result<(), ControllerError> {
         if DocumentRevision(self.session.revision()) != expected_revision {
             self.emit_external_conflict(self.session.file_identity.clone());
             return Err(ControllerError::ExternalRevisionMismatch {
@@ -186,10 +201,6 @@ impl DocumentController {
                 actual: self.session.file_identity.clone(),
             });
         }
-        if self.session.dirty {
-            self.emit_external_conflict(self.session.file_identity.clone());
-            return Err(ControllerError::DocumentDirty);
-        }
         Ok(())
     }
 
@@ -202,6 +213,7 @@ impl DocumentController {
         index: LineIndex,
         identity: FileIdentity,
     ) -> Result<(), ControllerError> {
+        self.break_typing_group();
         self.validate_external_transition(expected_revision, &expected_identity)?;
         let before_identity = self.session.file_identity.clone();
         let before_dirty = self.session.dirty;
@@ -242,7 +254,29 @@ impl DocumentController {
         expected_identity: FileIdentity,
         prepared: DocumentSession,
     ) -> Result<(), ControllerError> {
+        self.break_typing_group();
         self.validate_external_transition(expected_revision, &expected_identity)?;
+        self.install_prepared_document(prepared)
+    }
+
+    /// 仅供显式确认丢弃本地修改后的重载使用，并继续拒绝读取期间发生的并发变化。
+    pub fn reload_prepared_document_after_confirmation(
+        &mut self,
+        expected_revision: DocumentRevision,
+        expected_identity: FileIdentity,
+        prepared: DocumentSession,
+    ) -> Result<(), ControllerError> {
+        self.break_typing_group();
+        self.validate_external_reload_baseline(expected_revision, &expected_identity)?;
+        self.install_prepared_document(prepared)
+    }
+
+    /// 统一安装 prepared session，确保所有 view 的选择、历史和事件一起切换。
+    fn install_prepared_document(
+        &mut self,
+        prepared: DocumentSession,
+    ) -> Result<(), ControllerError> {
+        self.break_typing_group();
         let before_identity = self.session.file_identity.clone();
         let before_dirty = self.session.dirty;
         let revision = super::super::next_revision(DocumentRevision(self.session.revision()))?;
@@ -280,6 +314,7 @@ impl DocumentController {
         transaction_id: TransactionId,
         encoding: TextEncoding,
     ) -> Result<DocumentRevision, ControllerError> {
+        self.break_typing_group();
         self.register_view(view_id);
         let before_dirty = self.session.dirty;
         if self.session.set_encoding(encoding)? {
@@ -311,6 +346,7 @@ impl DocumentController {
         &mut self,
         expected_revision: DocumentRevision,
     ) -> Result<bool, ControllerError> {
+        self.break_typing_group();
         let current = DocumentRevision(self.session.revision());
         if current != expected_revision {
             return Err(ControllerError::ExternalRevisionMismatch {
@@ -349,16 +385,32 @@ impl DocumentController {
         });
     }
 
+    /// 关闭输入组所属 view 时清除合并资格，再释放该视图状态。
     pub fn close_view(&mut self, view_id: DocumentViewInstanceId) {
+        if self
+            .active_typing_group
+            .as_ref()
+            .is_some_and(|group| group.view_id == view_id)
+        {
+            self.break_typing_group();
+        }
         self.views.remove(&view_id);
     }
 
+    /// 只有真实 selection 变化才断开输入组，避免无效同步信号切碎撤销历史。
     pub fn set_view_selection(
         &mut self,
         view_id: DocumentViewInstanceId,
         selection: SourceSelection,
     ) {
         self.register_view(view_id);
+        if self
+            .views
+            .get(&view_id)
+            .is_some_and(|view| view.selection != selection)
+        {
+            self.break_typing_group();
+        }
         if let Some(view) = self.views.get_mut(&view_id) {
             view.selection = selection;
         }

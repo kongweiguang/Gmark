@@ -44,12 +44,16 @@ impl Editor {
         }));
     }
 
+    /// 未提交输入保留所属树直到剪贴板恢复；其余视图继续按共享事件更新，不写回旧投影。
     /// Drain the per-view Controller cursor before building a frame.  A
     /// sibling view can mutate the shared document without touching this
     /// Editor entity; RevisionChanged therefore rebuilds only this view's
     /// projection from the immutable adapter snapshot, never by issuing a
     /// compensating transaction.
     pub(in crate::editor) fn sync_shared_document_events(&mut self, cx: &mut Context<Self>) {
+        if self.document.source_commit_error().is_some() {
+            return;
+        }
         let mut polled = self.source_document.take_queued_events().unwrap_or(
             crate::editor::document_session::DocumentEventPoll {
                 events: Vec::new(),

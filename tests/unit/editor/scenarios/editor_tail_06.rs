@@ -111,6 +111,7 @@ async fn window_save_action_saves_current_editor_without_global_menu_route(
 }
 
 #[gpui::test]
+/// 导出不得清除真实文字修改的 dirty；无变化的 mark_dirty 不代表用户已编辑。
 async fn export_html_writes_rendered_document_without_changing_editor_state(
     cx: &mut TestAppContext,
 ) {
@@ -127,6 +128,12 @@ async fn export_html_writes_rendered_document_without_changing_editor_state(
     });
 
     editor.update(cx, |editor, cx| {
+        let block = editor.document.root_blocks()[1].clone();
+        block.update(cx, |block, cx| {
+            block.record.set_title(InlineTextTree::plain("body edited"));
+            block.sync_render_cache();
+            cx.notify();
+        });
         editor.mark_dirty(cx);
         assert!(editor.document_dirty);
         assert!(editor.file_path.is_none());
@@ -139,7 +146,7 @@ async fn export_html_writes_rendered_document_without_changing_editor_state(
 
     let html = fs::read_to_string(&export_path).expect("read exported html");
     assert!(html.contains("<h1 id=\"title\">Title</h1>"));
-    assert!(html.contains("<p>body</p>"));
+    assert!(html.contains("<p>body edited</p>"));
 }
 
 #[gpui::test]
@@ -318,6 +325,7 @@ async fn dropped_paths_pick_first_supported_document_or_image(cx: &mut TestAppCo
 }
 
 #[gpui::test]
+/// 替换提示保护真实未提交到磁盘的文字，取消必须保留该正文和所属 dirty。
 async fn dirty_drop_waits_for_replace_decision_and_cancel_preserves_document(
     cx: &mut TestAppContext,
 ) {
@@ -332,7 +340,15 @@ async fn dirty_drop_waits_for_replace_decision_and_cancel_preserves_document(
 
     let (editor, cx) =
         cx.add_window_view(|_window, cx| Editor::from_markdown(cx, "current".to_string(), None));
-    editor.update(cx, |editor, cx| editor.mark_dirty(cx));
+    editor.update(cx, |editor, cx| {
+        let block = editor.document.first_root().unwrap().clone();
+        block.update(cx, |block, cx| {
+            block.record.set_title(InlineTextTree::plain("current edited"));
+            block.sync_render_cache();
+            cx.notify();
+        });
+        editor.mark_dirty(cx);
+    });
 
     cx.update(|window, cx| {
         editor.update(cx, |editor, cx| {
@@ -344,7 +360,7 @@ async fn dirty_drop_waits_for_replace_decision_and_cancel_preserves_document(
     editor.read_with(cx, |editor, cx| {
         assert!(editor.document_dirty);
         assert!(editor.show_drop_replace_dialog);
-        assert_eq!(editor.document.markdown_text(cx), "current");
+        assert_eq!(editor.document.markdown_text(cx), "current edited");
         assert!(editor.pending_drop_replace_path.is_some());
     });
 
@@ -354,7 +370,7 @@ async fn dirty_drop_waits_for_replace_decision_and_cancel_preserves_document(
         assert!(editor.document_dirty);
         assert!(!editor.show_drop_replace_dialog);
         assert!(editor.pending_drop_replace_path.is_none());
-        assert_eq!(editor.document.markdown_text(cx), "current");
+        assert_eq!(editor.document.markdown_text(cx), "current edited");
     });
 }
 

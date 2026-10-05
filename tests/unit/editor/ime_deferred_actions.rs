@@ -163,7 +163,7 @@ async fn ime_defers_pointer_target_selection_across_tab_reorder(cx: &mut TestApp
     });
 }
 
-/// Drops an obsolete entity before replay so a replacement at the same tree slot is untouched.
+/// 脱树目标须在真实结构提交后丢弃；同槽位的新实体不能继承旧指针意图或旧源码权限。
 #[gpui::test]
 async fn ime_drops_pointer_target_after_block_detaches(cx: &mut TestAppContext) {
     init(cx);
@@ -220,6 +220,8 @@ async fn ime_drops_pointer_target_after_block_detaches(cx: &mut TestAppContext) 
                 );
                 replacement
             });
+            editor.mark_dirty(cx);
+            assert!(editor.document.source_commit_error().is_none());
             editor.refresh_stable_document_snapshot(cx);
             assert_ne!(replacement.entity_id(), target.entity_id());
 

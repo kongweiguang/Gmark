@@ -73,9 +73,31 @@ impl PagedDocumentError {
     /// caller must refresh its disk baseline before offering another save.
     #[must_use]
     pub fn target_may_have_changed(&self) -> bool {
-        matches!(self, Self::Persist { .. })
+        match self {
+            Self::Persist { source, .. } => !source.get_ref().is_some_and(|cause| {
+                cause
+                    .downcast_ref::<AtomicReplacementNotCommitted>()
+                    .is_some()
+            }),
+            _ => false,
+        }
     }
 }
+
+/// 私有标记只附加到确认目标与暂存文件仍完整的 ReplaceFile 失败，避免误判其它持久化阶段。
+#[derive(Debug, Error)]
+#[error("atomic replacement did not commit: {0}")]
+struct AtomicReplacementNotCommitted(#[source] std::io::Error);
+
+#[cfg(windows)]
+#[derive(Debug, Error)]
+#[error("atomic replacement was cancelled before commit")]
+struct AtomicReplacementCancelled;
+
+#[cfg(windows)]
+#[derive(Debug, Error)]
+#[error("atomic replacement destination changed during retry")]
+struct AtomicReplacementSourceChanged;
 
 const CACHE_PAGE_BYTES: u64 = 256 * 1024;
 const CACHE_PAGE_COUNT: usize = 256;
@@ -340,48 +362,220 @@ pub(crate) fn sync_parent_directory(_parent: &Path) -> Result<(), PagedDocumentE
 /// 把同目录、已 fsync 的临时文件原子替换为目标文件。
 ///
 /// Windows 的通用 rename/persist 在目标仍被另一个编辑快照持有时会返回 AccessDenied；
-/// 已有目标改用安全的 ReplaceFileW 封装，Save As 新目标再回退到 MoveFileExW。
+/// 已有目标改用安全的 ReplaceFileW 封装，Save As 新目标再回退到 MoveFileExW。取消令牌覆盖
+/// 有界重试等待，放弃前仍由 TempPath 清理未提交的暂存文件。
 #[cfg(windows)]
 pub(crate) fn persist_temporary(
     temporary: tempfile::NamedTempFile,
     path: &Path,
+    cancellation: &crate::SearchCancellation,
 ) -> Result<(), PagedDocumentError> {
     let temporary_path = temporary.into_temp_path();
-    replace_existing_windows(&temporary_path, path).map_err(|source| PagedDocumentError::Persist {
-        path: path.to_path_buf(),
-        source,
-    })
+    if cancellation.is_cancelled() {
+        return Err(PagedDocumentError::Cancelled);
+    }
+    match replace_existing_windows(&temporary_path, path, cancellation) {
+        Ok(()) => Ok(()),
+        Err(source) => Err(windows_persist_error(path, source)),
+    }
 }
 
-/// Replace an existing destination through the winsafe wrapper around
-/// ReplaceFileW.  This permits replacement while the destination is held by a
-/// FILE_SHARE_DELETE reader.  A missing destination (or a non-Unicode Windows
-/// path that the `&str` wrapper cannot represent) keeps the atomicwrites
-/// MoveFileEx fallback used by Save As.
+/// 保留 ReplaceFile 的不确定错误，并把经私有标记确认的取消与外部改写送入对应领域流程。
 #[cfg(windows)]
-fn replace_existing_windows(source: &Path, destination: &Path) -> std::io::Result<()> {
+fn windows_persist_error(path: &Path, source: std::io::Error) -> PagedDocumentError {
+    match source.get_ref() {
+        Some(cause) if cause.downcast_ref::<AtomicReplacementCancelled>().is_some() => {
+            PagedDocumentError::Cancelled
+        }
+        Some(cause)
+            if cause
+                .downcast_ref::<AtomicReplacementSourceChanged>()
+                .is_some() =>
+        {
+            PagedDocumentError::SourceChanged
+        }
+        _ => PagedDocumentError::Persist {
+            path: path.to_path_buf(),
+            source,
+        },
+    }
+}
+
+/// 已有目标通过 ReplaceFileW 原子替换，并对短暂锁定做有界重试；每次重试前复核原目标与
+/// 暂存文件。新目标或无法传入 winsafe 字符串接口的路径继续使用 Save As 原子回退。
+#[cfg(windows)]
+fn replace_existing_windows(
+    source: &Path,
+    destination: &Path,
+    cancellation: &crate::SearchCancellation,
+) -> std::io::Result<()> {
     let source_path = source;
     let destination_path = destination;
+    if cancellation.is_cancelled() {
+        return Err(windows_replace_cancelled());
+    }
     let destination_exists = match std::fs::metadata(destination) {
         Ok(_) => true,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
         Err(error) => return Err(error),
     };
-    let (Some(source), Some(destination)) = (source_path.to_str(), destination_path.to_str())
-    else {
+    if source_path.to_str().is_none() || destination_path.to_str().is_none() {
+        if cancellation.is_cancelled() {
+            return Err(windows_replace_cancelled());
+        }
         return atomicwrites::replace_atomic(source_path, destination_path);
-    };
+    }
     if !destination_exists {
+        if cancellation.is_cancelled() {
+            return Err(windows_replace_cancelled());
+        }
         return atomicwrites::replace_atomic(source_path, destination_path);
     }
 
+    let original_identity = windows_file_identity(destination_path)?;
+    replace_existing_windows_with_retry(
+        source_path,
+        destination_path,
+        &original_identity,
+        cancellation,
+        replace_existing_windows_once,
+        std::thread::sleep,
+    )
+}
+
+#[cfg(windows)]
+const WINDOWS_REPLACE_RETRY_DELAYS: [std::time::Duration; 3] = [
+    std::time::Duration::from_millis(20),
+    std::time::Duration::from_millis(40),
+    std::time::Duration::from_millis(80),
+];
+
+#[cfg(windows)]
+const WINDOWS_ERROR_SHARING_VIOLATION: i32 = 32;
+#[cfg(windows)]
+const WINDOWS_ERROR_LOCK_VIOLATION: i32 = 33;
+#[cfg(windows)]
+const WINDOWS_ERROR_UNABLE_TO_REMOVE_REPLACED: i32 = 1175;
+
+/// identity 查询失败时保留底层 OS 错误，便于区分共享冲突与权限等不可重试原因。
+#[cfg(windows)]
+fn windows_file_identity(path: &Path) -> std::io::Result<FileIdentity> {
+    FileSource::open(path)
+        .and_then(|source| source.identity())
+        .map_err(|error| match error {
+            PagedDocumentError::Io { source, .. } => source,
+            error => std::io::Error::other(error),
+        })
+}
+
+/// 仅对仍可安全再次原子尝试的 Win32 错误重试；次数与退避总时长固定，并在尝试前检查取消。
+#[cfg(windows)]
+fn replace_existing_windows_with_retry(
+    source: &Path,
+    destination: &Path,
+    original_identity: &FileIdentity,
+    cancellation: &crate::SearchCancellation,
+    mut replace: impl FnMut(&Path, &Path) -> std::io::Result<()>,
+    mut wait: impl FnMut(std::time::Duration),
+) -> std::io::Result<()> {
+    let mut retries = 0;
+    loop {
+        if cancellation.is_cancelled() {
+            return Err(windows_replace_cancelled());
+        }
+        match replace(source, destination) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                if !is_retryable_windows_replace_error(&error) {
+                    return Err(error);
+                }
+                if cancellation.is_cancelled() {
+                    return Err(windows_replace_cancelled());
+                }
+                if retries >= WINDOWS_REPLACE_RETRY_DELAYS.len() {
+                    verify_windows_replace_retry_state(source, destination, original_identity)?;
+                    return Err(std::io::Error::new(
+                        error.kind(),
+                        AtomicReplacementNotCommitted(error),
+                    ));
+                }
+                wait(WINDOWS_REPLACE_RETRY_DELAYS[retries]);
+                if cancellation.is_cancelled() {
+                    return Err(windows_replace_cancelled());
+                }
+                verify_windows_replace_retry_state(source, destination, original_identity)?;
+                retries += 1;
+            }
+        }
+    }
+}
+
+/// 每次退避后同时核对目标身份和暂存文件，防止外部改动或暂存丢失演变为覆盖操作。
+#[cfg(windows)]
+fn verify_windows_replace_retry_state(
+    source: &Path,
+    destination: &Path,
+    original_identity: &FileIdentity,
+) -> std::io::Result<()> {
+    let current_identity = match windows_file_identity(destination) {
+        Ok(identity) => identity,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(windows_replace_source_changed());
+        }
+        Err(error) => return Err(error),
+    };
+    if current_identity != *original_identity {
+        return Err(windows_replace_source_changed());
+    }
+    let source_metadata = std::fs::metadata(source)?;
+    if !source_metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "temporary replacement source is no longer a file",
+        ));
+    }
+    Ok(())
+}
+
+/// 仅将共享/锁定冲突和 ReplaceFile 无法删除旧目标视为可重试；其它错误可能已越过部分替换边界。
+#[cfg(windows)]
+fn is_retryable_windows_replace_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(
+            WINDOWS_ERROR_SHARING_VIOLATION
+                | WINDOWS_ERROR_LOCK_VIOLATION
+                | WINDOWS_ERROR_UNABLE_TO_REMOVE_REPLACED
+        )
+    )
+}
+
+/// 隔离真实原子 API，使测试能注入首轮失败并让后续尝试仍走同一 Windows 替换接口。
+#[cfg(windows)]
+fn replace_existing_windows_once(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let (Some(source_name), Some(destination_name)) = (source.to_str(), destination.to_str())
+    else {
+        return atomicwrites::replace_atomic(source, destination);
+    };
     winsafe::ReplaceFile(
-        destination,
-        source,
+        destination_name,
+        source_name,
         None,
         winsafe::co::REPLACEFILE::WRITE_THROUGH,
     )
     .map_err(|error| std::io::Error::from_raw_os_error(error.raw() as i32))
+}
+
+/// 用 Interrupted 表示取消的替换尝试；持久化边界再映射为领域取消错误并清理暂存文件。
+#[cfg(windows)]
+fn windows_replace_cancelled() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Interrupted, AtomicReplacementCancelled)
+}
+
+/// 用私有原因标记身份变化，使持久化边界返回 SourceChanged 并进入既有冲突恢复流程。
+#[cfg(windows)]
+fn windows_replace_source_changed() -> std::io::Error {
+    std::io::Error::other(AtomicReplacementSourceChanged)
 }
 
 /// Stream an immutable snapshot into an atomic replacement without retaining
@@ -436,7 +630,7 @@ pub fn atomic_write_stream(
     if cancellation.is_cancelled() {
         return Err(PagedDocumentError::Cancelled);
     }
-    persist_temporary(temporary, path)?;
+    persist_temporary(temporary, path, cancellation)?;
     sync_parent_directory(parent).map_err(|error| post_persist_error(path, error))?;
     FileSource::open(path)
         .and_then(|source| source.identity())
@@ -467,10 +661,15 @@ fn identity_matches(expected: &FileIdentity, current: &FileIdentity) -> bool {
 }
 
 #[cfg(not(windows))]
+/// 调用平台原子持久化前响应取消，避免提交已过期的暂存内容。
 pub(crate) fn persist_temporary(
     temporary: tempfile::NamedTempFile,
     path: &Path,
+    cancellation: &crate::SearchCancellation,
 ) -> Result<(), PagedDocumentError> {
+    if cancellation.is_cancelled() {
+        return Err(PagedDocumentError::Cancelled);
+    }
     let persisted = temporary
         .persist(path)
         .map_err(|error| PagedDocumentError::Persist {

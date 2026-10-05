@@ -2,6 +2,7 @@
 
 //! Journal replay and recovered-session installation.
 
+use super::coordinator::RecoveredAutoSaveGate;
 use super::*;
 
 impl DocumentHost {
@@ -131,6 +132,9 @@ impl DocumentHost {
                                 .top_byte_anchor = selection.head;
                         }
                         view.install_document_session(document);
+                        if let Some(document) = view.document.as_ref() {
+                            RecoveredAutoSaveGate::require_explicit_save(document);
+                        }
                         view.provisional_source = None;
                         view.invalidate_source_rows();
                         view.install_recovery_journal(

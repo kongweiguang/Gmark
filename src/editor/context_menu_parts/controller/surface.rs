@@ -187,6 +187,7 @@ impl Editor {
         }
     }
 
+    /// 子窗格先关闭自己的浮层，再让窗口壳关闭全局菜单；所属冲突提示独占取消操作。
     pub(in crate::editor) fn on_dismiss_transient_ui(
         &mut self,
         _: &DismissTransientUi,
@@ -202,7 +203,11 @@ impl Editor {
                 view.on_dismiss_transient_ui(&DismissTransientUi, window, cx);
             });
         }
+        self.close_menu_bar(cx);
         self.dismiss_contextual_overlays(cx);
+        if self.pane_canvas {
+            cx.propagate();
+        }
     }
 
     pub(in crate::editor) fn on_context_menu_insert_hover(

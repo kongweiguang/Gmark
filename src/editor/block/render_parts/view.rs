@@ -6,22 +6,23 @@ use super::*;
 ///   a flex row with marker + content, everything else renders as plain text.
 /// - The [`BlockTextElement`] handles text layout, selection, and cursor.
 impl Render for Block {
+    /// 渲染焦点与原生输入共用句柄；浮层使用缓存句柄，避免提交时重入读取其实体。
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let math_structure_focused =
             !self.is_read_only() && self.math_structure_focus_handle.is_focused(window);
         let math_source_focused =
             !self.is_read_only() && self.math_source_focus_handle.is_focused(window);
         let focused = !self.is_read_only()
-            && (self.focus_handle.is_focused(window)
+            && (self.text_input_focus_handle().is_focused(window)
                 || math_structure_focused
                 || math_source_focused);
         let code_language_focused =
             !self.is_read_only() && self.code_language_focus_handle.is_focused(window);
         let window_active = window.is_window_active();
         let selection_link_focused = self
-            .selection_toolbar_link_input
+            .selection_toolbar_link_focus
             .as_ref()
-            .is_some_and(|input| input.read(cx).focus_handle.is_focused(window));
+            .is_some_and(|focus| focus.is_focused(window));
         let contextual_editing_focused = focused || selection_link_focused;
         if self.sync_math_edit_focus(focused, window, cx) {
             // Cancellation emits Changed so the editor-level source projection
@@ -42,6 +43,7 @@ impl Render for Block {
             self.selection_toolbar_overflow_open = false;
             self.selection_toolbar_type_menu_open = false;
             self.selection_toolbar_link_input = None;
+            self.selection_toolbar_link_focus = None;
             self.selection_toolbar_link_range = None;
             self.selection_toolbar_link_had_target = false;
         }

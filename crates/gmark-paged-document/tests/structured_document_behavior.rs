@@ -10,6 +10,45 @@ use gmark_paged_document::{
 };
 use std::fs;
 
+/// 实时批量输入必须保留组首根；内部逐段替换不能把公开事务拆成多个撤销项。
+#[test]
+fn paged_live_typing_batch_replaces_selection_and_undoes_once() {
+    let directory = tempfile::tempdir().unwrap_or_else(|error| panic!("batch tempdir: {error}"));
+    let path = directory.path().join("batch.txt");
+    fs::write(&path, b"alpha\nbeta\ngamma\n")
+        .unwrap_or_else(|error| panic!("batch fixture: {error}"));
+    let source = FileSource::open(&path).unwrap_or_else(|error| panic!("batch source: {error}"));
+    let index = LineIndex::build(&source).unwrap_or_else(|error| panic!("batch index: {error}"));
+    let mut document = PieceDocument::open(source, index)
+        .unwrap_or_else(|error| panic!("batch document: {error}"));
+    let group_id = gmark_document_core::TypingGroupId::new();
+    for (range, text) in [(3..14, "替"), (6..6, "换"), (9..9, "🙂")] {
+        document
+            .replace_text_batch_in_typing_group(&[(range, text.into())], group_id)
+            .unwrap_or_else(|error| panic!("live typing batch: {error}"));
+    }
+    assert_eq!(
+        document
+            .read_range(0..document.len())
+            .unwrap_or_else(|error| panic!("read typed text: {error}")),
+        "alp替换🙂ma\n".as_bytes()
+    );
+    assert!(document.undo());
+    assert_eq!(
+        document
+            .read_range(0..document.len())
+            .unwrap_or_else(|error| panic!("read undone text: {error}")),
+        b"alpha\nbeta\ngamma\n"
+    );
+    assert!(document.redo());
+    assert_eq!(
+        document
+            .read_range(0..document.len())
+            .unwrap_or_else(|error| panic!("read redone text: {error}")),
+        "alp替换🙂ma\n".as_bytes()
+    );
+}
+
 #[test]
 fn csv_index_seeks_records_with_quoted_newlines_without_loading_all_rows() {
     let dir = tempfile::tempdir().unwrap();
@@ -546,6 +585,93 @@ fn paged_recovery_keeps_base_on_disk_and_replays_edits_undo_redo_and_truncated_t
 
     journal.checkpoint().unwrap();
     assert!(!journal_path.exists());
+}
+
+/// 输入组恢复后仍应一次撤销；没有分组字段的旧日志保持独立事务边界。
+#[test]
+fn paged_recovery_replays_typing_groups_as_one_undo_and_accepts_legacy_records() {
+    use gmark_document_core::{
+        DocumentRevision, RecoveryAction, RecoveryBackend, RecoveryRecord, SourceEdit, Transaction,
+        TypingGroupId,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("typing-recovery.txt");
+    fs::write(&source_path, b"one").unwrap();
+    let source = FileSource::open(&source_path).unwrap();
+    let mut journal = PagedRecoveryJournal::create(
+        dir.path().join("recovery"),
+        &source,
+        TextEncoding::Utf8 { bom: false },
+    )
+    .unwrap();
+    let view_id = gmark_document_core::DocumentViewId::source();
+    let group_id = TypingGroupId::new();
+    let mut record = |action| {
+        RecoveryBackend::record(
+            &mut journal,
+            &RecoveryRecord {
+                action,
+                selection: None,
+                view_id: view_id.clone(),
+            },
+        )
+        .unwrap();
+    };
+
+    // This ungrouped action writes the same payload shape as journals created before group IDs.
+    record(RecoveryAction::Transaction(Transaction::new(
+        DocumentRevision(0),
+        vec![SourceEdit::new(0..1, "O")],
+    )));
+    record(RecoveryAction::TypingTransaction {
+        transaction: Transaction::new(DocumentRevision(1), vec![SourceEdit::new(3..3, "x")]),
+        group_id,
+    });
+    record(RecoveryAction::TypingTransaction {
+        transaction: Transaction::new(DocumentRevision(2), vec![SourceEdit::new(4..4, "y")]),
+        group_id,
+    });
+    let mut recovered = replay_paged_recovery(journal.path()).unwrap();
+    assert_eq!(
+        recovered
+            .document
+            .read_range(0..recovered.document.len())
+            .unwrap(),
+        b"Onexy"
+    );
+    assert!(recovered.document.undo());
+    assert_eq!(
+        recovered
+            .document
+            .read_range(0..recovered.document.len())
+            .unwrap(),
+        b"One"
+    );
+    assert!(recovered.document.redo());
+    assert_eq!(
+        recovered
+            .document
+            .read_range(0..recovered.document.len())
+            .unwrap(),
+        b"Onexy"
+    );
+    assert!(recovered.document.undo());
+    assert_eq!(
+        recovered
+            .document
+            .read_range(0..recovered.document.len())
+            .unwrap(),
+        b"One"
+    );
+    assert!(recovered.document.undo());
+    assert_eq!(
+        recovered
+            .document
+            .read_range(0..recovered.document.len())
+            .unwrap(),
+        b"one"
+    );
 }
 
 #[test]

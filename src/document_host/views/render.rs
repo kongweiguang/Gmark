@@ -20,7 +20,10 @@ mod search;
 mod source;
 
 impl DocumentHost {
+    /// 渲染拥有真实窗口句柄；持久化调度仍按正文 revision 去重，选择和滚动不会重启空闲计时。
     fn prepare_document_render(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.flush_pending_save_requests(cx);
+        self.schedule_auto_save(window, cx);
         if self.graph_focus_subscription.is_none() {
             let focus_handle = self.graph_focus_handle.clone();
             self.graph_focus_subscription =
@@ -127,6 +130,91 @@ impl Render for DocumentHost {
             // 瞬态菜单，避免 Block 先消费 Escape 导致菜单残留。
             .capture_key_down(cx.listener(Self::on_source_surface_key_down))
             .capture_action(cx.listener(Self::on_select_all_capture))
+            .capture_action(cx.listener(Self::on_source_boundary_copy_capture))
+            .capture_action(cx.listener(|this, _: &MoveLeft, window, cx| {
+                if this.route_source_horizontal(-1, false, false, window, cx) {
+                    cx.stop_propagation();
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &MoveRight, window, cx| {
+                if this.route_source_horizontal(1, false, false, window, cx) {
+                    cx.stop_propagation();
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &SelectLeft, window, cx| {
+                if this.route_source_horizontal(-1, false, true, window, cx) {
+                    cx.stop_propagation();
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &SelectRight, window, cx| {
+                if this.route_source_horizontal(1, false, true, window, cx) {
+                    cx.stop_propagation();
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &WordMoveLeft, window, cx| {
+                if this.route_source_horizontal(-1, true, false, window, cx) {
+                    cx.stop_propagation();
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &WordMoveRight, window, cx| {
+                if this.route_source_horizontal(1, true, false, window, cx) {
+                    cx.stop_propagation();
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &WordSelectLeft, window, cx| {
+                if this.route_source_horizontal(-1, true, true, window, cx) {
+                    cx.stop_propagation();
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &WordSelectRight, window, cx| {
+                if this.route_source_horizontal(1, true, true, window, cx) {
+                    cx.stop_propagation();
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &Home, window, cx| {
+                if this.route_source_visual_line_boundary(false, false, window, cx) {
+                    cx.stop_propagation();
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &End, window, cx| {
+                if this.route_source_visual_line_boundary(true, false, window, cx) {
+                    cx.stop_propagation();
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &SelectHome, window, cx| {
+                if this.route_source_visual_line_boundary(false, true, window, cx) {
+                    cx.stop_propagation();
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &SelectEnd, window, cx| {
+                if this.route_source_visual_line_boundary(true, true, window, cx) {
+                    cx.stop_propagation();
+                } else {
+                    cx.propagate();
+                }
+            }))
             .on_action(cx.listener(Self::on_undo))
             .on_action(cx.listener(Self::on_redo))
             .on_action(cx.listener(Self::on_save_document))

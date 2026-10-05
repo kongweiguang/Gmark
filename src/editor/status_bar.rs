@@ -202,6 +202,7 @@ impl Editor {
         self.set_status_tooltip_hover(StatusTooltip::Mode(mode), hovered, cx);
     }
 
+    /// Long Source rows need an asynchronous grapheme prefix; the status bar omits stale columns rather than inventing one.
     pub(super) fn render_status_bar(
         &mut self,
         theme: &Theme,
@@ -543,15 +544,21 @@ impl Editor {
                 super::ViewMode::Source | super::ViewMode::Split
             )
         {
-            let position = self.document_host.as_ref().map_or_else(
-                || self.compute_source_cursor_position(cx),
-                |view| view.read(cx).cursor_position(cx),
-            );
-            let cursor = render_cursor(position, theme);
-            if viewport_width < METADATA_OVERFLOW_BREAKPOINT {
-                overflow_items.push(cursor);
+            let position = if let Some(view) = self.document_host.as_ref() {
+                view.update(cx, |view, cx| {
+                    view.prepare_cursor_position(cx);
+                    view.cursor_position(cx)
+                })
             } else {
-                right_items.push(cursor);
+                Some(self.compute_source_cursor_position(cx))
+            };
+            if let Some(position) = position {
+                let cursor = render_cursor(position, theme);
+                if viewport_width < METADATA_OVERFLOW_BREAKPOINT {
+                    overflow_items.push(cursor);
+                } else {
+                    right_items.push(cursor);
+                }
             }
         }
 

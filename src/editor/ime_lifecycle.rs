@@ -68,6 +68,10 @@ pub(in crate::editor) enum DeferredImeOperation {
         mode: ViewMode,
     },
     SwitchTab(uuid::Uuid),
+    FirstSplit {
+        tab: Option<uuid::Uuid>,
+        direction: panes::PaneSplitDirection,
+    },
     Pane(panes::PaneEvent),
     NewTab(Box<tabs::DocumentTabSnapshot>),
     CloseTab(uuid::Uuid),
@@ -117,7 +121,7 @@ impl Editor {
         false
     }
 
-    /// IMM 的完成请求可能异步返回候选；失败保留会话，避免保存拼音或丢掉原选区。
+    /// 仅真实候选请求 IMM 完成；已确认文字的后台定位与恢复等待同一 FIFO，不能再次请求输入法。
     pub(in crate::editor) fn wait_for_ime_completion(
         &mut self,
         window: &mut Window,
@@ -126,7 +130,7 @@ impl Editor {
         if !self.has_active_ime_composition(cx) {
             self.ime_completion_requested = false;
             self.ime_completion_failed = false;
-            return false;
+            return self.has_pending_source_input_in_window(cx);
         }
         if self.ime_completion_failed {
             return true;
@@ -318,13 +322,13 @@ impl Editor {
             .unwrap_or(false)
     }
 
-    /// 连续历史操作保持顺序；失败后的同一动作重试不会制造第二次副作用。
+    /// 正文意图等候候选和分页确认文字，连续历史仍保持顺序；恢复 Copy 由 Host 捕获以释放等待。
     pub(in crate::editor) fn queue_document_action_for_ime<A: Action>(
         &mut self,
         action: &A,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.has_active_ime_composition(cx) {
+        if !self.has_active_ime_composition(cx) && !self.has_pending_source_input_in_window(cx) {
             return false;
         }
         let tab = self.tabs.records.get(self.tabs.active).map(|tab| tab.id);
@@ -362,7 +366,7 @@ impl Editor {
         self.wait_for_ime_completion(window, cx)
     }
 
-    /// 操作按用户顺序回放；保存快照与异步保存完成都早于随后标签拆卸。
+    /// 操作按用户顺序回放；确认文字先发布，保存和后台定位收尾后才允许随后标签或窗格拆卸。
     pub(super) fn sync_pending_ime_operations(
         &mut self,
         window: &mut Window,
@@ -501,6 +505,11 @@ impl Editor {
                 DeferredImeOperation::SwitchTab(tab) => {
                     self.activate_ime_operation_tab(Some(tab), cx);
                 }
+                DeferredImeOperation::FirstSplit { tab, direction } => {
+                    if self.activate_ime_operation_tab(tab, cx) {
+                        self.split_pane_toward(direction, cx);
+                    }
+                }
                 DeferredImeOperation::Pane(event) => {
                     self.handle_pane_event(event, Some(window), cx)
                 }
@@ -515,7 +524,10 @@ impl Editor {
                     }
                 }
             }
-            if yield_after_input || self.has_active_ime_composition(cx) {
+            if yield_after_input
+                || self.has_active_ime_composition(cx)
+                || self.has_pending_source_input_in_window(cx)
+            {
                 break;
             }
         }
@@ -767,7 +779,7 @@ impl Editor {
         } else if action.as_any().is::<CloseWindow>() {
             self.on_close_window(&CloseWindow, window, cx);
         } else if action.as_any().is::<QuitApplication>() {
-            self.on_quit_application(&QuitApplication, window, cx);
+            self.resume_quit_after_input(window, cx);
         }
     }
 }
@@ -775,3 +787,10 @@ impl Editor {
 #[cfg(test)]
 #[path = "../../tests/unit/editor/ime_lifecycle.rs"]
 mod tests;
+
+#[path = "ime_lifecycle_parts/source_boundary.rs"]
+mod source_boundary;
+
+#[cfg(test)]
+#[path = "../../tests/unit/editor/ime_source_boundary_lifecycle.rs"]
+mod boundary_tests;

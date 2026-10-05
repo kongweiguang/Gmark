@@ -4,6 +4,9 @@ use super::*;
 
 const MENU_POINTER_LEAVE_CLOSE_DELAY: Duration = Duration::from_millis(180);
 
+#[path = "resident_commit.rs"]
+mod resident_commit;
+
 impl Editor {
     /// 复用 Editor 现有 runtime 构建器初始化 Split 右侧 mounted 文档，随后恢复左侧 Source。
     pub(super) fn refresh_split_virtual_preview_runtime(&mut self, cx: &mut Context<Self>) {
@@ -336,35 +339,60 @@ impl Editor {
         }
     }
 
-    /// 提交投影前再次校验实际操作表面，防止迟到命令越过 Preview 的入口保护。
+    /// 按真实表面提交；常驻 Live 的结构操作保留未变区域原文，迟到命令仍不能越过只读保护。
     pub(in crate::editor) fn mark_dirty(&mut self, cx: &mut Context<Self>) {
-        if !self.document_surface_is_editable() {
+        if !self.document_surface_is_editable() || self.document.source_commit_error().is_some() {
             return;
         }
-        if self.virtual_surface.is_some()
-            && self.view_mode == ViewMode::Rendered
-            && let Some(entity_id) = self.active_entity_id
-            && self.mark_virtual_block_dirty(entity_id, cx)
-        {
+        if self.virtual_surface.is_some() && self.view_mode == ViewMode::Rendered {
+            let result = self
+                .active_entity_id
+                .ok_or_else(|| "当前虚拟输入没有可验证的目标".to_owned())
+                .and_then(|entity_id| self.mark_virtual_block_dirty(entity_id, cx));
+            if let Err(error) = result {
+                self.retain_resident_source_commit_error(error, cx);
+            }
+            return;
+        }
+        if self.view_mode == ViewMode::Rendered && self.virtual_surface.is_none() {
+            if let Err(error) = self.commit_resident_structure_regions(cx) {
+                self.retain_resident_source_commit_error(error, cx);
+            }
             return;
         }
         self.document.rebuild_root_markdown_cache(cx);
         self.mark_dirty_from_cached_markdown(cx);
     }
 
-    /// 普通块只刷新所属根块；只读表面在实际正文提交边界再次拒写。
+    /// 历史恢复已将权威源码写回 SourceDocument；保留其原始 Markdown 拼写并复用完整 dirty 调度。
+    pub(in crate::editor) fn mark_restored_document_dirty(&mut self, cx: &mut Context<Self>) {
+        if !self.document_surface_is_editable() {
+            return;
+        }
+        self.document.rebuild_root_markdown_cache(cx);
+        let source = self.source_document.text();
+        self.finish_marking_document_dirty(source, cx);
+    }
+
+    /// Live 写入只覆盖有原源码归属的区域，后台缓存滞后不得把未编辑根规范化；其它表面沿用自身源码路径。
     pub(in crate::editor) fn mark_block_dirty(
         &mut self,
         entity_id: EntityId,
         cx: &mut Context<Self>,
     ) {
-        if !self.document_surface_is_editable() {
+        if !self.document_surface_is_editable() || self.document.source_commit_error().is_some() {
             return;
         }
-        if self.virtual_surface.is_some()
-            && self.view_mode == ViewMode::Rendered
-            && self.mark_virtual_block_dirty(entity_id, cx)
-        {
+        if self.virtual_surface.is_some() && self.view_mode == ViewMode::Rendered {
+            if let Err(error) = self.mark_virtual_block_dirty(entity_id, cx) {
+                self.retain_resident_source_commit_error(error, cx);
+            }
+            return;
+        }
+        if self.view_mode == ViewMode::Rendered && self.virtual_surface.is_none() {
+            if let Err(error) = self.commit_resident_block_region(entity_id, cx) {
+                self.retain_resident_source_commit_error(error, cx);
+            }
             return;
         }
         self.document
@@ -372,19 +400,28 @@ impl Editor {
         self.mark_dirty_from_cached_markdown(cx);
     }
 
-    /// 把 mounted region 的规范 Markdown 作为一个最小 Rope transaction 提交。
-    fn mark_virtual_block_dirty(&mut self, entity_id: EntityId, cx: &mut Context<Self>) -> bool {
-        let Some((source_range, roots)) = self.virtual_surface.as_ref().and_then(|surface| {
-            Some((
-                surface.source_range_for_entity(entity_id)?,
-                surface.region_roots_for_entity(entity_id)?,
-            ))
-        }) else {
-            return false;
-        };
+    /// 挂载区域只授权局部事务；归属或读取失败必须保留树态，不能转到全文投影写入。
+    fn mark_virtual_block_dirty(
+        &mut self,
+        entity_id: EntityId,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let _trace = crate::perf::span("virtual_source_commit_sync");
+        let (source_range, roots) = self
+            .virtual_surface
+            .as_ref()
+            .and_then(|surface| {
+                Some((
+                    surface.source_range_for_entity(entity_id)?,
+                    surface.region_roots_for_entity(entity_id)?,
+                ))
+            })
+            .ok_or_else(|| "当前虚拟输入块没有可验证的原源码区域".to_owned())?;
         let markdown = DocumentTree::markdown_text_for_roots(&roots, cx);
         let snapshot = self.source_document.snapshot();
-        let old_fragment = snapshot.text_for_range(source_range.clone()).ok();
+        let old_fragment = snapshot
+            .text_for_range(source_range.clone())
+            .map_err(|error| error.to_string())?;
         let old_revision = snapshot.revision();
         let transaction = gmark_document::Transaction::new(
             snapshot.revision(),
@@ -393,33 +430,23 @@ impl Editor {
                 markdown.clone(),
             )],
         );
-        if let Err(error) = self.source_document.apply_transaction(transaction) {
-            eprintln!("virtual surface 源码事务提交失败: {error}");
-            return false;
-        }
+        self.source_document
+            .apply_transaction(transaction)
+            .map_err(|error| error.to_string())?;
         if let Some(surface) = self.virtual_surface.as_mut() {
             surface.apply_entity_region_source_len(entity_id, markdown.len());
         }
-        if let Some(old_fragment) = old_fragment.as_deref() {
-            self.status_bar.apply_virtual_text_edit(
-                old_revision,
-                self.source_document.revision(),
-                old_fragment,
-                &markdown,
-            );
-        }
+        self.status_bar.apply_virtual_text_edit(
+            old_revision,
+            self.source_document.revision(),
+            &old_fragment,
+            &markdown,
+        );
         if std::mem::take(&mut self.pending_virtual_global_runtime_refresh) {
             let source = self.source_document.text();
             self.rebuild_runtime_context_from_markdown(&source, cx);
         }
 
-        let source_len = self.source_document.len();
-        if let Some(input_trace) = super::perf::take_input_mutation() {
-            input_trace.record_dirty_sync(source_len);
-            if self.pending_input_trace.is_none() {
-                self.pending_input_trace = Some(input_trace);
-            }
-        }
         self.pending_dirty_source = None;
         self.render_row_cache = None;
         self.schedule_projection_cache_refresh(cx);
@@ -432,18 +459,18 @@ impl Editor {
         self.schedule_recovery_journal(cx);
         self.schedule_auto_save(cx);
         self.schedule_active_block_spellcheck(cx);
-        true
+        Ok(())
     }
 
+    /// 从已更新的投影生成规范 Markdown，并同步到权威源码后调度保存。
     fn mark_dirty_from_cached_markdown(&mut self, cx: &mut Context<Self>) {
         let source = self.current_document_source_from_cache(cx);
-        if let Some(input_trace) = super::perf::take_input_mutation() {
-            input_trace.record_dirty_sync(source.len());
-            if self.pending_input_trace.is_none() {
-                self.pending_input_trace = Some(input_trace);
-            }
-        }
         self.sync_source_document_from_projection(&source);
+        self.finish_marking_document_dirty(source, cx);
+    }
+
+    /// 两种正文来源共用 dirty 状态、投影刷新与持久化调度，避免恢复路径重写权威源码。
+    fn finish_marking_document_dirty(&mut self, source: String, cx: &mut Context<Self>) {
         self.pending_dirty_source = Some(source);
         self.render_row_cache = None;
         match self.view_mode {

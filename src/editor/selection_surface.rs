@@ -24,12 +24,15 @@ impl Editor {
             && !(self.view_mode == ViewMode::Split && surface == SelectionSurface::SplitPreview)
     }
 
-    /// Resolves primary text focus from mounted blocks or the still-owned virtual selection endpoint.
+    /// 模态期间没有可操作的正文目标；其它时候解析挂载块或仍归属当前视图的虚拟选区端点。
     pub(super) fn focused_document_target(
         &self,
         window: &Window,
         cx: &App,
     ) -> Option<(SelectionSurface, Entity<Block>)> {
+        if self.show_unsaved_changes_dialog {
+            return None;
+        }
         for surface in [SelectionSurface::Main, SelectionSurface::SplitPreview] {
             if let Some(entity) =
                 self.selection_surface_entities(surface)

@@ -16,7 +16,7 @@ use gmark_document_core::{
     DocumentMutationMap, DocumentRevision, DocumentSnapshot, DocumentViewId, DocumentViewRegistry,
     DocumentViewState, ProjectionCancellation, ProjectionError, RecoveryAction, RecoveryBackend,
     RecoveryRecord, SourceAffinity, SourceAnchor, SourceEdit, SourceLocator, SourceSelection,
-    TextEncoding, Transaction, ViewDescriptor, ViewFormat,
+    TextEncoding, Transaction, TypingGroupId, ViewDescriptor, ViewFormat,
 };
 use gmark_document_runtime::{
     ControllerError, DocumentController, DocumentEvent, DocumentEventSubscription, DocumentHandle,
@@ -51,11 +51,13 @@ use gpui::{
 use crate::components::{
     Block, BlockEvent, BlockHostAction, BlockKind, BlockRecord, CancelFormatting, CollapseAllFolds,
     CollapseFold, Copy, Cut, Delete, DeleteBack, DeleteLine, DismissTransientUi, DuplicateLine,
-    ExpandAllFolds, ExpandFold, ExportSelection, FindInDocument, FindNext, FindPrevious,
-    FormatDocument, FormatSelection, GoToLine, IndentBlock, JumpToBottom, JumpToTop, MoveLineDown,
-    MoveLineUp, MoveToDocumentEnd, MoveToDocumentStart, OutdentBlock, PageDown, PageUp, Paste,
-    Redo, SaveDocument, SaveDocumentAs, SelectAll, SelectDown, SelectPageDown, SelectPageUp,
+    End, ExpandAllFolds, ExpandFold, ExportSelection, FindInDocument, FindNext, FindPrevious,
+    FormatDocument, FormatSelection, GoToLine, Home, IndentBlock, JumpToBottom, JumpToTop,
+    MoveLeft, MoveLineDown, MoveLineUp, MoveRight, MoveToDocumentEnd, MoveToDocumentStart,
+    OutdentBlock, PageDown, PageUp, Paste, Redo, SaveDocument, SaveDocumentAs, SelectAll,
+    SelectDown, SelectEnd, SelectHome, SelectLeft, SelectPageDown, SelectPageUp, SelectRight,
     SelectToDocumentEnd, SelectToDocumentStart, SelectUp, SourceLayoutIdentity, Undo,
+    UndoCaptureKind, WordMoveLeft, WordMoveRight, WordSelectLeft, WordSelectRight,
     source_line_number_gutter_width,
 };
 use crate::source_tools::{FoldProjectionIndex, ResidentFoldParser, SourceLanguageId};
@@ -88,6 +90,16 @@ use contracts::{
     STRUCTURED_COLUMN_WINDOW, STRUCTURED_OVERSCAN_ROWS, SourceContextCommand, StructuredIndex,
     StructuredLines, StructuredTextSource, localized_document_error, source_surface_padding,
 };
+
+/// Keeps Source typing coalesced only while the same view continues at its prior caret and revision.
+#[derive(Clone)]
+struct SourceTypingGroup {
+    id: TypingGroupId,
+    view_id: DocumentViewInstanceId,
+    revision_after: u64,
+    selection_after: SourceSelection,
+    last_input_at: Instant,
+}
 pub(crate) use contracts::{
     DocumentHostEvent, DocumentHostMode, DocumentMenuFormat, MAX_SOURCE_CACHED_ROWS,
     SOURCE_LIST_WINDOW_ROWS, source_monospace_font_family,
@@ -217,6 +229,12 @@ pub(crate) struct DocumentHost {
     source_row_blocks: BTreeMap<usize, Entity<Block>>,
     /// Pending host actions remain pinned to the Block that owns the native composition.
     pending_source_ime_action: Option<source_ime::PendingSourceImeAction>,
+    /// Captures the shared Source selection and revision before cross-view edits can move its owner.
+    source_ime_snapshot: Option<source_ime::SourcePointerSnapshot>,
+    /// Coalesces only adjacent Source insertions; Controller verifies the immutable revision chain.
+    source_typing_group: Option<SourceTypingGroup>,
+    /// Carries the Block undo category to its later Changed event without inferring from text shape.
+    source_pending_undo_capture: Option<(Entity<Block>, UndoCaptureKind)>,
     source_syntax_contexts: BTreeMap<usize, SourceSyntaxContext>,
     source_row_epochs: BTreeMap<usize, u64>,
     source_cache_epoch: u64,
@@ -242,10 +260,14 @@ pub(crate) struct DocumentHost {
     source_cancel_in_flight: bool,
     source_row_height: f32,
     active_edit: Option<SourceLineEdit>,
+    /// Keeps long-row status columns off the render thread and cancels stale prefix scans.
+    source_cursor_column: SourceCursorColumnState,
     suppressed_line_edit_text: Option<String>,
     selection_anchor: Option<usize>,
     selected_lines: Option<Range<usize>>,
     source_drag_anchor: Option<SourceAnchor>,
+    source_drag_anchor_range: Option<Range<u64>>,
+    source_drag_granularity: source_pointer::SourceDragGranularity,
     source_drag_autoscroll_direction: i8,
     source_drag_autoscroll_task: Task<()>,
     /// 右键事件使用窗口坐标；菜单位于宿主局部层，必须用最近一帧边界消除外壳偏移。
@@ -292,6 +314,8 @@ pub(crate) struct DocumentHost {
     clipboard_generation: u64,
     clipboard_cancellation: Option<SearchCancellation>,
     clipboard_task: Task<()>,
+    #[cfg(test)]
+    fail_next_native_clipboard_write_for_test: bool,
     selection_export_generation: u64,
     selection_export_cancellation: Option<SearchCancellation>,
     selection_export_task: Task<()>,
@@ -308,6 +332,8 @@ mod construction;
 #[path = "runtime/coordinator.rs"]
 mod coordinator;
 use coordinator::DocumentCoordinator;
+#[path = "runtime/editing/auto_save.rs"]
+mod editing_auto_save;
 #[path = "runtime/editing/export.rs"]
 mod editing_export;
 #[path = "runtime/editing/history.rs"]
@@ -316,6 +342,8 @@ mod editing_history;
 mod editing_reload;
 #[path = "runtime/editing/save.rs"]
 mod editing_save;
+#[path = "runtime/editing/save_requests.rs"]
+mod editing_save_requests;
 #[path = "runtime/editing/source.rs"]
 mod editing_source;
 #[path = "runtime/editing/structured_cells.rs"]
@@ -331,6 +359,8 @@ use editing_save::{delimited_record_terminator, transform_delimited_adapter};
 mod navigation_contract;
 pub(crate) use navigation_contract::DocumentSidebarTarget;
 use navigation_contract::{MAX_STRUCTURED_CACHED_ROWS, prune_structured_row_cache};
+#[path = "views/navigation_horizontal.rs"]
+mod navigation_horizontal;
 #[path = "views/navigation_json.rs"]
 mod navigation_json;
 #[path = "views/navigation_search.rs"]
@@ -353,6 +383,13 @@ mod recovery_test_interactions;
 #[cfg(test)]
 #[path = "../../tests/unit/document_runtime/host_recovery_test_state.rs"]
 mod recovery_test_state;
+#[path = "views/source_boundaries.rs"]
+mod source_boundaries;
+#[path = "views/source_cursor_column.rs"]
+mod source_cursor_column;
+use source_cursor_column::SourceCursorColumnState;
+#[path = "views/source_boundary_requests.rs"]
+mod source_boundary_requests;
 #[cfg(test)]
 pub(crate) use recovery_test_interactions::PagedDocumentMetricsSnapshot;
 #[path = "views/mode_input.rs"]
@@ -657,6 +694,7 @@ impl DocumentHost {
 impl Drop for DocumentHost {
     fn drop(&mut self) {
         self.coordinator.cancel_all();
+        self.source_cursor_column.reset();
         if let Some(cancellation) = self.structured_cancellation.take() {
             cancellation.cancel();
         }

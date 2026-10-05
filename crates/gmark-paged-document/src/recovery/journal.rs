@@ -64,6 +64,30 @@ impl PagedRecoveryJournal {
         selection: Option<PagedRecoverySelection>,
         view_mode: &str,
     ) -> Result<(), PagedDocumentError> {
+        self.record_replace_with_group(range, replacement, None, selection, view_mode)
+    }
+
+    /// 记录 typing transaction 的组 ID，使崩溃恢复后的一次撤销仍覆盖整组按键。
+    pub fn record_typing_replace(
+        &mut self,
+        range: Range<u64>,
+        replacement: &str,
+        group_id: gmark_document_core::TypingGroupId,
+        selection: Option<PagedRecoverySelection>,
+        view_mode: &str,
+    ) -> Result<(), PagedDocumentError> {
+        self.record_replace_with_group(range, replacement, Some(group_id), selection, view_mode)
+    }
+
+    /// 普通与 typing 替换共享分块和原子追加协议，旧记录缺省为无分组。
+    fn record_replace_with_group(
+        &mut self,
+        range: Range<u64>,
+        replacement: &str,
+        typing_group: Option<gmark_document_core::TypingGroupId>,
+        selection: Option<PagedRecoverySelection>,
+        view_mode: &str,
+    ) -> Result<(), PagedDocumentError> {
         if range.start > range.end {
             return Err(PagedDocumentError::InvalidRange {
                 start: range.start,
@@ -90,6 +114,7 @@ impl PagedRecoveryJournal {
                 chunk_index: chunk_index as u32,
                 chunk_count,
                 text: text.to_owned(),
+                typing_group,
                 selection: selection.map(Into::into),
                 view_mode: view_mode.to_owned(),
             };
@@ -145,32 +170,44 @@ impl gmark_document_core::RecoveryBackend for PagedRecoveryJournal {
         record: &gmark_document_core::RecoveryRecord,
     ) -> Result<(), gmark_document_core::PersistenceError> {
         let view = record.view_id.as_str();
-        match &record.action {
-            gmark_document_core::RecoveryAction::Transaction(transaction) => {
-                if transaction.edits.len() != 1 {
-                    return Err(gmark_document_core::PersistenceError::Recovery(
-                        "Paged recovery requires one source edit per transaction".into(),
-                    ));
-                }
-                let edit = &transaction.edits[0];
-                self.record_replace(
-                    edit.range.clone(),
-                    &edit.replacement,
-                    record.selection,
-                    view,
-                )
-                .map_err(|error| gmark_document_core::PersistenceError::Recovery(error.to_string()))
-            }
+        let (transaction, typing_group) = match &record.action {
+            gmark_document_core::RecoveryAction::Transaction(transaction) => (transaction, None),
+            gmark_document_core::RecoveryAction::TypingTransaction {
+                transaction,
+                group_id,
+            } => (transaction, Some(*group_id)),
             gmark_document_core::RecoveryAction::Undo => {
-                self.record_undo(record.selection, view).map_err(|error| {
+                return self.record_undo(record.selection, view).map_err(|error| {
                     gmark_document_core::PersistenceError::Recovery(error.to_string())
-                })
+                });
             }
             gmark_document_core::RecoveryAction::Redo => {
-                self.record_redo(record.selection, view).map_err(|error| {
+                return self.record_redo(record.selection, view).map_err(|error| {
                     gmark_document_core::PersistenceError::Recovery(error.to_string())
-                })
+                });
             }
+        };
+        if transaction.edits.len() != 1 {
+            return Err(gmark_document_core::PersistenceError::Recovery(
+                "Paged recovery requires one source edit per transaction".into(),
+            ));
         }
+        let edit = &transaction.edits[0];
+        match typing_group {
+            Some(group_id) => self.record_typing_replace(
+                edit.range.clone(),
+                &edit.replacement,
+                group_id,
+                record.selection,
+                view,
+            ),
+            None => self.record_replace(
+                edit.range.clone(),
+                &edit.replacement,
+                record.selection,
+                view,
+            ),
+        }
+        .map_err(|error| gmark_document_core::PersistenceError::Recovery(error.to_string()))
     }
 }

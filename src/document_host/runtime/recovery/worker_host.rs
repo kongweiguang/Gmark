@@ -318,6 +318,35 @@ impl DocumentHost {
         );
     }
 
+    /// 输入组的每笔正文仍按序记录，恢复时保留分组身份，确保后续一次 Undo 与原会话一致。
+    pub(crate) fn enqueue_recovery_typing_transaction(
+        &mut self,
+        document: &SharedDocument,
+        base_revision: u64,
+        range: std::ops::Range<u64>,
+        replacement: &str,
+        selection: Option<SourceSelection>,
+        view_id: DocumentViewId,
+        group_id: gmark_document_core::TypingGroupId,
+        cx: &mut Context<Self>,
+    ) {
+        self.enqueue_recovery_record(
+            document,
+            RecoveryRecord {
+                action: RecoveryAction::TypingTransaction {
+                    transaction: Transaction::new(
+                        DocumentRevision(base_revision),
+                        vec![SourceEdit::new(range, replacement)],
+                    ),
+                    group_id,
+                },
+                selection,
+                view_id,
+            },
+            cx,
+        );
+    }
+
     /// Queue history actions because Paged replay must retain every ordered
     /// undo/redo transition rather than reconstructing only the latest text.
     pub(crate) fn enqueue_recovery_action(

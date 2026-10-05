@@ -18,7 +18,7 @@ pub use recovery::{RecoveryAction, RecoveryBackend, RecoveryRecord};
 pub use snapshot::{DocumentSnapshot, SnapshotError};
 pub use transaction::{
     DocumentMutationMap, DocumentRevision, DocumentViewInstanceId, EditError, MutationEdit,
-    SourceAffinity, SourceAnchor, SourceEdit, SourceSelection, Transaction,
+    SourceAffinity, SourceAnchor, SourceEdit, SourceSelection, Transaction, TypingGroupId,
 };
 pub use view::{
     DEFAULT_DELIMITED_COLUMN_WINDOW, DEFAULT_DELIMITED_ROW_WINDOW, DelimitedCellProjection,

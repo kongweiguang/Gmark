@@ -5,6 +5,7 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use gmark_document_core::TypingGroupId;
 use gpui_sum_tree::{Bias, ContextLessSummary, Dimension, Dimensions, Item, SumTree};
 
 use crate::{FileSource, LineIndex, PagedDocumentError, SourceAffinity, SourceAnchor};
@@ -103,6 +104,7 @@ pub fn search_file_source(
         len,
         undo: Vec::new(),
         redo: Vec::new(),
+        active_typing_group: None,
         persisted_pieces: None,
     };
     document.search(query, options, cancellation)
@@ -117,12 +119,27 @@ pub struct PieceDocument {
     pieces: PieceTree,
     additions: AppendStore,
     len: u64,
-    undo: Vec<(PieceTree, u64)>,
-    redo: Vec<(PieceTree, u64)>,
+    undo: Vec<PieceHistoryEntry>,
+    redo: Vec<PieceHistoryEntry>,
+    active_typing_group: Option<TypingGroupId>,
     /// Optional in-memory acknowledgement baseline used by an explicit
     /// discard decision.  The tree shares persistent roots and the append
     /// store; it is metadata, not a second body representation.
     persisted_pieces: Option<(PieceTree, u64)>,
+}
+
+#[derive(Clone)]
+struct PieceHistoryEntry {
+    pieces: PieceTree,
+    len: u64,
+    typing: Option<TypingHistorySpan>,
+}
+
+#[derive(Clone, Copy)]
+struct TypingHistorySpan {
+    group_id: TypingGroupId,
+    inserted_end: u64,
+    can_continue: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -495,6 +512,7 @@ impl PieceDocument {
             len,
             undo: Vec::new(),
             redo: Vec::new(),
+            active_typing_group: None,
             persisted_pieces: None,
         })
     }

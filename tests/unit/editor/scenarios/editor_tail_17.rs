@@ -2,6 +2,7 @@
 
 include!("editor_tail_17/smooth_scroll.rs");
 
+/// 合并是独立事务，撤销须精确回到已粘贴正文，而非撤销粘贴或重写其拼写。
 #[gpui::test]
 async fn table_fragment_merge_is_explicit_and_one_undo_step(cx: &mut TestAppContext) {
     init_editor_test_app(cx);
@@ -31,18 +32,25 @@ async fn table_fragment_merge_is_explicit_and_one_undo_step(cx: &mut TestAppCont
         );
         assert!(editor.table_fragment_merge.is_some());
         assert!(editor.source_document.text().contains("| 3 | 4 |"));
+        let pasted_source = editor.source_document.text();
+        assert!(pasted_source.contains("| 1 | 2 |\n\n| 3 | 4 |"));
+        assert!(editor.document.source_commit_error().is_none());
         editor.confirm_table_fragment_merge(0, cx);
         assert!(editor.table_fragment_merge.is_none());
+        assert!(editor.document.source_commit_error().is_none(), "{:?}", editor.document.source_commit_error());
         assert_eq!(
             editor.source_document.text(),
             "| A | B |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |"
         );
         editor.undo_document(cx);
-        assert!(editor.source_document.text().contains("| 3 | 4 |"));
+        assert_eq!(editor.source_document.text(), pasted_source);
         assert_eq!(
             editor.document.visible_blocks()[0].entity.read(cx).kind(),
             BlockKind::Table
         );
+        editor.redo_document(cx);
+        assert_eq!(editor.source_document.text(), "| A | B |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |");
+        assert!(editor.document.source_commit_error().is_none());
     });
 }
 

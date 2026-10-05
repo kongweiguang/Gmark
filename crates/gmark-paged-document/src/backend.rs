@@ -517,7 +517,26 @@ impl PagedDocument {
         &mut self,
         transaction: &gmark_document_core::Transaction,
     ) -> Result<(), PagedDocumentError> {
+        self.apply_transaction_with_group(transaction, None)
+    }
+
+    /// 将 Controller 明确分组的 Source 文字输入映射为一份 Paged 撤销根。
+    pub fn apply_typing_transaction(
+        &mut self,
+        transaction: &gmark_document_core::Transaction,
+        group_id: gmark_document_core::TypingGroupId,
+    ) -> Result<(), PagedDocumentError> {
+        self.apply_transaction_with_group(transaction, Some(group_id))
+    }
+
+    /// 共享 stale 检查与 revision 推进，避免分组入口绕开普通事务契约。
+    fn apply_transaction_with_group(
+        &mut self,
+        transaction: &gmark_document_core::Transaction,
+        group_id: Option<gmark_document_core::TypingGroupId>,
+    ) -> Result<(), PagedDocumentError> {
         if transaction.base_revision.0 != self.revision() {
+            self.backend.document.break_typing_group();
             return Err(PagedDocumentError::SourceChanged);
         }
         let edits = transaction
@@ -525,11 +544,22 @@ impl PagedDocument {
             .iter()
             .map(|edit| (edit.range.clone(), edit.replacement.clone()))
             .collect::<Vec<_>>();
-        self.backend.document.replace_text_batch(&edits)?;
+        match group_id {
+            Some(group_id) => self
+                .backend
+                .document
+                .replace_text_batch_in_typing_group(&edits, group_id)?,
+            None => self.backend.document.replace_text_batch(&edits)?,
+        }
         if !edits.is_empty() {
             self.backend.mark_changed();
         }
         Ok(())
+    }
+
+    /// 结束跨按键合并资格，但保留既有撤销与重做内容。
+    pub fn break_typing_group(&mut self) {
+        self.backend.document.break_typing_group();
     }
 
     pub fn undo(&mut self) -> bool {

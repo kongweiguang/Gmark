@@ -553,6 +553,12 @@ pub enum BlockImeInteraction {
 pub enum BlockEvent {
     /// Capture the current document state before an upcoming mutation.
     PrepareUndo { kind: UndoCaptureKind },
+    /// 表格单元格是独立投影；行操作前需保留权威源码，避免稳定视图序列化改写无关文本。
+    PrepareUndoFromSourceSnapshot {
+        kind: UndoCaptureKind,
+        markdown_selection: Range<usize>,
+        reversed: bool,
+    },
     /// The block's content or kind changed; the editor should mark the
     /// document dirty and optionally scroll to keep the block visible.
     Changed,
@@ -566,6 +572,8 @@ pub enum BlockEvent {
     RequestClipboardFailure,
     /// 平台终态只唤醒等待中的视图操作；预编辑和取消不得进入正文事务。
     ImeCompositionEnded { committed: bool },
+    /// Lets a host pin the input target's source selection before any shared-view mutation arrives.
+    ImeCompositionStarted,
     /// 完成请求失败仍保留候选会话，宿主只展示状态并允许用户重试。
     ImeCompositionFinishFailed,
     /// The user pressed Enter; a new sibling should be created with the given

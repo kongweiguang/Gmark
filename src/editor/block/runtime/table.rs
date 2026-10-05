@@ -40,7 +40,9 @@ impl Block {
         self.sync_render_cache();
     }
 
+    /// 替换 cell 实体后标记视口待同步，确保新实体拿到所属正文的裁剪范围。
     pub(crate) fn set_table_runtime(&mut self, runtime: TableRuntime) {
+        self.table_cells_toolbar_viewport_dirty = true;
         self.table_runtime = Some(runtime);
     }
 

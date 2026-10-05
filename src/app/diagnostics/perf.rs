@@ -3,9 +3,9 @@
 //! 可选的编辑器性能事件采样。
 //!
 //! 默认关闭；设置 `GMARK_PERF_TRACE=1` 后向 stderr 输出一行一个 JSON 记录。
-//! 输入响应会分别记录到 Editor render 与目标文本元素 paint；二者都不代表平台 present。
+//! 输入响应记录到目标文本元素 paint；Editor 首次渲染单独计时，这些边界都不代表平台 present。
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -22,8 +22,6 @@ static INPUT_PAINT_GENERATION: AtomicU64 = AtomicU64::new(1);
 const INPUT_PAINT_KIND_COUNT: usize = 4;
 
 thread_local! {
-    /// GPUI 输入与 Entity 事件在同一 UI 线程传递；只保留一轮批量编辑最早的起点。
-    static INPUT_MUTATION_STARTED: Cell<Option<Instant>> = const { Cell::new(None) };
     /// GPUI 会合并高频鼠标和候选更新；每帧每类只保留最近一次，避免无界排队。
     static INPUT_TO_PAINT: RefCell<[Option<PendingPaintTrace>; INPUT_PAINT_KIND_COUNT]> =
         const { RefCell::new([None; INPUT_PAINT_KIND_COUNT]) };
@@ -50,11 +48,6 @@ struct TraceRecord<'a> {
     open_reason: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     value: Option<u64>,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct PendingInputTrace {
-    started: Instant,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,26 +131,26 @@ pub(crate) fn start() -> Option<Instant> {
     enabled().then(Instant::now)
 }
 
-pub(crate) fn begin_input_mutation() {
-    if !enabled() {
-        return;
+/// 仅在显式采样时记录同步阶段，默认不读取时钟；提前返回也保留耗时，且不携带正文。
+pub(crate) fn span(event: &'static str) -> TraceSpan {
+    TraceSpan {
+        event,
+        started: start(),
     }
-    INPUT_MUTATION_STARTED.with(|started| {
-        if started.get().is_none() {
-            started.set(Some(Instant::now()));
-        }
-    });
 }
 
-pub(crate) fn take_input_mutation() -> Option<PendingInputTrace> {
-    if !enabled() {
-        return None;
+pub(crate) struct TraceSpan {
+    event: &'static str,
+    started: Option<Instant>,
+}
+
+impl Drop for TraceSpan {
+    /// 所有退出路径共享计时终点，不为诊断改变输入事务顺序。
+    fn drop(&mut self) {
+        if let Some(started) = self.started {
+            emit(self.event, started, None, None, None);
+        }
     }
-    INPUT_MUTATION_STARTED.with(|started| {
-        started
-            .replace(None)
-            .map(|started| PendingInputTrace { started })
-    })
 }
 
 /// Captures the start time before an input handler changes its local model.
@@ -311,29 +304,6 @@ impl InputPaintSnapshot {
             && self.editor_selection == current.editor_selection
             && (!matches!(kind, InputPaintKind::ImePreedit | InputPaintKind::ImeCommit)
                 || self.composition_generation == current.composition_generation)
-    }
-}
-
-impl PendingInputTrace {
-    pub(crate) fn record_dirty_sync(self, source_bytes: usize) {
-        emit(
-            "input_to_dirty_sync",
-            self.started,
-            Some(source_bytes),
-            None,
-            None,
-        );
-    }
-
-    /// 保留旧的 Editor::render 指标，与文本元素 paint 延迟分开统计。
-    pub(crate) fn record_next_render(self, source_bytes: usize) {
-        emit(
-            "input_to_next_render",
-            self.started,
-            Some(source_bytes),
-            None,
-            Some("Editor::render boundary; not Element::paint or platform present"),
-        );
     }
 }
 

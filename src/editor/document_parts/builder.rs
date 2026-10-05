@@ -44,17 +44,33 @@ impl Editor {
         Self::build_blocks_from_projection_reusing(cx, prepared, &mut HashMap::new())
     }
 
+    /// 保留原调用契约；需要提交源区域归属的安装点使用带映射的 variant。
     pub(in crate::editor) fn build_blocks_from_projection_reusing(
         cx: &mut Context<Self>,
         prepared: &PreparedSplitProjection,
         reusable: &mut HashMap<uuid::Uuid, Entity<super::Block>>,
     ) -> Vec<Entity<super::Block>> {
+        Self::build_blocks_from_projection_reusing_with_regions(cx, prepared, reusable).0
+    }
+
+    /// 物化每个源码区域后记录其实际根槽位，避免按语义节点数量推测多根回退的边界。
+    pub(in crate::editor) fn build_blocks_from_projection_reusing_with_regions(
+        cx: &mut Context<Self>,
+        prepared: &PreparedSplitProjection,
+        reusable: &mut HashMap<uuid::Uuid, Entity<super::Block>>,
+    ) -> (
+        Vec<Entity<super::Block>>,
+        Vec<(std::ops::Range<usize>, std::ops::Range<usize>)>,
+    ) {
         let lines = &prepared.lines;
         let regions = &prepared.regions;
         debug_assert_eq!(regions.len(), prepared.nodes.len());
         let mut roots = Vec::new();
+        let mut source_regions = Vec::with_capacity(regions.len());
         for (region_index, region) in regions.iter().enumerate() {
+            let root_start = roots.len();
             let Some(region_lines) = lines.get(region.lines.clone()) else {
+                source_regions.push((region.bytes.clone(), root_start..root_start));
                 continue;
             };
             if let Some(nodes) = prepared.nodes.get(region_index).and_then(Option::as_ref) {
@@ -63,6 +79,7 @@ impl Editor {
                         .iter()
                         .map(|node| Self::materialize_prepared_node(node, reusable, cx)),
                 );
+                source_regions.push((region.bytes.clone(), root_start..roots.len()));
                 continue;
             }
             let markdown = || region_lines.join("\n");
@@ -196,8 +213,9 @@ impl Editor {
                     roots.push(native_block(cx, BlockKind::Paragraph, markdown()));
                 }
             }
+            source_regions.push((region.bytes.clone(), root_start..roots.len()));
         }
-        roots
+        (roots, source_regions)
     }
 
     /// 只物化一个投影区域，供虚拟 surface 的 viewport/pinned region 按需挂载。

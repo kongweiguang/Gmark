@@ -3,6 +3,95 @@
 use super::*;
 
 impl Editor {
+    /// 排版身份变化时丢弃对应表面的旧行高，并重置窗口标记以启用深滚测量前沿。
+    pub(in crate::editor) fn sync_row_stride_layout_identity(
+        &mut self,
+        surface: crate::editor::selection_surface::SelectionSurface,
+        theme: std::sync::Arc<crate::theme::Theme>,
+        font_family: String,
+        content_width: f32,
+    ) {
+        let (identity, cache, previous_window) = match surface {
+            crate::editor::selection_surface::SelectionSurface::Main => (
+                &mut self.row_stride_layout_identity,
+                &mut self.row_stride_cache,
+                &mut self.prev_render_window,
+            ),
+            crate::editor::selection_surface::SelectionSurface::SplitPreview => {
+                let Some(state) = self.split_preview.as_mut() else {
+                    self.split_row_stride_layout_identity = Some(RowStrideLayoutIdentity::new(
+                        theme,
+                        font_family,
+                        content_width,
+                    ));
+                    return;
+                };
+                (
+                    &mut self.split_row_stride_layout_identity,
+                    &mut state.row_stride_cache,
+                    &mut state.previous_render_window,
+                )
+            }
+        };
+        if identity
+            .as_ref()
+            .is_some_and(|previous| previous.matches(&theme, &font_family, content_width))
+        {
+            return;
+        }
+        *identity = Some(RowStrideLayoutIdentity::new(
+            theme,
+            font_family,
+            content_width,
+        ));
+        cache.clear();
+        *previous_window = None;
+    }
+
+    /// 直接记录完整行的布局高度，包含分组、表格和 margin；文本 bounds 可能来自不同
+    /// 滚动帧，不能通过相邻坐标相减学习行高。只有测量变化时才请求下一帧收敛裁剪区。
+    pub(in crate::editor) fn render_measured_document_row(
+        editor: WeakEntity<Self>,
+        row_id: EntityId,
+        surface: crate::editor::selection_surface::SelectionSurface,
+        content: AnyElement,
+    ) -> AnyElement {
+        div()
+            .relative()
+            .w_full()
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .items_center()
+            .child(content)
+            .child(
+                canvas(
+                    move |bounds, _, cx| {
+                        let height = f32::from(bounds.size.height);
+                        if height.is_finite() && height >= 0.0 {
+                            let _ = editor.update(cx, |editor, cx| {
+                                let cache = match surface {
+                                    crate::editor::selection_surface::SelectionSurface::Main => &mut editor.row_stride_cache,
+                                    crate::editor::selection_surface::SelectionSurface::SplitPreview => {
+                                        let Some(state) = editor.split_preview.as_mut() else { return; };
+                                        &mut state.row_stride_cache
+                                    }
+                                };
+                                let previous = cache.insert(row_id, height);
+                                if previous.is_none_or(|previous| (previous - height).abs() > 0.5) {
+                                    cx.notify();
+                                }
+                            });
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+            .into_any_element()
+    }
+
     pub(in crate::editor) fn scrollbar_geometry(
         viewport_height: f32,
         max_scroll_y: f32,
@@ -50,12 +139,11 @@ impl Editor {
 
     /// Picks the contiguous run of rows to mount; the culled runs become two
     /// spacers and the focused row stays mounted. `strides[i]` is row `i`'s
-    /// footprint (height plus trailing gap); being scroll-invariant, their running
+    /// measured wrapper footprint, including its leading margin; their running
     /// sum places each row against a band from the current scroll offset.
-    /// Unmeasured rows use a lower-bound estimate. The caller must extend the run
-    /// to its measurement frontier before painting, so a restored deep offset
-    /// cannot land beyond the estimated document height. Pure, so it is unit-tested
-    /// headlessly.
+    /// Unmeasured rows use a lower-bound estimate. A restored offset beyond that
+    /// estimate extends to the first unknown row; ordinary scrolling stays bounded.
+    /// Pure, so it is unit-tested headlessly.
     pub(in crate::editor) fn rendered_window(
         strides: &[f32],
         scroll_y: f32,
@@ -145,6 +233,22 @@ impl Editor {
         window
     }
 
+    /// 失效缓存恢复到超出最小高度估算的深位置时，从首个未知行连续挂载到目标窗口。
+    pub(in crate::editor) fn recover_render_window_to_measurement_frontier(
+        window: RenderWindow,
+        strides: &[f32],
+        scroll_y: f32,
+        measurement_frontier: usize,
+        restoring_deep_offset: bool,
+    ) -> RenderWindow {
+        let estimated_total = strides.iter().map(|stride| stride.max(0.0)).sum::<f32>();
+        if restoring_deep_offset && scroll_y > estimated_total {
+            Self::include_render_measurement_frontier(window, strides, measurement_frontier)
+        } else {
+            window
+        }
+    }
+
     /// 小文档完整挂载可避免滚动与行高学习之间的空白帧；超过阈值后才启用裁剪。
     /// 只有恢复偏移已经落在估算总高之外时才扩展到测量前沿；普通深滚动必须保持
     /// 有界窗口，否则一个未测量的首行会让数百行被同时挂载。
@@ -166,11 +270,12 @@ impl Editor {
             };
         }
         let window = Self::rendered_window(strides, scroll_y, viewport_height, overdraw, None);
-        let estimated_total = strides.iter().map(|stride| stride.max(0.0)).sum::<f32>();
-        if restoring_deep_offset && scroll_y > estimated_total {
-            Self::include_render_measurement_frontier(window, strides, measurement_frontier)
-        } else {
-            window
-        }
+        Self::recover_render_window_to_measurement_frontier(
+            window,
+            strides,
+            scroll_y,
+            measurement_frontier,
+            restoring_deep_offset,
+        )
     }
 }

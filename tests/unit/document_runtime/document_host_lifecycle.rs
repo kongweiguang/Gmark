@@ -3,6 +3,7 @@
 //! DocumentHost opening, backend selection, and recovery lifecycle tests.
 
 use super::*;
+use gpui::EntityInputHandler;
 
 #[test]
 fn source_font_uses_a_real_direct_write_family_on_windows() {
@@ -37,6 +38,132 @@ async fn empty_probe_growth_falls_back_to_background_reprobe(cx: &mut gpui::Test
     });
 }
 
+/// 锁定 Paged Source 的真实按键入口：Host 拥有焦点时 Right 必须折叠当前词选区。
+#[gpui::test]
+async fn paged_source_right_collapses_word_selection_to_its_end(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        crate::i18n::I18nManager::init(cx);
+        crate::theme::ThemeManager::init(cx);
+        crate::components::init(cx);
+    });
+    let temp = tempfile::tempdir().expect("horizontal navigation tempdir");
+    let path = temp.path().join("horizontal-navigation.txt");
+    fs::write(&path, "alpha_beta next\n").expect("horizontal navigation fixture");
+    let probe = gmark_paged_document::probe_file(
+        &path,
+        gmark_paged_document::ProbeOptions {
+            max_resident_bytes: 1,
+            ..gmark_paged_document::ProbeOptions::default()
+        },
+    )
+    .expect("Paged Source probe");
+    assert_eq!(probe.strategy, OpenStrategy::Paged);
+    let source = FileSource::open(&path).expect("Paged Source file");
+    let (host, visual) =
+        cx.add_window_view(move |_window, cx| DocumentHost::new(path, probe, source, cx));
+    visual.run_until_parked();
+    visual.update(|window, cx| {
+        host.update(cx, |host, _cx| {
+            host.select_source_range_and_focus_for_test(0..10, false, window);
+        });
+    });
+
+    visual.simulate_keystrokes("right");
+
+    assert_eq!(
+        host.read_with(visual, |host, _cx| host.source_selection_for_test())
+            .expect("Source selection"),
+        SourceSelection::collapsed(10, SourceAffinity::After),
+        "Right must collapse a word selection at its end instead of leaving it active"
+    );
+}
+
+/// Source 水平移动按完整字素跨 CRLF，Shift 扩选继续保留原源码锚点。
+#[gpui::test]
+async fn paged_source_horizontal_navigation_preserves_graphemes_and_anchor(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(|cx| {
+        crate::i18n::I18nManager::init(cx);
+        crate::theme::ThemeManager::init(cx);
+        crate::components::init(cx);
+    });
+    let temp = tempfile::tempdir().expect("horizontal navigation tempdir");
+    let path = temp.path().join("horizontal-graphemes.txt");
+    let family = "👨‍👩‍👧‍👦";
+    let source = format!("e\u{301}{family}x\r\nnext");
+    fs::write(&path, &source).expect("horizontal navigation fixture");
+    let probe = gmark_paged_document::probe_file(
+        &path,
+        gmark_paged_document::ProbeOptions {
+            max_resident_bytes: 1,
+            ..gmark_paged_document::ProbeOptions::default()
+        },
+    )
+    .expect("Paged Source probe");
+    assert_eq!(probe.strategy, OpenStrategy::Paged);
+    let source_file = FileSource::open(&path).expect("Paged Source file");
+    let (host, visual) =
+        cx.add_window_view(move |_window, cx| DocumentHost::new(path, probe, source_file, cx));
+    visual.run_until_parked();
+
+    visual.update(|window, cx| {
+        host.update(cx, |host, _cx| {
+            host.select_source_range_and_focus_for_test(0..0, false, window);
+        });
+    });
+    visual.simulate_keystrokes("right");
+    let combining_end = "e\u{301}".len() as u64;
+    assert_eq!(
+        host.read_with(visual, |host, _cx| host.source_selection_for_test())
+            .expect("combining grapheme selection"),
+        SourceSelection::collapsed(combining_end, SourceAffinity::After)
+    );
+
+    visual.simulate_keystrokes("right");
+    let family_end = combining_end + family.len() as u64;
+    assert_eq!(
+        host.read_with(visual, |host, _cx| host.source_selection_for_test())
+            .expect("family emoji selection"),
+        SourceSelection::collapsed(family_end, SourceAffinity::After)
+    );
+
+    visual.update(|window, cx| {
+        host.update(cx, |host, _cx| {
+            host.select_source_range_and_focus_for_test(family_end..family_end, false, window);
+        });
+    });
+    visual.simulate_keystrokes("shift-right");
+    assert_eq!(
+        host.read_with(visual, |host, _cx| host.source_selection_for_test())
+            .expect("shift grapheme selection"),
+        SourceSelection {
+            anchor: SourceAnchor::new(family_end, SourceAffinity::Before),
+            head: SourceAnchor::new(family_end + 1, SourceAffinity::After),
+        }
+    );
+
+    let x_end = source.find("x").expect("x fixture") as u64 + 1;
+    let next_line_start = source.find("next").expect("next fixture") as u64;
+    visual.update(|window, cx| {
+        host.update(cx, |host, _cx| {
+            host.select_source_range_and_focus_for_test(x_end..x_end, false, window);
+        });
+    });
+    visual.simulate_keystrokes("right");
+    assert_eq!(
+        host.read_with(visual, |host, _cx| host.source_selection_for_test())
+            .expect("CRLF forward navigation"),
+        SourceSelection::collapsed(next_line_start, SourceAffinity::After)
+    );
+    visual.simulate_keystrokes("left");
+    assert_eq!(
+        host.read_with(visual, |host, _cx| host.source_selection_for_test())
+            .expect("CRLF backward navigation"),
+        SourceSelection::collapsed(x_end, SourceAffinity::After)
+    );
+}
+
 /// Keep the exact UTF-8 paste boundary stable so callers cannot reject valid 64 MiB input.
 #[test]
 fn source_paste_limit_accepts_the_64_mib_boundary() {
@@ -47,6 +174,158 @@ fn source_paste_limit_accepts_the_64_mib_boundary() {
     assert!(DocumentHost::source_paste_exceeds_limit(
         &"x".repeat(limit + 1)
     ));
+}
+
+/// 锁定同步完成请求被拒绝后的重试语义，避免剪贴板和另存为动作重复入队。
+#[gpui::test]
+async fn source_ime_sync_finish_failure_retry_does_not_duplicate_actions(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(|cx| {
+        crate::i18n::I18nManager::init(cx);
+        crate::theme::ThemeManager::init(cx);
+        crate::components::init(cx);
+    });
+    let (host, visual) = cx.add_window_view(|_window, cx| {
+        DocumentHost::new_untitled(
+            PathBuf::from("Untitled-source-ime-sync.txt"),
+            DocumentFormat::PlainText,
+            "candidate",
+            cx,
+        )
+    });
+
+    visual.update(|window, cx| {
+        host.update(cx, |host, cx| {
+            host.begin_line_edit_for_test(0, window, cx);
+            let (_, input) = host
+                .active_edit_for_test()
+                .expect("Source input must be mounted before IME starts");
+            input.update(cx, |block, cx| block.composition_started(window, cx));
+
+            host.paste_for_test(window, cx);
+            assert_eq!(
+                host.pending_source_ime_action
+                    .as_ref()
+                    .expect("paste must wait for IME")
+                    .actions
+                    .len(),
+                1
+            );
+            assert!(
+                !host
+                    .pending_source_ime_action
+                    .as_ref()
+                    .expect("paste must remain queued after refusal")
+                    .request_in_flight
+            );
+
+            host.cut_for_test(window, cx);
+            host.on_save_document_as(&SaveDocumentAs, window, cx);
+            assert_eq!(
+                host.pending_source_ime_action
+                    .as_ref()
+                    .expect("all requested actions must stay queued")
+                    .actions
+                    .len(),
+                3
+            );
+
+            // 测试平台已拒绝组合输入完成；同一命令的显式重试不能再增加队列项。
+            host.paste_for_test(window, cx);
+            host.cut_for_test(window, cx);
+            host.on_save_document_as(&SaveDocumentAs, window, cx);
+            assert_eq!(
+                host.pending_source_ime_action
+                    .as_ref()
+                    .expect("failed actions must remain retryable")
+                    .actions
+                    .len(),
+                3
+            );
+        });
+    });
+}
+
+/// 锁定异步完成拒绝后的去重边界，并保留已受理在途请求中的用户重复操作。
+#[gpui::test]
+async fn source_ime_async_finish_failure_retry_does_not_duplicate_actions(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(|cx| {
+        crate::i18n::I18nManager::init(cx);
+        crate::theme::ThemeManager::init(cx);
+        crate::components::init(cx);
+    });
+    let (host, visual) = cx.add_window_view(|_window, cx| {
+        DocumentHost::new_untitled(
+            PathBuf::from("Untitled-source-ime-async.txt"),
+            DocumentFormat::PlainText,
+            "candidate",
+            cx,
+        )
+    });
+
+    visual.update(|window, cx| {
+        host.update(cx, |host, cx| {
+            host.begin_line_edit_for_test(0, window, cx);
+            let (_, input) = host
+                .active_edit_for_test()
+                .expect("Source input must be mounted before IME starts");
+            input.update(cx, |block, cx| block.composition_started(window, cx));
+
+            host.paste_for_test(window, cx);
+            let pending = host
+                .pending_source_ime_action
+                .as_mut()
+                .expect("paste must wait for IME");
+            // GPUI TestPlatform 不能受理原生请求；这里模拟已受理状态，再调用实际 Host 终态处理器覆盖异步拒绝。
+            pending.request_in_flight = true;
+
+            host.cut_for_test(window, cx);
+            host.on_save_document_as(&SaveDocumentAs, window, cx);
+            let owner = host
+                .active_edit_for_test()
+                .expect("IME owner must stay mounted until terminal event")
+                .1;
+            host.on_source_ime_terminal(&owner, &BlockEvent::ImeCompositionFinishFailed, cx);
+
+            assert_eq!(
+                host.pending_source_ime_action
+                    .as_ref()
+                    .expect("asynchronous refusal must preserve queued work")
+                    .actions
+                    .len(),
+                3
+            );
+            host.paste_for_test(window, cx);
+            host.cut_for_test(window, cx);
+            host.on_save_document_as(&SaveDocumentAs, window, cx);
+            assert_eq!(
+                host.pending_source_ime_action
+                    .as_ref()
+                    .expect("failed actions must remain retryable")
+                    .actions
+                    .len(),
+                3
+            );
+
+            // 后续请求已受理后属于新的等待区间；用户重复操作仍是独立动作。
+            host.pending_source_ime_action
+                .as_mut()
+                .expect("pending source request")
+                .request_in_flight = true;
+            host.paste_for_test(window, cx);
+            assert_eq!(
+                host.pending_source_ime_action
+                    .as_ref()
+                    .expect("in-flight repeated action must be queued")
+                    .actions
+                    .len(),
+                4
+            );
+        });
+    });
 }
 
 /// Verify an oversized source paste reports an error before the shared document transaction.

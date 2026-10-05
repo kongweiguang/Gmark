@@ -1,10 +1,14 @@
 // @author kongweiguang
 
-use crate::{DocumentViewId, PersistenceError, SourceSelection, Transaction};
+use crate::{DocumentViewId, PersistenceError, SourceSelection, Transaction, TypingGroupId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RecoveryAction {
     Transaction(Transaction),
+    TypingTransaction {
+        transaction: Transaction,
+        group_id: TypingGroupId,
+    },
     Undo,
     Redo,
 }

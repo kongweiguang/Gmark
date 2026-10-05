@@ -437,6 +437,7 @@ impl Block {
         is_bare_fence.then(|| line_start.saturating_sub(1))
     }
 
+    /// 普通段落的拆分由父编辑器一次提交；原块先刷新布局，不能先发布截断正文生成半次历史。
     pub(crate) fn on_newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
         if self.host_submit_enabled() {
             self.dispatch_host_action(
@@ -626,7 +627,11 @@ impl Block {
         let (leading, trailing) = self.split_title(cursor);
         self.prepare_undo_capture(UndoCaptureKind::NonCoalescible, cx);
         self.record.set_title(leading);
-        self.mark_changed(cx);
+        self.sync_edit_mode_from_kind();
+        self.sync_render_cache();
+        self.cursor_blink_epoch = std::time::Instant::now();
+        self.vertical_motion_x = None;
+        cx.notify();
         let cursor = self.visible_len();
         self.assign_collapsed_selection_offset(cursor, CollapsedCaretAffinity::Default, None);
         self.marked_range = None;

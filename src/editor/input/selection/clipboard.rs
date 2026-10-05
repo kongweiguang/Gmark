@@ -194,13 +194,18 @@ impl Editor {
         self.show_pane_notice("无法写入剪贴板，文字已保留，请重试", cx);
     }
 
-    /// Uses the selected display slices for plain text so Markdown syntax is never reinterpreted.
+    /// 失败恢复优先消费同一个 Copy 动作，避免按键捕获后的常规复制再次覆盖备份载荷。
+    /// 普通复制使用可见选区，Markdown 语法仍留给显式源码复制。
     pub(in crate::editor) fn on_copy_capture(
         &mut self,
         _: &Copy,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.recover_resident_source_commit(cx) {
+            cx.stop_propagation();
+            return;
+        }
         let Some((surface, target)) = self.focused_document_target(window, cx) else {
             cx.propagate();
             return;

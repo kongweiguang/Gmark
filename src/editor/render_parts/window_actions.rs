@@ -199,7 +199,7 @@ impl Editor {
         }));
     }
 
-    /// 保存只读取已提交正文；保持 pending 请求直到候选确认为事务或明确取消。
+    /// 保存只读取已提交正文；Host 的系统关窗意图在保存与输入终态后，复用既有关闭门禁。
     pub(in crate::editor) fn sync_pending_save(
         &mut self,
         window: &mut Window,
@@ -211,6 +211,26 @@ impl Editor {
             }
             self.pending_save = false;
             self.save_document(window, cx);
+        }
+        if self.pending_close_after_save
+            && self.document_host.as_ref().is_some_and(|host| {
+                let host = host.read(cx);
+                !host.is_dirty()
+                    && !host.has_pending_save()
+                    && !host.has_pending_source_input()
+                    && !host.has_active_ime_composition(cx)
+            })
+        {
+            let editor = cx.entity().downgrade();
+            let epoch = self.document_epoch;
+            // 关闭放到绘制后执行，避免渲染中移除窗口；取消或换代使已排队回调失效。
+            window.defer(cx, move |window, cx| {
+                let _ = editor.update(cx, |editor, cx| {
+                    if editor.pending_close_after_save && editor.document_epoch == epoch {
+                        editor.request_close_current_window(window, cx);
+                    }
+                });
+            });
         }
     }
 

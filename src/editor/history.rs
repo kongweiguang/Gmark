@@ -4,6 +4,7 @@
 
 use super::*;
 
+/// 历史正文可保留原拼写；仅补齐换行格式数量，使异常旧快照仍可安全保存。
 fn source_format_for_history_text(
     text: &str,
     mut format: gmark_document::SourceFormatSnapshot,
@@ -18,12 +19,14 @@ impl Editor {
         UndoSelectionSnapshot::collapsed(0, SourceAffinity::Before)
     }
 
+    /// 对外快照统一使用权威源码坐标；Live 的规范化拼写只留在投影内部。
     pub(super) fn capture_source_selection_snapshot(&self, cx: &App) -> UndoSelectionSnapshot {
+        let _trace = crate::perf::span("selection_snapshot_sync");
         if self.view_mode == ViewMode::Preview {
             return self.last_selection_snapshot;
         }
         if let Some(snapshot) = self.cross_block_source_selection_snapshot(cx) {
-            return snapshot;
+            return self.map_selection_source_spelling(snapshot, true, cx);
         }
 
         if matches!(self.view_mode, ViewMode::Source | ViewMode::Split) {
@@ -65,14 +68,24 @@ impl Editor {
         let end = mapping.full_source_range.start
             + mapping.content_to_source[content_range.end.min(max_offset)];
 
-        UndoSelectionSnapshot::from_range(start..end, target.read(cx).selection_reversed)
+        self.map_selection_source_spelling(
+            UndoSelectionSnapshot::from_range(start..end, target.read(cx).selection_reversed),
+            true,
+            cx,
+        )
     }
 
+    /// 历史正文来自已同步的源码；投影规范化仅供显示，不能因捕获历史改写原 Markdown 拼写。
     pub(super) fn capture_history_entry(&self, kind: UndoCaptureKind, cx: &App) -> HistoryEntry {
-        let source_text = self.current_document_source(cx);
+        let source_text = self
+            .pending_dirty_source
+            .clone()
+            .unwrap_or_else(|| self.source_document.text());
+        let source_format =
+            source_format_for_history_text(&source_text, self.source_document.source_format());
         HistoryEntry {
             source: HistorySource::capture(self.source_document.snapshot(), source_text),
-            source_format: self.source_document.source_format(),
+            source_format,
             selection: self.capture_source_selection_snapshot(cx),
             timestamp: Instant::now(),
             kind,
@@ -124,6 +137,65 @@ impl Editor {
         });
     }
 
+    /// 表格行操作从权威源码捕获正文；事件携带修改前的局部选区，避免异步派发时读取修改后的 cell。
+    /// 表格 record 此时尚未同步新内容，因此既有映射仍属于被捕获的正文和输入目标。
+    pub(super) fn prepare_undo_capture_from_source_document_snapshot(
+        &mut self,
+        kind: UndoCaptureKind,
+        entity_id: EntityId,
+        markdown_selection: std::ops::Range<usize>,
+        reversed: bool,
+        cx: &App,
+    ) {
+        let selection = self
+            .build_source_target_mapping_for_entity(entity_id, cx)
+            .map(|mapping| {
+                let max_offset = mapping.content_to_source.len().saturating_sub(1);
+                let start = mapping.full_source_range.start
+                    + mapping.content_to_source[markdown_selection.start.min(max_offset)];
+                let end = mapping.full_source_range.start
+                    + mapping.content_to_source[markdown_selection.end.min(max_offset)];
+                self.map_selection_source_spelling(
+                    UndoSelectionSnapshot::from_range(start..end, reversed),
+                    true,
+                    cx,
+                )
+            })
+            .unwrap_or(self.last_selection_snapshot);
+        if self.virtual_surface.is_some() {
+            if self.pending_virtual_undo_selection.is_none() {
+                self.pending_virtual_undo_selection = Some(selection);
+            }
+            return;
+        }
+        if self.history_restore_in_progress || self.pending_undo_capture.is_some() {
+            return;
+        }
+
+        let source = self
+            .pending_dirty_source
+            .as_ref()
+            .map(|source| HistorySource::Materialized(Arc::from(source.as_str())))
+            .unwrap_or_else(|| HistorySource::Snapshot(self.source_document.snapshot()));
+        let source_format = self
+            .pending_dirty_source
+            .as_deref()
+            .map(|source| {
+                source_format_for_history_text(source, self.source_document.source_format())
+            })
+            .unwrap_or_else(|| self.source_document.source_format());
+        self.pending_undo_capture = Some(PendingUndoCapture {
+            snapshot: HistoryEntry {
+                source,
+                source_format,
+                selection,
+                timestamp: Instant::now(),
+                kind,
+            },
+        });
+    }
+
+    /// 选区与焦点刷新沿用权威正文；仅消费真实修改产生的暂存源码，避免下一次输入撤销退回规范化投影。
     pub(super) fn refresh_stable_document_snapshot(&mut self, cx: &App) {
         self.last_selection_snapshot = self.capture_source_selection_snapshot(cx);
         if self.virtual_surface.is_some() {
@@ -134,12 +206,18 @@ impl Editor {
         let source_text = self
             .pending_dirty_source
             .take()
-            .unwrap_or_else(|| self.current_document_source_from_cache(cx));
+            .unwrap_or_else(|| self.source_document.text());
         self.last_stable_source =
             HistorySource::capture(self.source_document.snapshot(), source_text);
     }
 
+    /// 只把成功提交的权威正文加入历史；失败投影由恢复入口保留，不能生成伪撤销或规范化快照。
     pub(super) fn finalize_pending_undo_capture(&mut self, cx: &mut Context<Self>) {
+        if self.document.source_commit_error().is_some() {
+            self.pending_undo_capture = None;
+            self.pending_dirty_source = None;
+            return;
+        }
         if self.virtual_surface.is_some() {
             if let Some(selection) = self.pending_virtual_undo_selection.take() {
                 self.virtual_undo_selections.push(selection);
@@ -161,7 +239,7 @@ impl Editor {
         let current_source = self
             .pending_dirty_source
             .take()
-            .unwrap_or_else(|| self.current_document_source(cx));
+            .unwrap_or_else(|| self.source_document.text());
         let Some(pending) = self.pending_undo_capture.take() else {
             self.last_selection_snapshot = self.capture_source_selection_snapshot(cx);
             self.last_stable_source =
@@ -212,6 +290,7 @@ impl Editor {
             HistorySource::capture(self.source_document.snapshot(), current_source);
     }
 
+    /// 历史和跨模式快照以原源码保存；只在 Live 恢复时转回规范投影，保持同步源选区不变。
     pub(super) fn apply_selection_snapshot_in_current_mode(
         &mut self,
         snapshot: &UndoSelectionSnapshot,
@@ -240,6 +319,10 @@ impl Editor {
                 self.active_entity_id = Some(block.entity_id());
             }
             ViewMode::Rendered | ViewMode::Preview => {
+                let projection_snapshot = self.map_selection_source_spelling(*snapshot, false, cx);
+                let snapshot = &projection_snapshot;
+                let range = snapshot.range();
+                let reversed = snapshot.reversed();
                 if self.apply_cross_block_selection_snapshot_if_possible(snapshot, cx) {
                     return;
                 }
@@ -345,10 +428,12 @@ impl Editor {
         }
     }
 
+    /// 恢复历史中的权威源码，并让后续稳定快照与保存继续使用该源码，而非投影的规范序列化。
     pub(super) fn restore_history_entry(&mut self, entry: &HistoryEntry, cx: &mut Context<Self>) {
         // 只有真正执行 undo/redo 时才物化完整正文，历史长期驻留保持 Rope COW。
         let source_text = entry.source.text();
         self.sync_source_document_from_projection(&source_text);
+        self.pending_dirty_source = Some(source_text.clone());
         // 历史快照来自 UI 输入与源码同步的交界处。即使旧版本或异常事件顺序留下了
         // 换行数量不匹配的快照，也必须修复为可序列化格式，不能在撤销时终止主线程。
         let format = source_format_for_history_text(&source_text, entry.source_format.clone());
@@ -379,14 +464,17 @@ impl Editor {
         self.refresh_stable_document_snapshot(cx);
     }
 
+    /// 引用重解析先提交所属区域，再从权威源码重建；结构整理不能规范化其它段落的原始拼写。
     pub(super) fn normalize_rendered_quote_structure(&mut self, cx: &mut Context<Self>) {
         if self.view_mode != ViewMode::Rendered {
             return;
         }
 
         let selection_snapshot = self.capture_source_selection_snapshot(cx);
-        let source = self.document.markdown_text(cx);
-        self.sync_source_document_from_projection(&source);
+        self.mark_dirty(cx);
+        if self.document.source_commit_error().is_some() {
+            return;
+        }
         self.rebuild_primary_projection_from_source_reusing(cx);
         self.apply_selection_snapshot_in_current_mode(&selection_snapshot, cx);
         self.pending_scroll_active_block_into_view = true;
@@ -394,9 +482,12 @@ impl Editor {
         self.last_scroll_viewport_size = None;
     }
 
-    /// 历史写入入口再次校验实际选择表面，覆盖菜单和内部调用。
+    /// 历史写入入口校验实际表面与失败恢复门禁，备份前不能覆盖尚未提交的可见文字。
     pub(super) fn undo_document(&mut self, cx: &mut Context<Self>) {
-        if !self.document_surface_is_editable() || self.has_active_ime_composition(cx) {
+        if !self.document_surface_is_editable()
+            || self.document.source_commit_error().is_some()
+            || self.has_active_ime_composition(cx)
+        {
             return;
         }
         if self.virtual_surface.is_some() {
@@ -415,15 +506,18 @@ impl Editor {
         self.restore_history_entry(&entry, cx);
         self.history_restore_in_progress = false;
         self.redo_history.push(current);
-        self.mark_dirty(cx);
+        self.mark_restored_document_dirty(cx);
         self.sync_table_axis_visuals(cx);
         self.dismiss_contextual_overlays(cx);
         cx.notify();
     }
 
-    /// Split 右侧和候选暂存期间保持正文及历史不变量。
+    /// Split 右侧、候选与失败恢复期间保持正文及历史不变量。
     pub(super) fn redo_document(&mut self, cx: &mut Context<Self>) {
-        if !self.document_surface_is_editable() || self.has_active_ime_composition(cx) {
+        if !self.document_surface_is_editable()
+            || self.document.source_commit_error().is_some()
+            || self.has_active_ime_composition(cx)
+        {
             return;
         }
         if self.virtual_surface.is_some() {
@@ -442,7 +536,7 @@ impl Editor {
         self.restore_history_entry(&entry, cx);
         self.history_restore_in_progress = false;
         self.undo_history.push(current);
-        self.mark_dirty(cx);
+        self.mark_restored_document_dirty(cx);
         self.sync_table_axis_visuals(cx);
         self.dismiss_contextual_overlays(cx);
         cx.notify();

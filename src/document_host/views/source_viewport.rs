@@ -168,14 +168,7 @@ impl DocumentHost {
                                     .filter_map(|line| {
                                         Some((
                                             usize::try_from(line.line).ok()?,
-                                            BoundedLineWindow::new(
-                                                line.content_range,
-                                                line.source_range,
-                                                line.text,
-                                                line.ending,
-                                                line.leading_truncated,
-                                                line.trailing_truncated,
-                                            ),
+                                            BoundedLineWindow::from_viewport(line),
                                         ))
                                     })
                                     .collect::<Vec<_>>()

@@ -3,8 +3,7 @@
 use super::*;
 
 impl Editor {
-    /// Builds the unsaved-changes dialog with backdrop, message, and three
-    /// action buttons (cancel, discard, save-and-close).
+    /// 模态层注册稳定焦点，并在 GPUI 裸按键之前吸收已匹配动作，覆盖自定义快捷键。
     pub(super) fn render_unsaved_changes_overlay(
         &self,
         theme: &Theme,
@@ -12,8 +11,50 @@ impl Editor {
     ) -> impl IntoElement {
         let d = &theme.dimensions;
         let strings = cx.global::<I18nManager>().strings();
-
-        modal_overlay("unsaved-changes-overlay", theme).child(
+        let focus_ring = vec![BoxShadow {
+            color: theme.colors.workbench.focus_ring,
+            offset: point(px(0.0), px(0.0)),
+            blur_radius: px(0.0),
+            spread_radius: px(2.0),
+        }];
+        let actions = cx
+            .key_bindings()
+            .borrow()
+            .bindings()
+            .map(|binding| {
+                (
+                    binding.action().as_any().type_id(),
+                    binding.action().boxed_clone(),
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut overlay = modal_overlay("unsaved-changes-overlay", theme)
+            .on_key_down(cx.listener(Self::on_close_dialog_key_down));
+        for action in actions.into_values() {
+            let editor = cx.entity().downgrade();
+            overlay = overlay.on_boxed_action(action.as_ref(), move |action, window, cx| {
+                let modal = editor
+                    .update(cx, |editor, cx| {
+                        if !editor.show_unsaved_changes_dialog {
+                            return false;
+                        }
+                        if action
+                            .as_any()
+                            .is::<crate::components::DismissTransientUi>()
+                        {
+                            editor.cancel_close_dialog(window, cx);
+                        }
+                        true
+                    })
+                    .unwrap_or(false);
+                if modal {
+                    cx.stop_propagation();
+                } else {
+                    cx.propagate();
+                }
+            });
+        }
+        overlay.child(
             div()
                 .w_full()
                 .px(px(d.editor_padding))
@@ -45,6 +86,9 @@ impl Editor {
                                         DialogButtonKind::Secondary,
                                         theme,
                                     )
+                                    .tab_index(0)
+                                    .track_focus(&self.close_dialog_focus_handles[0])
+                                    .focus(|style| style.shadow(focus_ring.clone()))
                                     .on_click(cx.listener(Self::on_cancel_close_dialog)),
                                 )
                                 .child(
@@ -54,6 +98,9 @@ impl Editor {
                                         DialogButtonKind::Danger,
                                         theme,
                                     )
+                                    .tab_index(1)
+                                    .track_focus(&self.close_dialog_focus_handles[1])
+                                    .focus(|style| style.shadow(focus_ring.clone()))
                                     .on_click(cx.listener(Self::on_discard_and_close)),
                                 )
                                 .child(
@@ -63,6 +110,9 @@ impl Editor {
                                         DialogButtonKind::Primary,
                                         theme,
                                     )
+                                    .tab_index(2)
+                                    .track_focus(&self.close_dialog_focus_handles[2])
+                                    .focus(|style| style.shadow(focus_ring.clone()))
                                     .on_click(cx.listener(Self::on_save_and_close)),
                                 ),
                         ),

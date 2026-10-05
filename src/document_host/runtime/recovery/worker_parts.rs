@@ -315,7 +315,8 @@ impl RecoveryJob {
                 record, snapshot, ..
             } => (
                 match &record.action {
-                    RecoveryAction::Transaction(transaction) => transaction
+                    RecoveryAction::Transaction(transaction)
+                    | RecoveryAction::TypingTransaction { transaction, .. } => transaction
                         .edits
                         .iter()
                         .map(|edit| edit.replacement.len())
@@ -492,14 +493,18 @@ impl RecoveryWorker {
         Some(worker)
     }
 
-    /// Apply the bounded queue policy before handing a command to the worker;
-    /// Paged commands fail explicitly while Resident state may coalesce.
+    /// 视图仅持共享队列能力；实际命令仍按同一有界策略入队。
     pub(crate) fn enqueue(&mut self, job: RecoveryJob) -> Result<(), RecoveryQueueError> {
+        Self::enqueue_shared(&self.shared, job)
+    }
+
+    /// 保存完成可以晚于原视图关闭，仍须向原文档的共享队列投递准确快照而不能重捕获新正文。
+    pub(crate) fn enqueue_shared(
+        shared: &SharedRecoveryState,
+        job: RecoveryJob,
+    ) -> Result<(), RecoveryQueueError> {
         let bytes = job.estimated_bytes();
-        let mut worker = self
-            .shared
-            .mailbox()
-            .ok_or(RecoveryQueueError::Disconnected)?;
+        let mut worker = shared.mailbox().ok_or(RecoveryQueueError::Disconnected)?;
         let queued = worker.queued_bytes.load(Ordering::Acquire);
         let paged = worker.paged.load(Ordering::Acquire);
         // A flush is an ordered acknowledgement, not a coalescible Resident

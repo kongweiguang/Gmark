@@ -239,94 +239,6 @@ pub(super) struct FindMatchMetadata {
 }
 
 impl Editor {
-    /// Holds Find until the active IME owner has committed or cancelled its pre-edit text.
-    pub(crate) fn on_find_in_document_action(
-        &mut self,
-        _: &crate::components::FindInDocument,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.defer_action_for_ime(&crate::components::FindInDocument, window, cx) {
-            cx.stop_propagation();
-            return;
-        }
-        if let Some(document_host) = self.document_host.clone() {
-            document_host.update(cx, |document_host, cx| {
-                document_host.on_find_in_document(&crate::components::FindInDocument, window, cx);
-            });
-            return;
-        }
-        self.open_find_panel(false, window, cx);
-    }
-
-    /// Holds Replace until the active IME owner has committed or cancelled its pre-edit text.
-    pub(crate) fn on_replace_in_document_action(
-        &mut self,
-        _: &crate::components::ReplaceInDocument,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.defer_action_for_ime(&crate::components::ReplaceInDocument, window, cx) {
-            cx.stop_propagation();
-            return;
-        }
-        if let Some(document_host) = self.document_host.clone() {
-            document_host.update(cx, |document_host, cx| {
-                document_host.on_find_in_document(&crate::components::FindInDocument, window, cx);
-            });
-            return;
-        }
-        self.open_find_panel(true, window, cx);
-    }
-
-    /// Keeps navigation in the original document until the IME resolves its candidate state.
-    pub(crate) fn on_find_next_action(
-        &mut self,
-        _: &crate::components::FindNext,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.defer_action_for_ime(&crate::components::FindNext, window, cx) {
-            cx.stop_propagation();
-            return;
-        }
-        if let Some(document_host) = self.document_host.clone() {
-            document_host.update(cx, |document_host, cx| {
-                document_host.on_find_next(&crate::components::FindNext, window, cx);
-            });
-            return;
-        }
-        if self.find_panel.is_none() {
-            self.open_find_panel(false, window, cx);
-        } else {
-            self.navigate_find_match(1, window, cx);
-        }
-    }
-
-    /// Keeps reverse navigation in the original document until the IME resolves its candidate state.
-    pub(crate) fn on_find_previous_action(
-        &mut self,
-        _: &crate::components::FindPrevious,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.defer_action_for_ime(&crate::components::FindPrevious, window, cx) {
-            cx.stop_propagation();
-            return;
-        }
-        if let Some(document_host) = self.document_host.clone() {
-            document_host.update(cx, |document_host, cx| {
-                document_host.on_find_previous(&crate::components::FindPrevious, window, cx);
-            });
-            return;
-        }
-        if self.find_panel.is_none() {
-            self.open_find_panel(false, window, cx);
-        } else {
-            self.navigate_find_match(-1, window, cx);
-        }
-    }
-
     /// Captures the actual focused text surface before Find takes focus from its source block.
     fn capture_find_restore_focus(&self, window: &Window, cx: &App) -> Option<FindRestoreFocus> {
         if let Some((surface, block)) = self.focused_document_target(window, cx) {
@@ -346,11 +258,16 @@ impl Editor {
             .then_some(FindRestoreFocus { surface, entity_id })
     }
 
-    /// Opens Find and records the exact editable surface whose focus should return on close.
+    /// 打开查找时从当前聚焦表面生成查询文本，避免旧源码快照误取其他窗格的选区。
+    ///
+    /// Live、Preview 与 Split 右侧使用可见文本映射；Source 与 Split Main 保留原始 Markdown。
+    /// 查找接管焦点时清除模式切换遗留的待办焦点，关闭时再按本次捕获的目标恢复。
+    /// 焦点已转移到工具界面时只使用本次捕获的恢复目标，避免陈旧快照造成跨窗格串选。
     fn open_find_panel(&mut self, show_replace: bool, window: &mut Window, cx: &mut Context<Self>) {
         let restore_focus = self.capture_find_restore_focus(window, cx);
         self.close_menu_bar(cx);
         self.dismiss_contextual_overlays(cx);
+        self.pending_focus = None;
         if let Some(state) = self.find_panel.as_mut() {
             state.show_replace |= show_replace;
             if show_replace {
@@ -364,12 +281,31 @@ impl Editor {
             return;
         }
 
-        let selection = self.capture_source_selection_snapshot(cx);
-        let selection_range = selection.range();
-        let source = self.source_document.snapshot();
-        let initial_query = (!selection_range.is_empty())
-            .then(|| source.text_for_range(selection_range).ok())
-            .flatten()
+        let source_revision = self.source_document.revision();
+        let selection_target = self.focused_document_target(window, cx).or_else(|| {
+            let restore_focus = restore_focus?;
+            self.selection_surface_entities(restore_focus.surface)
+                .into_iter()
+                .find(|target| target.entity_id() == restore_focus.entity_id)
+                .map(|target| (restore_focus.surface, target))
+        });
+        let initial_query = selection_target
+            .map(|(surface, target)| {
+                if self.view_mode == ViewMode::Source
+                    || (self.view_mode == ViewMode::Split
+                        && surface == super::selection_surface::SelectionSurface::Main)
+                {
+                    let block = target.read(cx);
+                    block
+                        .display_text()
+                        .get(block.selected_range.clone())
+                        .map(str::to_owned)
+                        .unwrap_or_default()
+                } else {
+                    self.selected_visible_text_for_target(surface, &target, cx)
+                        .unwrap_or_default()
+                }
+            })
             .filter(|text| !text.contains(['\r', '\n']) && text.len() <= 256)
             .unwrap_or_default();
         let strings = cx.global::<I18nManager>().strings_arc();
@@ -403,7 +339,7 @@ impl Editor {
             selected: 0,
             error: None,
             truncated: false,
-            revision: source.revision(),
+            revision: source_revision,
             generation: 0,
             task: None,
             replace_task: None,

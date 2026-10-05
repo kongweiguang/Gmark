@@ -13,6 +13,8 @@ use crate::preferences::ResourceInsertBehavior;
 
 #[path = "file_drop_parts/materialize.rs"]
 mod materialize;
+#[path = "file_drop_parts/replacement.rs"]
+mod replacement;
 #[path = "file_drop_parts/target.rs"]
 mod target;
 
@@ -103,7 +105,7 @@ impl Editor {
         .detach();
     }
 
-    /// 在 gate 通过后复用现有图片块插入语义；任何未提交分支只清理由本任务创建的副本。
+    /// 跨块替换失败不能退成局部写入；未提交资源仍由守卫清理，仅成功事务取得资源所有权。
     fn commit_dropped_resource(
         &mut self,
         block: Entity<super::Block>,
@@ -120,6 +122,7 @@ impl Editor {
         if !resource_drop_target_is_current(fingerprint, &current) {
             return;
         }
+        let had_cross_selection = self.cross_block_selection.is_some();
         if self.replace_cross_block_selection_with_text(
             &markdown,
             None,
@@ -128,6 +131,9 @@ impl Editor {
             cx,
         ) {
             cleanup.disarm();
+            return;
+        }
+        if had_cross_selection || self.document.source_commit_error().is_some() {
             return;
         }
         let Some(block) = self.focusable_entity_by_id(block.entity_id()) else {
@@ -320,107 +326,14 @@ impl Editor {
         }
     }
 
+    /// 使用同一轮文件读取的正文和身份，保证后续原子保存校验当前磁盘版本。
     pub(super) fn replace_document_from_path(
         &mut self,
         path: &Path,
         cx: &mut Context<Self>,
     ) -> Result<()> {
         let opened = crate::document_io::read_markdown_file(path)?;
-        let encoding = opened.encoding.clone();
-        self.replace_document_from_markdown(opened.text, Some(path.to_path_buf()), cx);
-        self.source_encoding = encoding;
-        if !self.source_encoding.is_utf8() {
-            self.set_view_mode(ViewMode::Preview, cx);
-            self.show_encoding_conversion_dialog = true;
-        }
-        if !crate::document_io::is_markdown_path(path) {
-            self.set_view_mode(ViewMode::Source, cx);
-        }
-        crate::app_menu::record_recent_file_from_editor(path, cx);
-        Ok(())
-    }
-
-    pub(super) fn replace_document_from_markdown(
-        &mut self,
-        markdown: String,
-        file_path: Option<PathBuf>,
-        cx: &mut Context<Self>,
-    ) {
-        // A document replacement invalidates every renderer-owned generation,
-        // not only standalone image-preview tiles. Cancel the old document's
-        // decode tasks before advancing the epoch so completions cannot retain
-        // or publish payloads into the new document.
-        self.release_render_assets_for_active_document(cx);
-        self.document_epoch = self.document_epoch.wrapping_add(1);
-        self.reset_markdown_view_state_identity(file_path.as_deref());
-        self.image_preview_path = None;
-        self.source_encoding = crate::document_io::DocumentEncoding::Utf8;
-        self.show_encoding_conversion_dialog = false;
-        self.saved_file_fingerprint = file_path
-            .as_deref()
-            .and_then(|path| crate::recovery::fingerprint_file(path).ok());
-        self.external_file_conflict = false;
-        self.recovered_session = false;
-        self.show_external_conflict_dialog = false;
-        self.external_conflict_preview = None;
-        self.external_conflict_restore_focus = None;
-        self.allow_external_overwrite_once = false;
-        self.document_kind = file_path
-            .as_deref()
-            .map(DocumentKind::from_path)
-            .unwrap_or(DocumentKind::Markdown);
-        self.file_path = file_path;
-        self.image_preview_zoom = 1.0;
-        self.view_mode = ViewMode::Rendered;
-        self.split_preview = None;
-        self.projection_cache_task = None;
-        self.projection_cache_scheduled_revision = None;
-        self.split_projection_task = None;
-        self.split_projection_scheduled_revision = None;
-        self.source_document = gmark_document::SourceDocument::new(&markdown).into();
-        self.projection_cache = None;
-        self.table_cells.clear();
-        self.rebuild_primary_projection_from_source(cx);
-
-        self.document_dirty = false;
-        self.pending_window_edited = false;
-        self.pending_window_title_refresh = true;
-        self.pending_save = false;
-        self.pending_save_as = false;
-        self.pending_resource_insertion = None;
-        self.save_task = None;
-        self.save_queued = false;
-        self.auto_save_task = None;
-        self.pending_open_link = None;
-        self.pending_close_after_save = false;
-        self.close_dialog_restore_focus = None;
-        self.show_unsaved_changes_dialog = false;
-        self.clear_pending_drop_replace_state(cx);
-        self.dismiss_contextual_overlays(cx);
-        self.close_menu_bar(cx);
-        self.table_axis_preview = None;
-        self.table_axis_selection = None;
-        self.sync_table_axis_visuals(cx);
-        self.clear_cross_block_selection(cx);
-
-        self.pending_scroll_active_block_into_view = true;
-        self.pending_scroll_recheck_after_layout = true;
-        self.last_scroll_viewport_size = None;
-        self.scroll_handle.set_offset(point(px(0.0), px(0.0)));
-        self.pending_focus = self.first_focusable_entity_id(cx);
-        self.active_entity_id = self.pending_focus;
-
-        self.undo_history.clear();
-        self.redo_history.clear();
-        self.pending_undo_capture = None;
-        self.last_selection_snapshot = Self::empty_selection_snapshot();
-        self.history_restore_in_progress = false;
-        self.checkpoint_recovery_journal();
-        self.refresh_stable_document_snapshot(cx);
-        self.sync_workspace_after_document_path_change(cx);
-        self.restart_file_watcher(cx);
-        self.apply_pending_workspace_navigation(cx);
-        cx.notify();
+        self.replace_document_from_opened_markdown(opened, path.to_path_buf(), cx)
     }
 
     pub(crate) fn cancel_drop_replace_dialog(&mut self, cx: &mut Context<Self>) {

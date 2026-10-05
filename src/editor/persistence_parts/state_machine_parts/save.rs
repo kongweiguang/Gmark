@@ -4,6 +4,9 @@
 
 use super::*;
 
+const EXISTING_SAVE_FAILURE_NOTICE: &str = "保存失败，修改已保留；按 Ctrl+S 重试";
+const EXISTING_SAVE_UNCERTAIN_NOTICE: &str = "保存结果待确认，修改仍保留；检查文件后再重试";
+
 /// 构造保存竞态下的磁盘对比快照；二次身份校验失败仍是可恢复冲突，不能降级成
 /// 只有“确定”按钮的通用错误，否则用户既无法比较版本，也可能在重试时误覆盖新文件。
 fn existing_save_conflict_preview(path: &Path, local: &str) -> ExternalConflictPreview {
@@ -96,6 +99,46 @@ fn write_existing_snapshot(
 }
 
 impl Editor {
+    /// 详细原因只进入诊断；只有仍指向原文档时才展示短提示，避免后台回调污染新文档。
+    fn present_existing_save_failure(
+        &mut self,
+        expected_document_epoch: u64,
+        detail: &str,
+        target_may_have_changed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        eprintln!("已有文档保存失败: {detail}");
+        if self.document_epoch != expected_document_epoch {
+            return;
+        }
+        let notice = if target_may_have_changed {
+            EXISTING_SAVE_UNCERTAIN_NOTICE
+        } else {
+            EXISTING_SAVE_FAILURE_NOTICE
+        };
+        self.show_pane_notice(notice, cx);
+    }
+
+    /// 只清理保存状态自己的短提示；其他操作新发出的底栏提示必须继续显示。
+    fn clear_existing_save_failure_notice(
+        &mut self,
+        expected_document_epoch: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if self.document_epoch != expected_document_epoch {
+            return;
+        }
+        let is_save_notice = self.pane_notice.as_ref().is_some_and(|notice| {
+            notice.as_ref() == EXISTING_SAVE_FAILURE_NOTICE
+                || notice.as_ref() == EXISTING_SAVE_UNCERTAIN_NOTICE
+        });
+        if is_save_notice {
+            self.pane_notice_task = None;
+            self.pane_notice = None;
+            cx.notify();
+        }
+    }
+
     /// 原子替换后持久化同步失败时，磁盘可能已经是新内容，但不能宣称保存成功。
     /// 刷新 fingerprint 允许用户重试，同时保留 dirty 与恢复 journal。
     pub(super) fn apply_uncertain_save_baseline(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -117,6 +160,7 @@ impl Editor {
         cx.notify();
     }
 
+    /// 后台保存以文档代际绑定反馈，失败不夺焦点，冲突仍进入专用比较恢复流程。
     pub(super) fn save_existing_path_in_background(
         &mut self,
         path: PathBuf,
@@ -124,6 +168,7 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         let dispatch_started = super::perf::start();
+        let request_document_epoch = self.document_epoch;
         if self.save_task.is_some() {
             self.save_queued = true;
             return;
@@ -155,7 +200,12 @@ impl Editor {
                 if should_close_after_save {
                     self.abort_pending_close_after_save(cx);
                 }
-                eprintln!("保存快照准备失败: {detail}");
+                self.present_existing_save_failure(
+                    request_document_epoch,
+                    &format!("保存快照准备失败: {detail}"),
+                    false,
+                    cx,
+                );
                 return;
             }
         };
@@ -165,10 +215,15 @@ impl Editor {
             if should_close_after_save {
                 self.abort_pending_close_after_save(cx);
             }
-            eprintln!("保存快照缺少 Resident 基线");
+            self.present_existing_save_failure(
+                request_document_epoch,
+                "保存快照缺少 Resident 基线",
+                false,
+                cx,
+            );
             return;
         };
-        let document_epoch = self.document_epoch;
+        let document_epoch = request_document_epoch;
         let byte_len = snapshot.len();
         let window_handle = window.window_handle();
         let worker_path = path.clone();
@@ -182,7 +237,6 @@ impl Editor {
             ));
             let mut saved_current_revision = false;
             let mut conflict = false;
-            let mut error = None;
             while let Some((snapshot, source_format, overwrite, expected_fingerprint)) = next.take()
             {
                 let path_for_write = worker_path.clone();
@@ -218,13 +272,19 @@ impl Editor {
                                     document_epoch,
                                     cx,
                                 );
+                                editor.clear_existing_save_failure_notice(document_epoch, cx);
                                 promoted.and_then(|snapshot| {
                                     let format = snapshot.source_format.clone()?;
                                     Some((snapshot, format))
                                 })
                             }
                             Err(completion_error) => {
-                                error = Some(format!("保存完成提交失败: {completion_error}"));
+                                editor.present_existing_save_failure(
+                                    document_epoch,
+                                    &format!("保存完成提交失败: {completion_error}"),
+                                    true,
+                                    cx,
+                                );
                                 editor.abort_pending_tab_close_after_save(cx);
                                 editor.abort_window_close_tab_sequence(cx);
                                 if should_close_after_save {
@@ -243,7 +303,7 @@ impl Editor {
                             revision,
                             gmark_document_runtime::SaveFailureCode::Conflict,
                         ) {
-                            error = Some(format!("冲突保存状态提交失败: {completion_error}"));
+                            eprintln!("冲突保存状态提交失败: {completion_error}");
                         }
                         editor.external_file_conflict = true;
                         editor.external_conflict_preview = Some(preview);
@@ -279,7 +339,12 @@ impl Editor {
                         if target_may_have_changed && editor.document_epoch == document_epoch {
                             editor.apply_uncertain_save_baseline(path.clone(), cx);
                         }
-                        error = Some(detail);
+                        editor.present_existing_save_failure(
+                            document_epoch,
+                            &detail,
+                            target_may_have_changed,
+                            cx,
+                        );
                         None
                     }
                 });
@@ -309,16 +374,6 @@ impl Editor {
                         }
                     } else if conflict {
                         window.blur();
-                    } else if let Some(detail) = error {
-                        let strings = cx.global::<I18nManager>().strings().clone();
-                        let buttons = [strings.info_dialog_ok.as_str()];
-                        let _ = window.prompt(
-                            PromptLevel::Critical,
-                            &strings.save_failed_title,
-                            Some(&detail),
-                            &buttons,
-                            cx,
-                        );
                     }
                 },
             );
@@ -335,14 +390,14 @@ impl Editor {
         }
     }
 
-    /// 同步保存用于测试与显式阻塞入口；它与后台保存共享冲突语义，确保
-    /// SourceChanged 始终回到可比较、可恢复的外部修改流程。
+    /// 同步保存用于测试与显式阻塞入口；失败反馈与后台共用，SourceChanged 仍进入专用冲突恢复流程。
     pub(in crate::editor) fn save_to_existing_path(
         &mut self,
         path: &Path,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        let document_epoch = self.document_epoch;
         let overwrite = self.allow_external_overwrite_once;
         if self.existing_path_has_external_change(path) {
             self.present_external_file_conflict(path, window, cx);
@@ -355,7 +410,12 @@ impl Editor {
                 return false;
             }
             Err(error) => {
-                eprintln!("保存快照准备失败: {error}");
+                self.present_existing_save_failure(
+                    document_epoch,
+                    &format!("保存快照准备失败: {error}"),
+                    false,
+                    cx,
+                );
                 return false;
             }
         };
@@ -399,10 +459,16 @@ impl Editor {
                     .source_document
                     .try_save_succeeded(saved_revision, identity)
                 {
-                    eprintln!("保存完成提交失败: {error}");
+                    self.present_existing_save_failure(
+                        document_epoch,
+                        &format!("保存完成提交失败: {error}"),
+                        true,
+                        cx,
+                    );
                     return false;
                 }
                 self.apply_successful_save(path.to_path_buf(), markdown, saved_format, cx);
+                self.clear_existing_save_failure_notice(document_epoch, cx);
                 window.set_window_edited(false);
                 true
             }
@@ -430,13 +496,10 @@ impl Editor {
                     self.apply_uncertain_save_baseline(path.to_path_buf(), cx);
                 }
                 let detail = err.to_string();
-                let strings = cx.global::<I18nManager>().strings().clone();
-                let buttons = [strings.info_dialog_ok.as_str()];
-                let _ = window.prompt(
-                    PromptLevel::Critical,
-                    &strings.save_failed_title,
-                    Some(&detail),
-                    &buttons,
+                self.present_existing_save_failure(
+                    document_epoch,
+                    &detail,
+                    target_may_have_changed,
                     cx,
                 );
                 false

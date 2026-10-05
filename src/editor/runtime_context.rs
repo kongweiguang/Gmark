@@ -371,6 +371,7 @@ impl Editor {
         block: &Entity<Block>,
         cx: &mut Context<Self>,
     ) {
+        let _trace = crate::perf::span("block_runtime_sync");
         let (block_id, kind, markdown) = block.read_with(cx, |block, _cx| {
             (block.record.id, block.kind(), block.record.title_markdown())
         });

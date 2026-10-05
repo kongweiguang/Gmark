@@ -9,9 +9,18 @@ fn assert_standard_dialog_actions(
 ) {
     let panel = visual.debug_bounds(panel_selector).unwrap();
     let actions = visual.debug_bounds(actions_selector).unwrap();
-    assert!(actions.left() >= panel.left(), "{actions_selector} escaped left");
-    assert!(actions.right() <= panel.right(), "{actions_selector} escaped right");
-    assert!(actions.bottom() <= panel.bottom(), "{actions_selector} escaped bottom");
+    assert!(
+        actions.left() >= panel.left(),
+        "{actions_selector} escaped left"
+    );
+    assert!(
+        actions.right() <= panel.right(),
+        "{actions_selector} escaped right"
+    );
+    assert!(
+        actions.bottom() <= panel.bottom(),
+        "{actions_selector} escaped bottom"
+    );
 
     let first = visual.debug_bounds(button_selectors[0]).unwrap();
     let top_gap = f32::from(first.top()) - f32::from(actions.top());
@@ -29,10 +38,246 @@ fn assert_standard_dialog_actions(
         assert_eq!(f32::from(button.size.height), 36.0, "{selector} height");
         assert!(button.left() >= panel.left(), "{selector} escaped left");
         assert!(button.right() <= panel.right(), "{selector} escaped right");
-        assert!(button.top() >= actions.top(), "{selector} escaped action top");
-        assert!(button.bottom() <= panel.bottom(), "{selector} escaped bottom");
-        assert_eq!(button.size.height, first.size.height, "{selector} height mismatch");
+        assert!(
+            button.top() >= actions.top(),
+            "{selector} escaped action top"
+        );
+        assert!(
+            button.bottom() <= panel.bottom(),
+            "{selector} escaped bottom"
+        );
+        assert_eq!(
+            button.size.height, first.size.height,
+            "{selector} height mismatch"
+        );
     }
+}
+
+/// 标签关闭提示覆盖即时键盘恢复、焦点循环、修饰键隔离、鼠标取消和活动行卸载。
+#[gpui::test]
+async fn close_tab_dialog_keyboard_cancel_restores_source_row_for_typing_and_undo(
+    cx: &mut TestAppContext,
+) {
+    init_editor_test_app(cx);
+    let temp = tempfile::tempdir().expect("close dialog Source tempdir");
+    let path = temp.path().join("close-dialog-source.txt");
+    let original = "BEGIN\n";
+    std::fs::write(&path, original).expect("close dialog Source fixture");
+    let probe = gmark_paged_document::probe_file(
+        &path,
+        gmark_paged_document::ProbeOptions {
+            max_resident_bytes: 1,
+            ..gmark_paged_document::ProbeOptions::default()
+        },
+    )
+    .expect("close dialog Source probe");
+    assert_eq!(probe.strategy, gmark_paged_document::OpenStrategy::Paged);
+    let source = gmark_paged_document::FileSource::open(&path).expect("close dialog Source file");
+    let editor_path = path.clone();
+    let (editor, visual) = cx.add_window_view(move |_window, cx| {
+        Editor::from_source_backed_file(cx, editor_path, probe, source)
+    });
+    visual.run_until_parked();
+    let host = editor
+        .read_with(visual, |editor, _cx| editor.document_host.clone())
+        .expect("root Source Host");
+
+    visual.update(|window, cx| {
+        host.update(cx, |host, cx| host.begin_line_edit_for_test(0, window, cx));
+    });
+    visual.simulate_input("!");
+    visual.run_until_parked();
+    let dirty_source = host.read_with(visual, |host, _cx| host.source_text_for_test());
+    assert_ne!(
+        dirty_source, original,
+        "the focused Source row must be editable"
+    );
+    assert!(host.read_with(visual, |host, _cx| host.is_dirty()));
+    let source_focus = host.read_with(visual, |host, cx| {
+        host.active_edit_for_test()
+            .expect("active Source row before close prompt")
+            .1
+            .read(cx)
+            .focus_handle
+            .clone()
+    });
+
+    visual.update(|window, cx| {
+        editor.update(cx, |editor, cx| {
+            editor.on_close_tab_action(&crate::components::CloseTab, window, cx);
+        });
+    });
+    visual.run_until_parked();
+    redraw(visual);
+    assert!(visual.debug_bounds("tab-close-dialog").is_some());
+    assert!(
+        visual.update(|window, cx| {
+            editor.read(cx).close_dialog_focus_handles[2].is_focused(window)
+        })
+    );
+
+    visual.simulate_keystrokes("tab");
+    visual.run_until_parked();
+    redraw(visual);
+    assert!(
+        visual.update(|window, cx| {
+            editor.read(cx).close_dialog_focus_handles[0].is_focused(window)
+        })
+    );
+    visual.simulate_keystrokes("enter");
+    visual.simulate_input("?");
+    visual.run_until_parked();
+    redraw(visual);
+    assert!(!editor.read_with(visual, |editor, _cx| { editor.tabs.is_close_dialog_open() }));
+    assert!(visual.debug_bounds("tab-close-dialog").is_none());
+    assert!(visual.update(|window, cx| {
+        let row = host
+            .read(cx)
+            .active_edit_for_test()
+            .expect("active Source row after Enter")
+            .1;
+        row.read(cx).focus_handle.is_focused(window)
+    }));
+
+    assert_ne!(
+        host.read_with(visual, |host, _cx| host.source_text_for_test()),
+        dirty_source,
+        "typing after Enter must reach the restored Source row"
+    );
+    visual.simulate_keystrokes("ctrl-z");
+    visual.run_until_parked();
+    assert_eq!(
+        host.read_with(visual, |host, _cx| host.source_text_for_test()),
+        dirty_source,
+        "undo after Enter must reverse only the post-cancel input"
+    );
+
+    visual.update(|window, cx| {
+        editor.update(cx, |editor, cx| {
+            editor.on_close_tab_action(&crate::components::CloseTab, window, cx);
+        });
+    });
+    visual.run_until_parked();
+    redraw(visual);
+    assert!(visual.debug_bounds("tab-close-dialog").is_some());
+
+    visual.simulate_keystrokes("escape");
+    visual.simulate_input("7");
+    visual.run_until_parked();
+    redraw(visual);
+    assert!(visual.debug_bounds("tab-close-dialog").is_none());
+    assert!(visual.update(|window, cx| {
+        let row = host
+            .read(cx)
+            .active_edit_for_test()
+            .expect("active Source row after Escape")
+            .1;
+        row.read(cx).focus_handle.is_focused(window)
+    }));
+
+    assert_ne!(
+        host.read_with(visual, |host, _cx| host.source_text_for_test()),
+        dirty_source,
+        "typing after Escape must reach the restored Source row"
+    );
+    visual.simulate_keystrokes("ctrl-z");
+    visual.run_until_parked();
+    assert_eq!(
+        host.read_with(visual, |host, _cx| host.source_text_for_test()),
+        dirty_source,
+        "undo must reverse only the post-cancel input"
+    );
+
+    visual.update(|window, cx| {
+        editor.update(cx, |editor, cx| {
+            editor.on_close_tab_action(&crate::components::CloseTab, window, cx);
+        });
+    });
+    visual.run_until_parked();
+    redraw(visual);
+    assert!(visual.debug_bounds("tab-close-dialog").is_some());
+    visual.simulate_keystrokes("ctrl-enter");
+    visual.run_until_parked();
+    redraw(visual);
+    assert!(
+        visual.debug_bounds("tab-close-dialog").is_some(),
+        "modified Enter must not activate the focused Save button"
+    );
+    let cancel = visual
+        .debug_bounds("cancel-tab-close")
+        .expect("mouse cancel button");
+    visual.simulate_click(cancel.center(), gpui::Modifiers::default());
+    visual.simulate_input("~");
+    visual.run_until_parked();
+    redraw(visual);
+    assert!(visual.debug_bounds("tab-close-dialog").is_none());
+    assert_ne!(
+        host.read_with(visual, |host, _cx| host.source_text_for_test()),
+        dirty_source,
+        "mouse cancellation must restore the row before the next input event"
+    );
+    visual.simulate_keystrokes("ctrl-z");
+    visual.run_until_parked();
+    assert_eq!(
+        host.read_with(visual, |host, _cx| host.source_text_for_test()),
+        dirty_source,
+        "undo after mouse cancellation must reverse only the new input"
+    );
+
+    visual.update(|window, cx| {
+        editor.update(cx, |editor, cx| {
+            editor.on_close_tab_action(&crate::components::CloseTab, window, cx);
+        });
+    });
+    visual.run_until_parked();
+    redraw(visual);
+    assert!(visual.debug_bounds("tab-close-dialog").is_some());
+    visual.simulate_keystrokes("shift-tab");
+    visual.run_until_parked();
+    assert!(
+        visual.update(|window, cx| {
+            editor.read(cx).close_dialog_focus_handles[1].is_focused(window)
+        })
+    );
+    visual.simulate_keystrokes("space");
+    visual.run_until_parked();
+    redraw(visual);
+    assert!(visual.debug_bounds("tab-close-dialog").is_none());
+    assert!(editor.read_with(visual, |editor, _cx| {
+        editor.close_dialog_restore_input_focus.is_none()
+    }));
+    assert!(!visual.update(|window, _cx| source_focus.is_focused(window)));
+    assert_eq!(fs::read_to_string(path).unwrap(), original);
+}
+
+/// 窗口关闭提示也必须把 Enter 路由到当前焦点按钮的既有动作入口。
+#[gpui::test]
+async fn window_close_dialog_enter_activates_focused_cancel_button(cx: &mut TestAppContext) {
+    init_editor_test_app(cx);
+    let (editor, visual) =
+        cx.add_window_view(|_window, cx| Editor::from_markdown(cx, "document".to_owned(), None));
+    visual.run_until_parked();
+
+    editor.update(visual, |editor, cx| {
+        editor.show_unsaved_changes_dialog = true;
+        editor.close_dialog_keyboard_index = 2;
+        cx.notify();
+    });
+    visual.run_until_parked();
+    redraw(visual);
+    assert!(visual.debug_bounds("unsaved-changes-dialog").is_some());
+    assert!(
+        visual.update(|window, cx| {
+            editor.read(cx).close_dialog_focus_handles[2].is_focused(window)
+        })
+    );
+
+    visual.simulate_keystrokes("tab");
+    visual.simulate_keystrokes("enter");
+    visual.run_until_parked();
+    redraw(visual);
+    assert!(!editor.read_with(visual, |editor, _cx| { editor.show_unsaved_changes_dialog }));
+    assert!(visual.debug_bounds("unsaved-changes-dialog").is_none());
 }
 
 #[gpui::test]

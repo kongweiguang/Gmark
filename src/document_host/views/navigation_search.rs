@@ -342,6 +342,7 @@ impl DocumentHost {
             ScrollStrategy::Top,
         );
         self.focus_handle.focus(window);
+        self.restore_source_navigation_input(window, cx);
         cx.notify();
     }
 

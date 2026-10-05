@@ -427,7 +427,7 @@ impl EntityInputHandler for Block {
         self.marked_range = None;
     }
 
-    /// Commits the OS result against its captured baseline and ignores late rejected callbacks.
+    /// 普通 Source 文字先核对 Host 实际焦点；已暂存的 IME 结果仍由原组合 owner 收尾。
     fn replace_text_in_range(
         &mut self,
         range_utf16: Option<Range<usize>>,
@@ -439,6 +439,9 @@ impl EntityInputHandler for Block {
             return;
         }
         if self.ime_composition.is_some() && self.commit_ime_result(new_text, cx) {
+            return;
+        }
+        if !self.source_host_input_is_focused(_window) {
             return;
         }
         if self.is_read_only() {
@@ -602,7 +605,7 @@ impl EntityInputHandler for Block {
         }
     }
 
-    /// Uses staged composition only where GPUI delivers explicit terminal events; legacy adapters publish marked updates eagerly.
+    /// 新组合只从仍聚焦的 Host 输入桥启动，已开始的组合继续由原 owner 接收候选终态。
     fn replace_and_mark_text_in_range(
         &mut self,
         range_utf16: Option<Range<usize>>,
@@ -612,6 +615,9 @@ impl EntityInputHandler for Block {
         cx: &mut Context<Self>,
     ) {
         if self.ime_reject_until_end {
+            return;
+        }
+        if !self.source_host_input_is_focused(_window) && !self.has_ime_composition() {
             return;
         }
         #[cfg(target_os = "windows")]

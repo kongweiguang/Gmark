@@ -704,6 +704,7 @@ fn delete_selection_spanning_code_block_removes_it() {
 }
 
 #[test]
+/// 空段插入先完成真实源码事务，再验证跨块删除，避免测试使用尚未发布的结构坐标。
 fn delete_selection_ending_on_trailing_empty_paragraph_removes_table() {
     let mut cx = TestAppContext::single();
     init_editor_test_app(&mut cx);
@@ -719,6 +720,8 @@ fn delete_selection_ending_on_trailing_empty_paragraph_removes_table() {
         editor
             .document
             .insert_blocks_at(None, index, vec![empty], cx);
+        editor.mark_dirty(cx);
+        assert!(editor.document.source_commit_error().is_none());
 
         let visible = editor.document.visible_blocks().to_vec();
         assert_eq!(visible.len(), 3);
@@ -735,6 +738,7 @@ fn delete_selection_ending_on_trailing_empty_paragraph_removes_table() {
 }
 
 #[test]
+/// 首段空白也必须绑定插入事务的源码范围，删除不能凭测试构造的旧树位置授权。
 fn delete_selection_starting_on_empty_paragraph_removes_table() {
     let mut cx = TestAppContext::single();
     init_editor_test_app(&mut cx);
@@ -747,6 +751,8 @@ fn delete_selection_starting_on_empty_paragraph_removes_table() {
         // empty block above the table" case).
         let empty = Editor::new_block(cx, crate::components::BlockRecord::paragraph(String::new()));
         editor.document.insert_blocks_at(None, 0, vec![empty], cx);
+        editor.mark_dirty(cx);
+        assert!(editor.document.source_commit_error().is_none());
 
         let visible = editor.document.visible_blocks().to_vec();
         assert_eq!(visible.len(), 3);

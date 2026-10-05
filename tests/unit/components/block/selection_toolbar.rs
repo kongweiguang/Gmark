@@ -3,23 +3,26 @@
 use gpui::{AppContext, Bounds, KeyDownEvent, Keystroke, TestAppContext, point, px, size};
 
 use super::{
-    Block, TOOLBAR_HEIGHT, ToolbarCommand, ToolbarPosition, attached_surface_placement,
-    expanded_block_type_width, selection_toolbar_width, toolbar_window_position,
+    Block, TOOLBAR_HEIGHT, ToolbarCommand, ToolbarPosition, VIEWPORT_INSET,
+    attached_surface_placement, expanded_block_type_width, resolved_toolbar_viewport,
+    selection_toolbar_width, toolbar_window_position,
 };
 use crate::components::{
     BlockHostAction, BlockKind, BlockRecord, InlineTextTree, TableCellPosition,
     TableColumnAlignment,
 };
 
+/// 无附着菜单时仍按选择位置决定工具栏方向，并在视口边缘约束横向位置。
 #[test]
 fn position_prefers_above_and_clamps_to_viewport_edges() {
     let left = toolbar_window_position(
         Bounds::new(point(px(2.0), px(100.0)), size(px(20.0), px(20.0))),
         Bounds::new(point(px(0.0), px(0.0)), size(px(320.0), px(200.0))),
-        size(px(320.0), px(200.0)),
+        Bounds::new(point(px(0.0), px(0.0)), size(px(320.0), px(200.0))),
         0.0,
         Some(106.0),
-    );
+    )
+    .expect("visible selection has a toolbar position");
     assert_eq!(left.left, 8.0);
     assert_eq!(left.top, 100.0 - TOOLBAR_HEIGHT - 6.0);
     assert!(left.above);
@@ -27,10 +30,11 @@ fn position_prefers_above_and_clamps_to_viewport_edges() {
     let below = toolbar_window_position(
         Bounds::new(point(px(290.0), px(2.0)), size(px(20.0), px(20.0))),
         Bounds::new(point(px(0.0), px(0.0)), size(px(320.0), px(200.0))),
-        size(px(320.0), px(200.0)),
+        Bounds::new(point(px(0.0), px(0.0)), size(px(320.0), px(200.0))),
         0.0,
         Some(106.0),
-    );
+    )
+    .expect("visible selection has a toolbar position");
     assert_eq!(
         below,
         ToolbarPosition {
@@ -43,39 +47,120 @@ fn position_prefers_above_and_clamps_to_viewport_edges() {
     let attached_menu = toolbar_window_position(
         Bounds::new(point(px(120.0), px(350.0)), size(px(20.0), px(20.0))),
         Bounds::new(point(px(0.0), px(0.0)), size(px(480.0), px(400.0))),
-        size(px(480.0), px(400.0)),
+        Bounds::new(point(px(0.0), px(0.0)), size(px(480.0), px(400.0))),
         312.0,
         Some(106.0),
-    );
+    )
+    .expect("visible selection has a toolbar position");
     assert!(attached_menu.above);
     assert!(attached_menu.top >= 8.0);
 }
 
+/// 正文滚动视口可从窗体中部开始，工具栏方向判断必须使用所属视口而非窗口原点。
+#[test]
+fn position_stays_inside_non_origin_owner_viewport() {
+    let owner_viewport = Bounds::new(point(px(72.0), px(96.0)), size(px(320.0), px(180.0)));
+    let text_bounds = Bounds::new(point(px(96.0), px(96.0)), size(px(272.0), px(620.0)));
+    let selection = Bounds::new(point(px(140.0), px(102.0)), size(px(40.0), px(18.0)));
+    let position =
+        toolbar_window_position(selection, text_bounds, owner_viewport, 0.0, Some(106.0))
+            .expect("partially visible selection is anchored within its owner viewport");
+
+    assert!(position.top >= f32::from(owner_viewport.top()) + VIEWPORT_INSET);
+    assert!(position.top + TOOLBAR_HEIGHT <= f32::from(owner_viewport.bottom()) - VIEWPORT_INSET);
+    let toolbar_width = selection_toolbar_width(text_bounds, owner_viewport, Some(106.0));
+    assert!(position.left >= f32::from(owner_viewport.left()) + VIEWPORT_INSET);
+    assert!(position.left + toolbar_width <= f32::from(owner_viewport.right()) - VIEWPORT_INSET);
+}
+
+/// 选区状态仍由编辑器保留；锚点完全离开所属视口时不绘制浮动控件。
+#[test]
+fn toolbar_is_hidden_when_selection_leaves_owner_viewport() {
+    let owner_viewport = Bounds::new(point(px(72.0), px(96.0)), size(px(320.0), px(180.0)));
+    let text_bounds = Bounds::new(point(px(96.0), px(32.0)), size(px(272.0), px(620.0)));
+    let selection = Bounds::new(point(px(140.0), px(52.0)), size(px(40.0), px(18.0)));
+
+    assert!(
+        toolbar_window_position(selection, text_bounds, owner_viewport, 0.0, Some(106.0)).is_none()
+    );
+}
+
+/// ScrollHandle 首次布局前返回零尺寸；此时应暂用窗口范围，不能误隐藏正常工具栏。
+#[test]
+fn unmeasured_owner_viewport_falls_back_to_window_bounds() {
+    let zero_viewport = Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(0.0)));
+    let window_viewport = size(px(320.0), px(200.0));
+
+    assert_eq!(
+        resolved_toolbar_viewport(Some(zero_viewport), window_viewport),
+        Bounds::new(point(px(0.0), px(0.0)), window_viewport)
+    );
+}
+
+/// 更新可见范围只影响浮层几何；暂时无效的首帧范围不能清掉文字选区。
+#[gpui::test]
+async fn owner_viewport_updates_preserve_the_text_selection(cx: &mut TestAppContext) {
+    let block = cx.new(|cx| Block::with_record(cx, BlockRecord::paragraph("alpha")));
+    let viewport = Bounds::new(point(px(64.0), px(88.0)), size(px(360.0), px(240.0)));
+    let zero_viewport = Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(0.0)));
+
+    block.update(cx, |block, _cx| {
+        block.selected_range = 0..5;
+        block.refresh_selection_toolbar();
+        block.set_selection_toolbar_viewport(Some(viewport));
+        assert_eq!(block.selection_toolbar_viewport, Some(viewport));
+        assert!(block.selection_toolbar_visible());
+
+        block.set_selection_toolbar_viewport(Some(zero_viewport));
+        assert_eq!(block.selection_toolbar_viewport, None);
+        assert_eq!(block.selected_range, 0..5);
+        assert!(block.selection_toolbar_visible());
+    });
+}
+
+/// 工具栏宽度继续按实际文字列可用空间选择展开或紧凑布局。
 #[test]
 fn toolbar_width_tracks_visible_buttons_without_trailing_space() {
     let roomy_bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(400.0), px(200.0)));
     let compact_bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(280.0), px(200.0)));
 
     assert_eq!(
-        selection_toolbar_width(roomy_bounds, size(px(400.0), px(200.0)), Some(106.0)),
+        selection_toolbar_width(
+            roomy_bounds,
+            Bounds::new(point(px(0.0), px(0.0)), size(px(400.0), px(200.0))),
+            Some(106.0)
+        ),
         290.0
     );
     assert_eq!(
-        selection_toolbar_width(compact_bounds, size(px(280.0), px(200.0)), Some(106.0)),
+        selection_toolbar_width(
+            compact_bounds,
+            Bounds::new(point(px(0.0), px(0.0)), size(px(280.0), px(200.0))),
+            Some(106.0)
+        ),
         226.0
     );
     assert_eq!(
-        selection_toolbar_width(roomy_bounds, size(px(400.0), px(200.0)), Some(82.0)),
+        selection_toolbar_width(
+            roomy_bounds,
+            Bounds::new(point(px(0.0), px(0.0)), size(px(400.0), px(200.0))),
+            Some(82.0)
+        ),
         266.0
     );
     assert_eq!(
-        selection_toolbar_width(roomy_bounds, size(px(400.0), px(200.0)), None),
+        selection_toolbar_width(
+            roomy_bounds,
+            Bounds::new(point(px(0.0), px(0.0)), size(px(400.0), px(200.0))),
+            None
+        ),
         182.0
     );
     assert_eq!(expanded_block_type_width("zh-CN"), 82.0);
     assert_eq!(expanded_block_type_width("en-US"), 106.0);
 }
 
+/// 附着菜单按所在正文可用空间展开，不借用全窗口高度。
 #[test]
 fn overflow_menu_uses_safe_content_space_instead_of_toolbar_side() {
     let toolbar_above_selection = ToolbarPosition {
@@ -83,8 +168,11 @@ fn overflow_menu_uses_safe_content_space_instead_of_toolbar_side() {
         top: 48.0,
         above: true,
     };
-    let (opens_above, available_height) =
-        attached_surface_placement(toolbar_above_selection, 174.0, 600.0, 24.0, 24.0);
+    let (opens_above, available_height) = attached_surface_placement(
+        toolbar_above_selection,
+        174.0,
+        Bounds::new(point(px(0.0), px(0.0)), size(px(600.0), px(600.0))),
+    );
 
     assert!(!opens_above);
     assert!(available_height >= 174.0);

@@ -120,11 +120,9 @@ async fn recovered_resident_csv_can_return_to_the_live_table(cx: &mut TestAppCon
         .record_replace(17..18, "2", None, "live")
         .expect("CSV recovery edit");
     let journal_path = journal.path().to_path_buf();
-    let probe = gmark_paged_document::probe_file(
-        &path,
-        gmark_paged_document::ProbeOptions::default(),
-    )
-    .expect("CSV recovery probe");
+    let probe =
+        gmark_paged_document::probe_file(&path, gmark_paged_document::ProbeOptions::default())
+            .expect("CSV recovery probe");
     let (editor, visual) = cx.add_window_view(move |_window, cx| {
         Editor::from_paged_recovery(cx, path, probe, source, journal_path)
     });
@@ -136,9 +134,9 @@ async fn recovered_resident_csv_can_return_to_the_live_table(cx: &mut TestAppCon
         .read_with(visual, |editor, _cx| editor.document_host.clone())
         .expect("recovered CSV DocumentHost");
     assert!(document_host.read_with(visual, |view, _cx| view.has_structure_view()));
-    assert!(document_host.read_with(visual, |view, _cx| view
-        .structure_error_for_test()
-        .is_none()));
+    assert!(document_host.read_with(visual, |view, _cx| {
+        view.structure_error_for_test().is_none()
+    }));
 
     editor.update(visual, |editor, cx| {
         editor.set_view_mode(ViewMode::Rendered, cx)
@@ -308,6 +306,7 @@ async fn resident_strategy_json_uses_bounded_graph_and_refreshes_after_source_ed
     );
 }
 
+/// JSON 图错误跳转应把 Source 光标放到对应逻辑行，并允许异步列号暂未就绪。
 #[gpui::test]
 async fn invalid_resident_json_reports_the_byte_and_jumps_back_to_source(cx: &mut TestAppContext) {
     init_editor_test_app(cx);
@@ -355,7 +354,9 @@ async fn invalid_resident_json_reports_the_byte_and_jumps_back_to_source(cx: &mu
         .count()
         + 1;
     assert_eq!(
-        large_view.read_with(visual, |view, cx| view.cursor_position(cx).0),
+        large_view.read_with(visual, |view, cx| {
+            view.cursor_position(cx).expect("JSON Source jump caret").0
+        }),
         expected_line
     );
     assert!(editor.read_with(visual, |editor, _cx| editor.view_mode == ViewMode::Source));
@@ -363,6 +364,7 @@ async fn invalid_resident_json_reports_the_byte_and_jumps_back_to_source(cx: &mu
     assert!(visual.debug_bounds("status-bar").is_some());
 }
 
+/// JSONL 结构错误跳转仍按全局行定位，不依赖状态栏列号缓存完成时机。
 #[gpui::test]
 async fn invalid_resident_jsonl_record_reports_global_byte_and_jumps_to_source(
     cx: &mut TestAppContext,
@@ -405,7 +407,9 @@ async fn invalid_resident_jsonl_record_reports_global_byte_and_jumps_to_source(
     visual.simulate_click(jump.center(), Modifiers::default());
     redraw(visual);
     assert_eq!(
-        large_view.read_with(visual, |view, cx| view.cursor_position(cx).0),
+        large_view.read_with(visual, |view, cx| {
+            view.cursor_position(cx).expect("JSONL Source jump caret").0
+        }),
         3
     );
     assert!(large_view.read_with(visual, |view, _cx| view.source_view_for_test()));

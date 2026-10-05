@@ -7,6 +7,21 @@ use super::super::*;
 impl DocumentController {
     /// 将所有正文和元数据命令串行化，确保 selection、undo 与保存 revision 同步更新。
     pub fn dispatch(&mut self, command: DocumentCommand) -> Result<(), ControllerError> {
+        if matches!(
+            &command,
+            DocumentCommand::ApplyTransaction { .. }
+                | DocumentCommand::NormalizeLineEndings { .. }
+                | DocumentCommand::RestoreSourceFormat { .. }
+                | DocumentCommand::SetEncoding { .. }
+                | DocumentCommand::AcceptExternalAppend { .. }
+                | DocumentCommand::ReloadPreparedDocument { .. }
+                | DocumentCommand::ReloadPreparedDocumentAfterConfirmation { .. }
+                | DocumentCommand::Undo { .. }
+                | DocumentCommand::Redo { .. }
+                | DocumentCommand::DiscardChanges { .. }
+        ) {
+            self.break_typing_group();
+        }
         match command {
             DocumentCommand::ApplyTransaction {
                 view_id,
@@ -20,6 +35,21 @@ impl DocumentController {
                 transaction,
                 selection_before,
                 selection_after,
+            ),
+            DocumentCommand::ApplyTypingTransaction {
+                view_id,
+                transaction_id,
+                transaction,
+                selection_before,
+                selection_after,
+                group_id,
+            } => self.apply_typing_transaction_command(
+                view_id,
+                transaction_id,
+                transaction,
+                selection_before,
+                selection_after,
+                group_id,
             ),
             DocumentCommand::NormalizeLineEndings {
                 view_id,
@@ -73,6 +103,15 @@ impl DocumentController {
                 expected_identity,
                 prepared,
             } => self.reload_prepared_document(expected_revision, expected_identity, prepared),
+            DocumentCommand::ReloadPreparedDocumentAfterConfirmation {
+                expected_revision,
+                expected_identity,
+                prepared,
+            } => self.reload_prepared_document_after_confirmation(
+                expected_revision,
+                expected_identity,
+                prepared,
+            ),
             DocumentCommand::Undo {
                 view_id,
                 transaction_id,
@@ -129,8 +168,122 @@ impl DocumentController {
             mutation: mutation.clone(),
             selection_before,
             selection_after,
+            typing_group: None,
         });
         self.redo_transactions.clear();
+        self.emit(DocumentEvent::RevisionChanged {
+            sequence: 0,
+            document_id: self.document_id,
+            view_id,
+            transaction_id,
+            revision,
+            dirty: self.session.dirty,
+            mutation,
+            selection: selection_after,
+        });
+        if before_dirty != self.session.dirty {
+            self.emit(DocumentEvent::DirtyChanged {
+                sequence: 0,
+                document_id: self.document_id,
+                revision,
+                dirty: self.session.dirty,
+            });
+        }
+        Ok(())
+    }
+
+    /// 仅合并同 view、连续 revision/selection 且坐标相邻的单行尾部输入。
+    fn apply_typing_transaction_command(
+        &mut self,
+        view_id: DocumentViewInstanceId,
+        transaction_id: TransactionId,
+        transaction: Transaction,
+        selection_before: SourceSelection,
+        selection_after: SourceSelection,
+        group_id: TypingGroupId,
+    ) -> Result<(), ControllerError> {
+        self.register_view(view_id);
+        let snapshot = self.session.snapshot();
+        let mutation = match super::super::build_mutation_map(&transaction, snapshot.as_ref()) {
+            Ok(mutation) => mutation,
+            Err(error) => {
+                self.break_typing_group();
+                return Err(error);
+            }
+        };
+        let current_revision = DocumentRevision(self.session.revision());
+        let record_is_current = self.undo_transactions.last().is_some_and(|record| {
+            record.view_id == view_id
+                && record.typing_group == Some(group_id)
+                && record.selection_after == selection_before
+        });
+        let combined = if is_continuable_typing_transaction(&transaction) {
+            self.active_typing_group.as_ref().and_then(|active| {
+                (active.group_id == group_id
+                    && active.view_id == view_id
+                    && active.revision == transaction.base_revision
+                    && active.revision == current_revision
+                    && active.selection_after == selection_before
+                    && self.view_selection(view_id) == Some(selection_before)
+                    && record_is_current)
+                    .then(|| active.mutation.append_adjacent_insertion(&mutation))
+                    .flatten()
+            })
+        } else {
+            None
+        };
+        if combined.is_none() {
+            self.break_typing_group();
+        }
+
+        let before_dirty = self.session.dirty;
+        let revision = match self
+            .session
+            .apply_typing_transaction(&transaction, group_id)
+        {
+            Ok(revision) => revision,
+            Err(error) => {
+                self.break_typing_group();
+                return Err(error.into());
+            }
+        };
+        for (other_view_id, view) in &mut self.views {
+            if *other_view_id != view_id {
+                view.selection = mutation.map_selection(view.selection);
+            }
+        }
+        if let Some(view) = self.views.get_mut(&view_id) {
+            view.selection = selection_after;
+        }
+
+        let accumulated_mutation = if let Some(combined) = combined {
+            if let Some(record) = self.undo_transactions.last_mut() {
+                record.mutation = combined.clone();
+                record.selection_after = selection_after;
+            }
+            combined
+        } else {
+            self.undo_transactions.push(TransactionRuntimeRecord {
+                view_id,
+                mutation: mutation.clone(),
+                selection_before,
+                selection_after,
+                typing_group: Some(group_id),
+            });
+            mutation.clone()
+        };
+        self.redo_transactions.clear();
+        if is_continuable_typing_transaction(&transaction) {
+            self.active_typing_group = Some(ActiveTypingGroup {
+                group_id,
+                view_id,
+                revision,
+                selection_after,
+                mutation: accumulated_mutation,
+            });
+        } else {
+            self.break_typing_group();
+        }
         self.emit(DocumentEvent::RevisionChanged {
             sequence: 0,
             document_id: self.document_id,
@@ -173,6 +326,7 @@ impl DocumentController {
             mutation: DocumentMutationMap::empty(),
             selection_before,
             selection_after,
+            typing_group: None,
         });
         self.redo_transactions.clear();
         self.emit(DocumentEvent::RevisionChanged {
@@ -217,6 +371,7 @@ impl DocumentController {
             mutation: DocumentMutationMap::empty(),
             selection_before,
             selection_after,
+            typing_group: None,
         });
         self.redo_transactions.clear();
         self.emit(DocumentEvent::RevisionChanged {
@@ -350,4 +505,14 @@ impl DocumentController {
             view.selection = mutation.map_selection(view.selection);
         }
     }
+}
+
+/// 允许组首替换 selection，但后续可合并输入必须是非空单行文本。
+fn is_continuable_typing_transaction(transaction: &Transaction) -> bool {
+    let [edit] = transaction.edits.as_slice() else {
+        return false;
+    };
+    !edit.replacement.is_empty()
+        && !edit.replacement.contains('\r')
+        && !edit.replacement.contains('\n')
 }

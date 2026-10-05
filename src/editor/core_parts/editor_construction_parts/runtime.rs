@@ -3,51 +3,96 @@
 use super::*;
 
 impl Editor {
+    /// 正文事件与关闭终态都归属于原 Host；标签已替换时忽略迟到事件，
+    /// 保存队列及输入仍未收尾时只刷新显示，不能卸载正文或提前消费关闭意图。
     pub(crate) fn subscribe_document_host(
         view: &Entity<crate::document_host::DocumentHost>,
         cx: &mut Context<Self>,
     ) {
-        cx.subscribe(view, |editor, view, event, cx| match event {
-            crate::document_host::DocumentHostEvent::SavedAs(path) => {
-                let tab_id = editor.tabs.active_id();
-                let _ = editor.view_state.close_tab(tab_id);
-                editor.file_path = Some(path.clone());
-                let _ = editor.view_state.open_tab(
-                    crate::editor::markdown_view_state::MarkdownTabIdentity::saved(path, tab_id),
-                );
-                editor.saved_file_fingerprint = crate::recovery::fingerprint_file(path).ok();
-                editor.document_dirty = false;
-                editor.pending_window_edited = false;
-                editor.schedule_workspace_session_save(cx);
-                #[cfg(target_os = "macos")]
-                editor.schedule_platform_document_menu_refresh(cx);
-                cx.notify();
+        Self::observe_document_host_accessibility(view, cx);
+        cx.subscribe(view, |editor, view, event, cx| {
+            if editor
+                .document_host
+                .as_ref()
+                .is_none_or(|active| active.entity_id() != view.entity_id())
+            {
+                return;
             }
-            crate::document_host::DocumentHostEvent::StateChanged => {
-                let host_dirty = view.read(cx).is_dirty();
-                editor.document_dirty = host_dirty;
-                editor.pending_window_edited = editor.document_dirty;
-                editor.pending_window_title_refresh = true;
-                editor.schedule_workspace_session_save(cx);
-                #[cfg(target_os = "macos")]
-                editor.schedule_platform_document_menu_refresh(cx);
-                cx.notify();
+            match event {
+                crate::document_host::DocumentHostEvent::SavedAs(path) => {
+                    let tab_id = editor.tabs.active_id();
+                    let _ = editor.view_state.close_tab(tab_id);
+                    editor.file_path = Some(path.clone());
+                    let _ = editor.view_state.open_tab(
+                        crate::editor::markdown_view_state::MarkdownTabIdentity::saved(
+                            path, tab_id,
+                        ),
+                    );
+                    editor.saved_file_fingerprint = crate::recovery::fingerprint_file(path).ok();
+                    editor.document_dirty = false;
+                    editor.pending_window_edited = false;
+                    editor.schedule_workspace_session_save(cx);
+                    #[cfg(target_os = "macos")]
+                    editor.schedule_platform_document_menu_refresh(cx);
+                    cx.notify();
+                }
+                crate::document_host::DocumentHostEvent::StateChanged => {
+                    let host = view.read(cx);
+                    let host_dirty = host.is_dirty();
+                    let save_pending = host.has_pending_save()
+                        || host.has_pending_source_input()
+                        || host.has_active_ime_composition(cx);
+                    editor.document_dirty = host_dirty;
+                    editor.pending_window_edited = editor.document_dirty;
+                    editor.pending_window_title_refresh = true;
+                    editor.schedule_workspace_session_save(cx);
+                    #[cfg(target_os = "macos")]
+                    editor.schedule_platform_document_menu_refresh(cx);
+                    if !save_pending {
+                        if host_dirty {
+                            editor.abort_pending_tab_close_after_save(cx);
+                            editor.abort_window_close_tab_sequence(cx);
+                            if editor.pending_close_after_save {
+                                editor.abort_pending_close_after_save(cx);
+                            }
+                        } else {
+                            editor.continue_window_close_after_save(cx);
+                            editor.finish_pending_tab_close_after_save(cx);
+                        }
+                    }
+                    cx.notify();
+                }
+                crate::document_host::DocumentHostEvent::ViewModeChanged(mode) => {
+                    editor.view_mode = match mode {
+                        crate::document_host::DocumentHostMode::Live => ViewMode::Rendered,
+                        crate::document_host::DocumentHostMode::Source => ViewMode::Source,
+                        crate::document_host::DocumentHostMode::Preview => ViewMode::Preview,
+                        crate::document_host::DocumentHostMode::Split => ViewMode::Split,
+                    };
+                    editor.schedule_workspace_session_save(cx);
+                    #[cfg(target_os = "macos")]
+                    editor.schedule_platform_document_menu_refresh(cx);
+                    cx.notify();
+                }
+                crate::document_host::DocumentHostEvent::SplitRatioChanged(ratio) => {
+                    editor.split_pane_ratio = ratio.clamp(0.3, 0.7);
+                    editor.schedule_workspace_session_save(cx);
+                    cx.notify();
+                }
             }
-            crate::document_host::DocumentHostEvent::ViewModeChanged(mode) => {
-                editor.view_mode = match mode {
-                    crate::document_host::DocumentHostMode::Live => ViewMode::Rendered,
-                    crate::document_host::DocumentHostMode::Source => ViewMode::Source,
-                    crate::document_host::DocumentHostMode::Preview => ViewMode::Preview,
-                    crate::document_host::DocumentHostMode::Split => ViewMode::Split,
-                };
-                editor.schedule_workspace_session_save(cx);
-                #[cfg(target_os = "macos")]
-                editor.schedule_platform_document_menu_refresh(cx);
-                cx.notify();
-            }
-            crate::document_host::DocumentHostEvent::SplitRatioChanged(ratio) => {
-                editor.split_pane_ratio = ratio.clamp(0.3, 0.7);
-                editor.schedule_workspace_session_save(cx);
+        })
+        .detach();
+    }
+
+    /// 单窗与子窗格都按当前无障碍身份刷新；不把显示更新当作正文事件或重复保存请求。
+    pub(in crate::editor) fn observe_document_host_accessibility(
+        view: &Entity<crate::document_host::DocumentHost>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.observe(view, |editor, _view, cx| {
+            if editor.accessibility_bridge.is_some()
+                && editor.accessibility_revision != Some(editor.current_accessibility_revision(cx))
+            {
                 cx.notify();
             }
         })
@@ -371,17 +416,28 @@ impl Editor {
                 surface.reconcile_mounts(initial_window, cx);
                 surface
             });
-        let mut roots = if let Some(surface) = virtual_surface.as_ref() {
-            surface.viewport_roots()
+        // 初次 Live 构建也必须携带原源码归属；否则首次输入只能得到规范投影，不能安全写回。
+        let (mut roots, mut source_regions) = if let Some(surface) = virtual_surface.as_ref() {
+            (surface.viewport_roots(), Vec::new())
         } else {
-            Self::build_blocks_from_projection_reusing(cx, &projection, &mut HashMap::new())
+            Self::build_blocks_from_projection_reusing_with_regions(
+                cx,
+                &projection,
+                &mut HashMap::new(),
+            )
         };
         if roots.is_empty() {
             roots.push(Self::new_block(cx, BlockRecord::paragraph(String::new())));
+            if virtual_surface.is_none() {
+                source_regions.push((0..normalized.len(), 0..1));
+            }
         }
 
         let mut document = DocumentTree::new(roots);
         document.rebuild_metadata_and_snapshot(cx);
+        if virtual_surface.is_none() {
+            document.bind_source_regions(projection.revision, source_regions, cx);
+        }
         let mut status_bar = StatusBarState::default();
         status_bar.set_word_count(
             source_document.revision(),
@@ -425,6 +481,7 @@ impl Editor {
             shared_event_task: None,
             pane_canvas: false,
             pane_canvas_focus_enabled: true,
+            pane_canvas_viewport: None,
             pane_tab_id: None,
             pane_history_back: Vec::new(),
             pane_history_forward: Vec::new(),
@@ -458,6 +515,7 @@ impl Editor {
             document_epoch: 0,
             render_asset_scope: uuid::Uuid::new_v4(),
             projection_cache: Some(projection),
+            source_spelling_cache: std::cell::RefCell::new(None),
             document,
             split_preview: None,
             split_pane_ratio: 0.5,
@@ -518,12 +576,17 @@ impl Editor {
             last_scroll_viewport_size: None,
             prev_visible_block_ids: Vec::new(),
             row_stride_cache: HashMap::new(),
+            row_stride_layout_identity: None,
+            split_row_stride_layout_identity: None,
             render_row_cache: None,
             prev_render_window: None,
             close_guard_installed: false,
             show_unsaved_changes_dialog: false,
             pending_close_after_save: false,
             close_dialog_restore_focus: None,
+            close_dialog_focus_handles: std::array::from_fn(|_| cx.focus_handle()),
+            close_dialog_keyboard_index: 2,
+            close_dialog_restore_input_focus: None,
             pending_drop_replace_path: None,
             show_drop_replace_dialog: false,
             pending_drop_replace_after_save: false,
@@ -623,7 +686,6 @@ impl Editor {
             pending_virtual_footnote_backref_focus: None,
             virtual_surface,
             first_render_started: construction_started,
-            pending_input_trace: None,
         };
         if editor.virtual_surface.is_some() {
             editor.rebuild_virtual_table_runtimes(cx);

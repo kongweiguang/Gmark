@@ -516,11 +516,33 @@ fn path_is_empty(path: &Path) -> bool {
     path.as_os_str().is_empty() || path.to_string_lossy().trim().is_empty()
 }
 
+/// 用统一词法身份匹配会话排除路径，避免在启动恢复边界触发文件系统查询。
 pub(crate) fn path_identity(path: &Path) -> String {
     let value = path.to_string_lossy();
     if cfg!(windows) {
-        value.to_lowercase()
+        normalize_windows_path_identity(&value)
     } else {
         value.into_owned()
     }
+}
+
+/// 只在词法层归一 Windows 路径，避免会话过滤为识别同一路径而访问慢盘。
+fn normalize_windows_path_identity(path: &str) -> String {
+    let normalized = path.replace('/', "\\").to_lowercase();
+    if let Some(unc_path) = normalized.strip_prefix("\\\\?\\unc\\") {
+        return format!("\\\\{unc_path}");
+    }
+
+    if let Some(drive_path) = normalized.strip_prefix("\\\\?\\") {
+        let bytes = drive_path.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && bytes[2] == b'\\'
+        {
+            return drive_path.to_owned();
+        }
+    }
+
+    normalized
 }

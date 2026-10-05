@@ -12,13 +12,14 @@ use crate::config::{AutoSavePreference, EditorSettings};
 impl Editor {
     const AUTO_SAVE_IDLE_DELAY: Duration = Duration::from_secs(1);
 
-    /// 空闲计时不能强制结束候选；终态事件会为仍 dirty 的正文重新启动计时。
+    /// 空闲计时不能强制结束候选或丢弃未提交文字；正常终态会为 dirty 正文重新计时。
     pub(in crate::editor) fn schedule_auto_save(&mut self, cx: &mut Context<Self>) {
         self.auto_save_task = None;
         if EditorSettings::auto_save(cx) != AutoSavePreference::AfterDelay
             || self.file_path.is_none()
             || self.recovered_session
             || self.external_file_conflict
+            || self.document.source_commit_error().is_some()
         {
             return;
         }
@@ -39,6 +40,7 @@ impl Editor {
                     && !editor.pending_save_as
                     && editor.save_task.is_none()
                     && !editor.has_active_ime_composition(cx)
+                    && editor.document.source_commit_error().is_none()
                 {
                     editor.pending_save = true;
                     cx.notify();

@@ -6,14 +6,14 @@ use super::*;
 
 impl DocumentHost {
     /// 关闭的标签会暂存在 reopen 栈中，所以不能依赖 Entity Drop 释放任务。
-    /// 所有 worker 在这里显式取消并推进代次；保留的 PieceTree、selection 与 ViewState
-    /// 仍是纯内存状态，重新打开时可以安全恢复。
+    /// 视图任务取消并推进代次；保存写盘继续到明确终态后释放共享门禁，不能随 UI future 丢弃。
     pub(crate) fn suspend_for_closed_tab(&mut self) {
         if self.closed_suspended {
             return;
         }
-        debug_assert!(!self.saving && !self.reloading);
         self.closed_suspended = true;
+        self.saving = false;
+        self.reloading = false;
         self.document_epoch = self.document_epoch.wrapping_add(1);
 
         // Keep the lease alive for pane reactivation, but close the
@@ -59,7 +59,9 @@ impl DocumentHost {
         if let Some(cancellation) = self.coordinator.save.cancellation.take() {
             cancellation.cancel();
         }
-        self.coordinator.save.task = Task::ready(());
+        std::mem::replace(&mut self.coordinator.save.task, Task::ready(())).detach();
+        self.coordinator.save.pending_requests.clear();
+        self.coordinator.auto_save.reset();
 
         self.source_drag_anchor = None;
         self.source_drag_autoscroll_direction = 0;

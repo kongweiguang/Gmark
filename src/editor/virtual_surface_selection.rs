@@ -77,7 +77,7 @@ impl VirtualSurfaceState {
 }
 
 impl Editor {
-    /// Replaces viewport roots, then reapplies source-anchored selection to the newly mounted blocks.
+    /// 挂载后恢复源码锚点；提交失败时冻结视口，直到未发布文字已完整备份。
     pub(in crate::editor) fn sync_virtual_surface_mounts(
         &mut self,
         scroll_y: f32,
@@ -85,6 +85,9 @@ impl Editor {
         overdraw: f32,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.document.source_commit_error().is_some() {
+            return false;
+        }
         let Some(mut surface) = self.virtual_surface.take() else {
             return false;
         };

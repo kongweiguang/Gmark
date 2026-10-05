@@ -6,6 +6,130 @@ use super::*;
 mod view;
 
 impl Editor {
+    /// 查找先等候选终态，再转给实际编辑窗格，不能搜索窗口壳的空正文。
+    pub(crate) fn on_find_in_document_action(
+        &mut self,
+        _: &crate::components::FindInDocument,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.defer_action_for_ime(&crate::components::FindInDocument, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
+        if !self.pane_canvas
+            && let Some(editor) = self.focused_pane_entities(cx).0
+        {
+            editor.update(cx, |editor, cx| {
+                editor.on_find_in_document_action(&crate::components::FindInDocument, window, cx);
+            });
+            return;
+        }
+        if let Some(document_host) = self.document_host.clone() {
+            document_host.update(cx, |document_host, cx| {
+                document_host.on_find_in_document(&crate::components::FindInDocument, window, cx);
+            });
+            return;
+        }
+        self.open_find_panel(false, window, cx);
+    }
+
+    /// 替换复用所属文档的候选门控与面板，保留原输入目标和只读边界。
+    pub(crate) fn on_replace_in_document_action(
+        &mut self,
+        _: &crate::components::ReplaceInDocument,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.defer_action_for_ime(&crate::components::ReplaceInDocument, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
+        if !self.pane_canvas
+            && let Some(editor) = self.focused_pane_entities(cx).0
+        {
+            editor.update(cx, |editor, cx| {
+                editor.on_replace_in_document_action(
+                    &crate::components::ReplaceInDocument,
+                    window,
+                    cx,
+                );
+            });
+            return;
+        }
+        if let Some(document_host) = self.document_host.clone() {
+            document_host.update(cx, |document_host, cx| {
+                document_host.on_find_in_document(&crate::components::FindInDocument, window, cx);
+            });
+            return;
+        }
+        self.open_find_panel(true, window, cx);
+    }
+
+    /// 候选未结束时暂缓导航，匹配始终取自当前窗格而非父壳。
+    pub(crate) fn on_find_next_action(
+        &mut self,
+        _: &crate::components::FindNext,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.defer_action_for_ime(&crate::components::FindNext, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
+        if !self.pane_canvas
+            && let Some(editor) = self.focused_pane_entities(cx).0
+        {
+            editor.update(cx, |editor, cx| {
+                editor.on_find_next_action(&crate::components::FindNext, window, cx);
+            });
+            return;
+        }
+        if let Some(document_host) = self.document_host.clone() {
+            document_host.update(cx, |document_host, cx| {
+                document_host.on_find_next(&crate::components::FindNext, window, cx);
+            });
+            return;
+        }
+        if self.find_panel.is_none() {
+            self.open_find_panel(false, window, cx);
+        } else {
+            self.navigate_find_match(1, window, cx);
+        }
+    }
+
+    /// 反向导航沿用同一窗格归属，避免焦点变化后跳到兄弟文档。
+    pub(crate) fn on_find_previous_action(
+        &mut self,
+        _: &crate::components::FindPrevious,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.defer_action_for_ime(&crate::components::FindPrevious, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
+        if !self.pane_canvas
+            && let Some(editor) = self.focused_pane_entities(cx).0
+        {
+            editor.update(cx, |editor, cx| {
+                editor.on_find_previous_action(&crate::components::FindPrevious, window, cx);
+            });
+            return;
+        }
+        if let Some(document_host) = self.document_host.clone() {
+            document_host.update(cx, |document_host, cx| {
+                document_host.on_find_previous(&crate::components::FindPrevious, window, cx);
+            });
+            return;
+        }
+        if self.find_panel.is_none() {
+            self.open_find_panel(false, window, cx);
+        } else {
+            self.navigate_find_match(-1, window, cx);
+        }
+    }
+
     /// 将过期的查询和替换任务一并视为 stale，防止文档变更期间用旧结果提交事务。
     pub(in crate::editor) fn refresh_find_if_stale(&mut self, cx: &mut Context<Self>) {
         let stale = self.find_panel.as_ref().is_some_and(|state| {

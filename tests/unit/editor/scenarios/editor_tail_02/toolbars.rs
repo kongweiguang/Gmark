@@ -1,5 +1,79 @@
 // @author kongweiguang
 
+/// 窗格恢复使用子编辑器，真实多击与键盘派发必须沿同一个焦点祖先接通工具栏。
+#[gpui::test]
+async fn pane_selection_toolbar_keeps_word_selection_during_keyboard_navigation(
+    cx: &mut TestAppContext,
+) {
+    init_editor_test_app(cx);
+    let (editor, visual) =
+        cx.add_window_view(|_window, cx| Editor::from_markdown(cx, "alpha beta".into(), None));
+    editor.update(visual, |editor, cx| {
+        editor.split_pane_toward(crate::editor::panes::PaneSplitDirection::Right, cx);
+    });
+    visual.run_until_parked();
+    redraw(visual);
+    let pane_editor = editor.read_with(visual, |editor, cx| {
+        let pane = editor
+            .pane_workspace
+            .as_ref()
+            .expect("workspace")
+            .read(cx)
+            .workspace()
+            .focused_pane();
+        let canvases = editor.pane_canvas_entities.borrow();
+        let (_, _, canvas) = canvases.get(&pane).expect("focused canvas");
+        match canvas {
+            crate::editor::panes::PaneCanvasEntity::Markdown(canvas) => canvas.read(cx).editor(),
+            _ => panic!("Markdown canvas"),
+        }
+    });
+    let block = pane_editor.read_with(visual, |editor, _cx| {
+        editor.document.first_root().expect("word block").clone()
+    });
+    let position = block.read_with(visual, |block, _cx| {
+        let bounds = block.last_bounds.expect("word layout");
+        point(bounds.left() + px(12.0), bounds.center().y)
+    });
+    visual.simulate_click(position, Modifiers::default());
+    visual.simulate_event(gpui::MouseDownEvent {
+        position,
+        modifiers: Modifiers::default(),
+        button: MouseButton::Left,
+        click_count: 2,
+        first_mouse: false,
+    });
+    visual.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+    visual.run_until_parked();
+    redraw(visual);
+    assert_eq!(block.read_with(visual, |block, _cx| block.selected_range.clone()), 0..5);
+    visual.simulate_keystrokes("alt-f10");
+    redraw(visual);
+    block.read_with(visual, |block, _cx| {
+        assert!(block.selection_toolbar_keyboard_active, "focused pane toolbar");
+        assert_eq!(block.selection_toolbar_keyboard_index, 0);
+    });
+    visual.simulate_keystrokes("right");
+    redraw(visual);
+    block.read_with(visual, |block, _cx| {
+        assert_eq!(block.selected_range, 0..5);
+        assert!(block.selection_toolbar_keyboard_active);
+        assert_eq!(block.selection_toolbar_keyboard_index, 1);
+    });
+    visual.simulate_keystrokes("escape");
+    redraw(visual);
+    block.read_with(visual, |block, _cx| {
+        assert_eq!(block.selected_range, 0..5);
+        assert!(!block.selection_toolbar_keyboard_active);
+    });
+    editor.update(visual, |editor, cx| editor.open_menu_bar(0, cx));
+    redraw(visual);
+    visual.simulate_keystrokes("escape");
+    redraw(visual);
+    assert!(editor.read_with(visual, |editor, _cx| editor.menu_bar_open.is_none()));
+}
+
+/// 验证选区工具栏随可用空间切换上下位置，同时保持选区与撤销状态稳定。
 #[gpui::test]
 async fn selection_toolbar_formats_without_losing_selection_and_undo_restores_source(
     cx: &mut TestAppContext,
@@ -34,7 +108,12 @@ async fn selection_toolbar_formats_without_losing_selection_and_undo_restores_so
         assert_eq!(f32::from(toolbar.size.height), 32.0);
         assert!(toolbar.left() >= content.left());
         assert!(toolbar.right() <= content.right());
-        assert!(toolbar.bottom() <= selection.top());
+        assert!(toolbar.top() >= content.top());
+        assert!(toolbar.bottom() <= content.bottom());
+        assert!(
+            toolbar.bottom() <= selection.top() || toolbar.top() >= selection.bottom(),
+            "toolbar={toolbar:?} selection={selection:?}"
+        );
     }
 
     let bold_tooltip_target = visual_cx

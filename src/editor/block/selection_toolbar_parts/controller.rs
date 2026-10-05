@@ -27,6 +27,7 @@ impl Block {
         self.selection_toolbar_dismissed_range.as_ref() != Some(&range)
     }
 
+    /// 已测量所属视口时才用浮层几何拦截导航；未挂载视口的单块上下文不依赖窗口全局。
     pub(crate) fn handle_selection_toolbar_key(
         &mut self,
         event: &KeyDownEvent,
@@ -36,6 +37,17 @@ impl Block {
         self.refresh_selection_toolbar();
         if !self.selection_toolbar_visible() {
             return false;
+        }
+        if self.selection_toolbar_viewport.is_some() {
+            let geometry = self.selection_toolbar_geometry(
+                window.viewport_size(),
+                cx.global::<I18nManager>().current_language_id(),
+            );
+            if geometry == SelectionToolbarGeometry::Hidden {
+                self.selection_toolbar_keyboard_active = false;
+                cx.notify();
+                return false;
+            }
         }
         let modifiers = event.keystroke.modifiers;
         if event.keystroke.key.eq_ignore_ascii_case("f10")
@@ -394,6 +406,7 @@ impl Block {
             .into_any_element()
     }
 
+    /// 用所属滚动范围限制浮层，并按块壳的统一内容 inset 回换窗口坐标，避免窄窗越界。
     pub(crate) fn render_selection_toolbar(
         &self,
         theme: &Theme,
@@ -403,36 +416,17 @@ impl Block {
         if !self.selection_toolbar_visible() {
             return None;
         }
-        let selection = self.active_range_or_cursor_bounds()?;
         let text_bounds = self.last_bounds?;
-        let attached_surface_height = if self.selection_toolbar_type_menu_open {
-            312.0
-        } else if self.selection_toolbar_overflow_open {
-            OVERFLOW_MENU_HEIGHT
-        } else if self.selection_toolbar_link_input.is_some() {
-            42.0
-        } else {
-            0.0
-        };
+        let owner_viewport = resolved_toolbar_viewport(self.selection_toolbar_viewport, viewport);
         let show_block_type = !self.is_table_cell() && self.editor_selection_range.is_none();
         let block_type_width =
             expanded_block_type_width(cx.global::<I18nManager>().current_language_id());
         let expanded_block_type_width = show_block_type.then_some(block_type_width);
-        let mut position = toolbar_window_position(
-            selection,
-            text_bounds,
-            viewport,
-            attached_surface_height,
-            expanded_block_type_width,
-        );
-        if f32::from(viewport.width) <= 400.0 {
-            // Narrow client areas begin below the custom title/tab chrome; keep
-            // the toolbar inside that content surface without changing the
-            // general above-selection placement contract on normal windows.
-            position.top = position
-                .top
-                .max(super::WINDOW_CHROME_RESERVE + super::VIEWPORT_INSET);
-        }
+        let SelectionToolbarGeometry::Positioned(position) = self
+            .selection_toolbar_geometry(viewport, cx.global::<I18nManager>().current_language_id())
+        else {
+            return None;
+        };
         let d = &theme.dimensions;
         let c = &theme.colors;
         let visual_preferences = cx
@@ -443,31 +437,19 @@ impl Block {
         let material = palette.material(SurfaceKind::Glass, visual_preferences);
         let solid_material = palette.material(SurfaceKind::Solid, visual_preferences);
         let toolbar_width =
-            selection_toolbar_width(text_bounds, viewport, expanded_block_type_width);
+            selection_toolbar_width(text_bounds, owner_viewport, expanded_block_type_width);
         let show_block_type_label = show_block_type && toolbar_width > TOOLBAR_COMPACT_WIDTH;
-        let viewport_height = f32::from(viewport.height);
-        let (type_menu_above, type_menu_available_height) = attached_surface_placement(
-            position,
-            312.0,
-            viewport_height,
-            d.menu_bar_height,
-            d.status_bar_height,
-        );
-        let (link_editor_above, _) = attached_surface_placement(
-            position,
-            42.0,
-            viewport_height,
-            d.menu_bar_height,
-            d.status_bar_height,
-        );
-        let (overflow_menu_above, _) = attached_surface_placement(
-            position,
-            OVERFLOW_MENU_HEIGHT,
-            viewport_height,
-            d.menu_bar_height,
-            d.status_bar_height,
-        );
-        let origin_left = f32::from(text_bounds.left()) - d.block_padding_x;
+        let (type_menu_above, type_menu_available_height) =
+            attached_surface_placement(position, 312.0, owner_viewport);
+        let (link_editor_above, link_editor_available_height) =
+            attached_surface_placement(position, 42.0, owner_viewport);
+        let (overflow_menu_above, overflow_menu_available_height) =
+            attached_surface_placement(position, OVERFLOW_MENU_HEIGHT, owner_viewport);
+        let overflow_menu_max_height =
+            overflow_menu_available_height.clamp(1.0, OVERFLOW_MENU_HEIGHT);
+        let link_editor_max_height = link_editor_available_height.clamp(1.0, 42.0);
+        let origin_left =
+            f32::from(text_bounds.left()) - crate::components::rendered_content_inset(d);
         let origin_top = f32::from(text_bounds.top()) - d.block_padding_y;
         let overflow = self.selection_toolbar_overflow_open.then(|| {
             let menu = div()
@@ -476,7 +458,7 @@ impl Block {
                 .absolute()
                 .right_0()
                 .p(px(2.0))
-                .max_h(px(OVERFLOW_MENU_HEIGHT))
+                .max_h(px(overflow_menu_max_height))
                 .overflow_y_scroll()
                 .bg(material.background)
                 .border(px(d.dialog_border_width))
@@ -618,9 +600,10 @@ impl Block {
                 .cloned()
                 .unwrap_or_else(|| "Remove".to_owned());
             let input = input.clone();
-            let popover_min_left =
-                (f32::from(text_bounds.left()) + VIEWPORT_INSET).max(VIEWPORT_INSET);
-            let popover_right = (f32::from(text_bounds.right()).min(f32::from(viewport.width))
+            let popover_min_left = (f32::from(text_bounds.left()) + VIEWPORT_INSET)
+                .max(f32::from(owner_viewport.left()) + VIEWPORT_INSET);
+            let popover_right = (f32::from(text_bounds.right())
+                .min(f32::from(owner_viewport.right()))
                 - VIEWPORT_INSET)
                 .max(popover_min_left + 1.0);
             let popover_width = 292.0_f32.min(popover_right - popover_min_left);
@@ -634,6 +617,8 @@ impl Block {
                 .absolute()
                 .left(px(popover_window_left - position.left))
                 .w(px(popover_width))
+                .max_h(px(link_editor_max_height))
+                .overflow_y_scroll()
                 .p(px(6.0))
                 .flex()
                 .items_center()

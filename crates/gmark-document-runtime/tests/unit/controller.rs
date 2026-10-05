@@ -742,3 +742,6 @@ fn failed_save_discards_pending_until_an_explicit_retry() {
 
 #[path = "controller_parts/registry.rs"]
 mod registry;
+
+#[path = "controller_parts/typing.rs"]
+mod typing;

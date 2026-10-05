@@ -681,6 +681,8 @@ pub(crate) struct Frame {
     pub(crate) cursor_styles: Vec<CursorStyleRequest>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) debug_bounds: FxHashMap<String, Bounds<Pixels>>,
+    #[cfg(any(test, feature = "test-support"))]
+    debug_bounds_history: Vec<(String, Bounds<Pixels>)>,
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) next_inspector_instance_ids: FxHashMap<Rc<crate::InspectorElementPath>, usize>,
     #[cfg(any(feature = "inspector", debug_assertions))]
@@ -707,9 +709,12 @@ pub(crate) struct PaintIndex {
     accessed_element_states_index: usize,
     tab_handle_index: usize,
     line_layout_index: LineLayoutIndex,
+    #[cfg(any(test, feature = "test-support"))]
+    debug_bounds_index: usize,
 }
 
 impl Frame {
+    /// 测试 selector 同时保留绘制顺序，才能按缓存子树范围恢复，避免保留已卸载元素。
     pub(crate) fn new(dispatch_tree: DispatchTree) -> Self {
         Frame {
             focus: None,
@@ -728,6 +733,8 @@ impl Frame {
 
             #[cfg(any(test, feature = "test-support"))]
             debug_bounds: FxHashMap::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            debug_bounds_history: Vec::new(),
 
             #[cfg(any(feature = "inspector", debug_assertions))]
             next_inspector_instance_ids: FxHashMap::default(),
@@ -738,6 +745,7 @@ impl Frame {
         }
     }
 
+    /// 原因：复用帧缓冲区前清除逐帧索引，避免测试可见的元素 bounds 跨帧残留。
     pub(crate) fn clear(&mut self) {
         self.element_states.clear();
         self.accessed_element_states.clear();
@@ -752,6 +760,12 @@ impl Frame {
         self.deferred_draws.clear();
         self.tab_stops.clear();
         self.focus = None;
+
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            self.debug_bounds.clear();
+            self.debug_bounds_history.clear();
+        }
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         {
@@ -2279,6 +2293,7 @@ impl Window {
         );
     }
 
+    /// 测试索引与实际 paint 范围一起记录，使缓存复用与重新绘制具有相同的可见元素集合。
     pub(crate) fn paint_index(&self) -> PaintIndex {
         PaintIndex {
             scene_index: self.next_frame.scene.len(),
@@ -2288,10 +2303,35 @@ impl Window {
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             tab_handle_index: self.next_frame.tab_stops.paint_index(),
             line_layout_index: self.text_system.layout_index(),
+            #[cfg(any(test, feature = "test-support"))]
+            debug_bounds_index: self.next_frame.debug_bounds_history.len(),
         }
     }
 
+    /// 每帧重建 selector；缓存子树仅重放自己的范围，已关闭的浮层不会从旧帧回流。
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn record_debug_bounds(&mut self, selector: String, bounds: Bounds<Pixels>) {
+        self.next_frame
+            .debug_bounds
+            .insert(selector.clone(), bounds);
+        self.next_frame
+            .debug_bounds_history
+            .push((selector, bounds));
+    }
+
+    /// 缓存绘制必须重放包括测试 selector 在内的逐帧副作用；生产构建不增加 selector 状态。
     pub(crate) fn reuse_paint(&mut self, range: Range<PaintIndex>) {
+        #[cfg(any(test, feature = "test-support"))]
+        for (selector, bounds) in &self.rendered_frame.debug_bounds_history
+            [range.start.debug_bounds_index..range.end.debug_bounds_index]
+        {
+            self.next_frame
+                .debug_bounds
+                .insert(selector.clone(), *bounds);
+            self.next_frame
+                .debug_bounds_history
+                .push((selector.clone(), *bounds));
+        }
         self.next_frame.cursor_styles.extend(
             self.rendered_frame.cursor_styles
                 [range.start.cursor_styles_index..range.end.cursor_styles_index]

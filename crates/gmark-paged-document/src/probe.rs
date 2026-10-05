@@ -59,6 +59,7 @@ impl OpenProbe {
     }
 }
 
+/// 只读取首尾样本以控制大文件打开成本；首样本边界可能切断字符，因此将其是否到达 EOF 传给编码判断。
 pub fn probe_file(
     path: impl AsRef<Path>,
     options: ProbeOptions,
@@ -68,13 +69,14 @@ pub fn probe_file(
     let identity = source.identity()?;
     let sample_len = identity.len.min(options.sample_bytes as u64) as usize;
     let head = source.read_range(0, sample_len as u64)?;
+    let head_is_prefix = identity.len > head.len() as u64;
     let tail_start = identity.len.saturating_sub(options.sample_bytes as u64);
     let tail = if tail_start > sample_len as u64 {
         source.read_range(tail_start, identity.len)?
     } else {
         Vec::new()
     };
-    let encoding = detect_encoding(&head, &tail)?;
+    let encoding = detect_encoding(&head, &tail, head_is_prefix)?;
     let format = detect_format(path);
     let sampled = (head.len() + tail.len()).max(1) as u64;
     let newline_count = head
@@ -137,7 +139,12 @@ fn detect_format(path: &Path) -> DocumentFormat {
     }
 }
 
-fn detect_encoding(head: &[u8], tail: &[u8]) -> Result<TextEncoding, PagedDocumentError> {
+/// 仅忽略非 EOF head 样本末尾的不完整 UTF-8 序列，避免把采样器截断误认成文件编码；样本内错误仍回退。
+fn detect_encoding(
+    head: &[u8],
+    tail: &[u8],
+    head_is_prefix: bool,
+) -> Result<TextEncoding, PagedDocumentError> {
     if head.starts_with(&[0xef, 0xbb, 0xbf]) {
         return Ok(TextEncoding::Utf8 { bom: true });
     }
@@ -150,7 +157,11 @@ fn detect_encoding(head: &[u8], tail: &[u8]) -> Result<TextEncoding, PagedDocume
     if !looks_like_text_sample(head, tail) {
         return Err(PagedDocumentError::Binary);
     }
-    if std::str::from_utf8(head).is_ok() && tail_is_utf8(tail) {
+    let head_is_utf8 = match std::str::from_utf8(head) {
+        Ok(_) => true,
+        Err(error) => head_is_prefix && error.error_len().is_none(),
+    };
+    if head_is_utf8 && tail_is_utf8(tail) {
         return Ok(TextEncoding::Utf8 { bom: false });
     }
     let mut detector = chardetng::EncodingDetector::new();

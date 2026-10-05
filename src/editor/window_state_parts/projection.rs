@@ -64,11 +64,15 @@ impl Editor {
         self.rebuild_primary_projection_from_source_internal(true, cx);
     }
 
+    /// 未提交文字先等待备份；正常安装绑定精确 revision，后续局部提交从实际根组回到源码区域。
     fn rebuild_primary_projection_from_source_internal(
         &mut self,
         reuse_entities: bool,
         cx: &mut Context<Self>,
     ) {
+        if self.document.source_commit_error().is_some() {
+            return;
+        }
         let prepared = self.prepare_current_projection();
         if Self::should_virtualize_projection(&prepared) {
             let mut surface = VirtualSurfaceState::new(Arc::clone(&prepared));
@@ -97,11 +101,20 @@ impl Editor {
         } else {
             HashMap::new()
         };
-        let mut roots = Self::build_blocks_from_projection_reusing(cx, &prepared, &mut reusable);
+        let (mut roots, mut source_regions) =
+            Self::build_blocks_from_projection_reusing_with_regions(cx, &prepared, &mut reusable);
         if roots.is_empty() {
             roots.push(Self::new_block(cx, BlockRecord::paragraph(String::new())));
+            if !source_regions
+                .iter()
+                .any(|(_, root_range)| root_range.contains(&0))
+            {
+                source_regions.push((0..0, 0..roots.len()));
+            }
         }
         self.document.replace_roots(roots, cx);
+        self.document
+            .bind_source_regions(prepared.revision, source_regions, cx);
         let current_entity_ids = self
             .document
             .visible_blocks()

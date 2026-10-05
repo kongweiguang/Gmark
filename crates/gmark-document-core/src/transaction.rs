@@ -9,6 +9,26 @@ use uuid::Uuid;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DocumentRevision(pub u64);
 
+/// 一个由调用方维护边界的连续 Source 文字输入组。
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct TypingGroupId(Uuid);
+
+impl TypingGroupId {
+    /// 使用随机身份避免撤销或断组后复用旧标识并合并到历史记录。
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl Default for TypingGroupId {
+    /// 默认值同样创建新身份，避免独立输入组共享固定标识而被误合并。
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SourceAffinity {
     #[default]
@@ -103,6 +123,55 @@ impl DocumentMutationMap {
         self.inverse.as_ref().map(|inverse| Self {
             edits: inverse.clone(),
             inverse: Some(self.edits.clone()),
+        })
+    }
+
+    /// 合并一个紧接在单一替换尾部的插入，以便整组 Source 输入仍只有一个净坐标映射。
+    pub fn append_adjacent_insertion(&self, next: &Self) -> Option<Self> {
+        let [previous_edit] = self.edits.as_ref() else {
+            return None;
+        };
+        let [previous_inverse] = self.inverse.as_deref()? else {
+            return None;
+        };
+        let [next_edit] = next.edits.as_ref() else {
+            return None;
+        };
+        let [next_inverse] = next.inverse.as_deref()? else {
+            return None;
+        };
+        if !next_edit.range.is_empty() || next_edit.replacement_len == 0 {
+            return None;
+        }
+        let inserted_end = previous_edit
+            .range
+            .start
+            .checked_add(previous_edit.replacement_len)?;
+        let next_end = next_edit
+            .range
+            .start
+            .checked_add(next_edit.replacement_len)?;
+        if next_edit.range.start != inserted_end
+            || previous_inverse.range != (previous_edit.range.start..inserted_end)
+            || next_inverse.range != (next_edit.range.start..next_end)
+            || next_inverse.replacement_len != 0
+        {
+            return None;
+        }
+        let combined_len = previous_edit
+            .replacement_len
+            .checked_add(next_edit.replacement_len)?;
+        let combined_end = previous_edit.range.start.checked_add(combined_len)?;
+
+        Some(Self {
+            edits: Arc::from(vec![MutationEdit {
+                range: previous_edit.range.clone(),
+                replacement_len: combined_len,
+            }]),
+            inverse: Some(Arc::from(vec![MutationEdit {
+                range: previous_edit.range.start..combined_end,
+                replacement_len: previous_inverse.replacement_len,
+            }])),
         })
     }
 

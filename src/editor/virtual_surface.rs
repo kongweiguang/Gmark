@@ -326,11 +326,15 @@ impl Editor {
         })
     }
 
+    /// 失败编辑备份前保持原挂载实体，迟到投影不能替换尚未进入权威源码的文字。
     pub(super) fn install_virtual_surface_projection(
         &mut self,
         projection: Arc<PreparedSplitProjection>,
         cx: &mut gpui::Context<Self>,
     ) -> bool {
+        if self.document.source_commit_error().is_some() {
+            return false;
+        }
         let Some(mut surface) = self.virtual_surface.take() else {
             return false;
         };

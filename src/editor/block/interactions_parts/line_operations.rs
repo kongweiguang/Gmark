@@ -3,7 +3,7 @@
 use super::*;
 
 impl Block {
-    /// Source 交给所属输入目标；代码与表格单元格共用文字行事务，避免单元格快捷键改变表格结构。
+    /// Source 交给所属输入目标；表格单元格从权威源码捕获撤销，避免行操作规范化无关 Markdown。
     pub(crate) fn apply_raw_line_operation(
         &mut self,
         operation: crate::components::block::LineOperation,
@@ -72,7 +72,18 @@ impl Block {
         }
 
         let selected_relative = selection_start..selection_end;
-        self.prepare_undo_capture(UndoCaptureKind::NonCoalescible, cx);
+        if self.is_table_cell() {
+            cx.emit(
+                crate::components::BlockEvent::PrepareUndoFromSourceSnapshot {
+                    kind: UndoCaptureKind::NonCoalescible,
+                    markdown_selection: self
+                        .current_range_to_markdown_range(self.selected_range.clone()),
+                    reversed: self.selection_reversed,
+                },
+            );
+        } else {
+            self.prepare_undo_capture(UndoCaptureKind::NonCoalescible, cx);
+        }
         self.replace_text_in_visible_range_with_direction(
             edit.range,
             &edit.replacement,

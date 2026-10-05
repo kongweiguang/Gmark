@@ -306,10 +306,17 @@ impl ResidentRecoveryJournal {
 
 impl RecoveryBackend for ResidentRecoveryJournal {
     fn record(&mut self, record: &RecoveryRecord) -> Result<(), PersistenceError> {
-        let RecoveryAction::Transaction(transaction) = &record.action else {
-            return Err(PersistenceError::Recovery(
-                "Resident recovery requires the resulting source transaction".to_owned(),
-            ));
+        let (transaction, group_id) = match &record.action {
+            RecoveryAction::Transaction(transaction) => (transaction, None),
+            RecoveryAction::TypingTransaction {
+                transaction,
+                group_id,
+            } => (transaction, Some(*group_id)),
+            RecoveryAction::Undo | RecoveryAction::Redo => {
+                return Err(PersistenceError::Recovery(
+                    "Resident recovery requires the resulting source transaction".to_owned(),
+                ));
+            }
         };
         let mut document =
             SourceDocument::from_normalized(&self.last_source, self.last_format.clone(), 0)
@@ -335,9 +342,12 @@ impl RecoveryBackend for ResidentRecoveryJournal {
                 Ok(TextEdit::new(start..end, edit.replacement.clone()))
             })
             .collect::<Result<Vec<_>, PersistenceError>>()?;
-        document
-            .apply_transaction(Transaction::new(document.revision(), edits))
-            .map_err(|error| PersistenceError::Recovery(error.to_string()))?;
+        let transaction = Transaction::new(document.revision(), edits);
+        let result = match group_id {
+            Some(group_id) => document.apply_typing_transaction(transaction, group_id),
+            None => document.apply_transaction(transaction),
+        };
+        result.map_err(|error| PersistenceError::Recovery(error.to_string()))?;
         self.record_formatted(
             &document.text(),
             document.source_format(),

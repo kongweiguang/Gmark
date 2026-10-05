@@ -435,6 +435,57 @@ fn reload_prepared_document_validates_clean_baseline_and_advances_revision() {
     );
 }
 
+/// 验证准备 reload 后若 peer 已提交新 revision，确认重载也不能覆盖该编辑。
+#[test]
+fn confirmed_reload_rejects_revision_changed_after_preparation() {
+    let handle = DocumentHandle::new(DocumentController::new(DocumentId::new(), session()));
+    let (before, _subscription) = handle
+        .subscribe_with_snapshot()
+        .unwrap_or_else(|error| panic!("subscribe: {error}"));
+    let expected_identity = before.identity.clone();
+    let prepared = session();
+    let peer_view = DocumentViewInstanceId::new();
+    handle
+        .lock()
+        .unwrap_or_else(|error| panic!("lock peer registration: {error}"))
+        .register_view(peer_view);
+
+    handle
+        .lock()
+        .unwrap_or_else(|error| panic!("lock peer edit: {error}"))
+        .dispatch(DocumentCommand::ApplyTransaction {
+            view_id: peer_view,
+            transaction_id: TransactionId(1),
+            transaction: Transaction::new(before.revision, vec![SourceEdit::new(0..1, "t")]),
+            selection_before: SourceSelection::default(),
+            selection_after: SourceSelection::default(),
+        })
+        .unwrap_or_else(|error| panic!("peer edit: {error}"));
+
+    let result = handle
+        .lock()
+        .unwrap_or_else(|error| panic!("lock stale reload: {error}"))
+        .dispatch(DocumentCommand::ReloadPreparedDocumentAfterConfirmation {
+            expected_revision: before.revision,
+            expected_identity,
+            prepared,
+        });
+    assert!(matches!(
+        result,
+        Err(ControllerError::ExternalRevisionMismatch { .. })
+    ));
+
+    let controller = handle
+        .lock()
+        .unwrap_or_else(|error| panic!("lock preserved peer edit: {error}"));
+    assert_eq!(controller.session().revision(), before.revision.0 + 1);
+    assert!(controller.session().dirty);
+    assert_eq!(
+        controller.session().snapshot().read_range(0..3).unwrap(),
+        b"tne"
+    );
+}
+
 #[test]
 fn external_append_applies_prepared_tail_and_updates_revision_identity() {
     let directory = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));

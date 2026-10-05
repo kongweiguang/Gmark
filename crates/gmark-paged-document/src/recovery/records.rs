@@ -3,7 +3,7 @@
 use std::ops::Range;
 use std::path::PathBuf;
 
-use gmark_document_core::{SourceAffinity, SourceSelection, TextEncoding};
+use gmark_document_core::{SourceAffinity, SourceSelection, TextEncoding, TypingGroupId};
 use serde::{Deserialize, Serialize};
 
 use super::PagedRecoverySelection;
@@ -38,6 +38,8 @@ pub(super) enum EditRecord {
         chunk_index: u32,
         chunk_count: u32,
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        typing_group: Option<TypingGroupId>,
         selection: Option<SelectionRecord>,
         view_mode: String,
     },
@@ -74,6 +76,7 @@ pub(super) struct PendingReplace {
     pub(super) range: Range<u64>,
     pub(super) chunk_count: u32,
     pub(super) chunks: Vec<String>,
+    pub(super) typing_group: Option<TypingGroupId>,
     pub(super) selection: Option<PagedRecoverySelection>,
     pub(super) view_mode: String,
 }

@@ -188,7 +188,7 @@ impl Editor {
         .detach();
     }
 
-    /// 在目标 gate 通过后复用图片粘贴事务，成功才 disarm，失败则由 guard 回收副本。
+    /// 跨块拒绝不得退成局部粘贴，成功才接管图片；失败仍由原 guard 回收副本。
     fn commit_paste_image_markdown(
         &mut self,
         block: Entity<super::Block>,
@@ -198,6 +198,7 @@ impl Editor {
         trailing: &InlineTextTree,
         cx: &mut Context<Self>,
     ) {
+        let had_cross_selection = self.cross_block_selection.is_some();
         if self.replace_cross_block_selection_with_text(
             &markdown,
             None,
@@ -208,6 +209,9 @@ impl Editor {
             if let Some(cleanup) = cleanup.as_mut() {
                 cleanup.disarm();
             }
+            return;
+        }
+        if had_cross_selection || self.document.source_commit_error().is_some() {
             return;
         }
 
@@ -236,7 +240,7 @@ impl Editor {
         cx.notify();
     }
 
-    /// 缺失源路径回到普通文本粘贴，只有原目标 gate 通过时才允许这次兼容回退。
+    /// 缺失资源的文本仍绑定原选区；跨块失败保留文字并等待恢复，不能写入活动块的局部范围。
     fn commit_paste_plain_text(
         &mut self,
         block: Entity<super::Block>,
@@ -245,6 +249,7 @@ impl Editor {
         trailing: &InlineTextTree,
         cx: &mut Context<Self>,
     ) {
+        let had_cross_selection = self.cross_block_selection.is_some();
         if self.replace_cross_block_selection_with_text(
             &text,
             None,
@@ -252,6 +257,10 @@ impl Editor {
             crate::components::UndoCaptureKind::NonCoalescible,
             cx,
         ) {
+            return;
+        }
+        if had_cross_selection || self.document.source_commit_error().is_some() {
+            self.retain_unsubmitted_resident_text(&text, cx);
             return;
         }
 

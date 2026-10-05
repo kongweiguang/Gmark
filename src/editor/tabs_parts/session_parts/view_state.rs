@@ -222,7 +222,11 @@ impl Editor {
         })
     }
 
+    /// 正文后端仍是 dirty 真值；尚未发布的视图文字必须额外阻止保存成功和无提示关闭。
     pub(crate) fn is_document_dirty(&self) -> bool {
+        if self.document.source_commit_error().is_some() {
+            return true;
+        }
         let dirty = if self.document_host.is_some() {
             self.document_dirty
         } else {

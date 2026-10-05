@@ -107,6 +107,7 @@ impl Editor {
         cx.notify();
     }
 
+    /// 对用户明确选择的 reload 使用共享会话替换，避免同一文档的 peer 留在旧 Controller。
     pub(crate) fn on_reload_external_conflict(
         &mut self,
         _: &ClickEvent,
@@ -122,7 +123,7 @@ impl Editor {
         self.abort_window_close_tab_sequence(cx);
         self.hide_external_file_conflict(cx);
         self.external_conflict_restore_focus = None;
-        match self.replace_document_from_path(&path, cx) {
+        match self.reload_document_from_path_after_confirmation(&path, cx) {
             Ok(()) => window.set_window_edited(false),
             Err(error) => {
                 let strings = cx.global::<I18nManager>().strings().clone();

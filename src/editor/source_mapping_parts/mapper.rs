@@ -528,12 +528,13 @@ impl Editor {
             .0
     }
 
-    /// Resolves one entity and its exact source span from only its resident root or virtual region.
+    /// 只扫描目标所属根或虚拟区域；独立 table cell 先定位所属表格，避免把它误当作树外输入。
     pub(in crate::editor) fn build_source_target_mapping_and_range_for_entity(
         &self,
         entity_id: EntityId,
         cx: &App,
     ) -> Option<(Option<SourceTargetMapping>, Range<usize>)> {
+        let _trace = crate::perf::span("source_target_mapping_sync");
         if let Some((range, roots)) = self
             .virtual_surface
             .as_ref()
@@ -553,7 +554,11 @@ impl Editor {
             })?;
             return Some((mapping, block_range));
         }
-        let root_index = self.document.root_index_for_entity(entity_id)?;
+        let root_index = self.document.root_index_for_entity(entity_id).or_else(|| {
+            let binding = self.table_cells.get(&entity_id)?;
+            self.document
+                .root_index_for_entity(binding.table_block.entity_id())
+        })?;
         let absolute_start = self.document.cached_root_source_start(root_index)?;
         let root = self.document.root_blocks().get(root_index)?;
         let mut mappings = Vec::new();

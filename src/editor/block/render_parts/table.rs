@@ -4,7 +4,7 @@ use super::*;
 use crate::components::TableData;
 
 impl Block {
-    /// 渲染原生表格及其行列选择、追加控制和轴向菜单交互。
+    /// 渲染原生表格及其行列交互，并仅在视口变化时同步浮层裁剪边界到 cell。
     pub(super) fn render_table_content(
         &mut self,
         focused_base: Stateful<Div>,
@@ -37,6 +37,19 @@ impl Block {
                 ))
                 .into_any_element();
         };
+
+        if self.table_cells_toolbar_viewport_dirty
+            || self.table_cells_toolbar_viewport != self.selection_toolbar_viewport
+        {
+            let viewport = self.selection_toolbar_viewport;
+            for cell in runtime.header.iter().chain(runtime.rows.iter().flatten()) {
+                cell.update(cx, |block, _cx| {
+                    block.set_selection_toolbar_viewport(viewport);
+                });
+            }
+            self.table_cells_toolbar_viewport = viewport;
+            self.table_cells_toolbar_viewport_dirty = false;
+        }
 
         // The window viewport also includes docked workspace/sidebar panels;
         // prefer the block's measured content width so a wide table cannot

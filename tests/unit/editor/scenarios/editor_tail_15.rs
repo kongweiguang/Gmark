@@ -1,5 +1,20 @@
 // @author kongweiguang
 
+#[path = "editor_tail_15/live_typing_history.rs"]
+mod live_typing_history;
+
+#[path = "editor_tail_15/live_input_source_preservation.rs"]
+mod live_input_source_preservation;
+
+#[path = "editor_tail_15/resident_selection_source_preservation.rs"]
+mod resident_selection_source_preservation;
+
+#[path = "editor_tail_15/resident_structure_source_preservation.rs"]
+mod resident_structure_source_preservation;
+
+#[path = "editor_tail_15/resident_source_commit_recovery.rs"]
+mod resident_source_commit_recovery;
+
 #[test]
 fn history_source_uses_rope_snapshot_and_falls_back_only_when_projection_differs() {
     let document = gmark_document::SourceDocument::new("alpha\n世界🙂");
@@ -475,6 +490,71 @@ async fn auto_save_after_idle_uses_normal_existing_file_save_path(cx: &mut TestA
         assert!(!editor.document_dirty);
         assert!(editor.auto_save_task.is_none());
         assert!(!editor.external_file_conflict);
+    });
+    let _ = fs::remove_file(path);
+}
+
+#[gpui::test]
+/// 保留真实 CRLF 源格式，验证自动保存刷新后的文件身份也能通过 Ctrl+S 再次保存。
+async fn ctrl_s_after_crlf_auto_save_uses_refreshed_file_fingerprint(cx: &mut TestAppContext) {
+    init_editor_test_app(cx);
+    cx.update(|cx| {
+        crate::config::EditorSettings::init(
+            cx,
+            true,
+            crate::config::AutoSavePreference::AfterDelay,
+            true,
+        );
+    });
+    let path = temp_markdown_path("crlf-auto-save-then-ctrl-s");
+    fs::write(&path, b"alpha\r\nbeta\r\nomega").unwrap();
+    let opened = crate::document_io::read_markdown_file(&path).unwrap();
+    let editor_path = path.clone();
+    let (editor, visual_cx) = cx.add_window_view(move |_window, cx| {
+        Editor::from_opened_markdown(cx, opened, Some(editor_path))
+    });
+    redraw(visual_cx);
+
+    editor.update(visual_cx, |editor, cx| {
+        editor.sync_source_document_from_projection("edited\nbeta\nomega");
+        editor.set_document_dirty_for_test(true);
+        editor.schedule_auto_save(cx);
+        assert!(editor.auto_save_task.is_some());
+    });
+    visual_cx.executor().advance_clock(Duration::from_secs(1));
+    visual_cx.run_until_parked();
+    redraw(visual_cx);
+
+    let expected = b"edited\r\nbeta\r\nomega";
+    assert_eq!(fs::read(&path).unwrap(), expected);
+    editor.read_with(visual_cx, |editor, _cx| {
+        assert!(!editor.document_dirty);
+        assert!(!editor.external_file_conflict);
+        assert!(editor.save_task.is_none());
+        assert_eq!(
+            editor.saved_file_fingerprint,
+            crate::recovery::fingerprint_file(&path).ok(),
+            "the automatic save callback must install the identity of the written CRLF file"
+        );
+        let active_path = editor.file_path.as_deref().expect("saved file path");
+        assert_eq!(
+            editor.saved_file_fingerprint,
+            crate::recovery::fingerprint_file(active_path).ok(),
+            "the baseline must use the same canonical path spelling as the active save target"
+        );
+    });
+
+    editor.update(visual_cx, |editor, cx| editor.request_save_document(cx));
+    redraw(visual_cx);
+    visual_cx.run_until_parked();
+    redraw(visual_cx);
+
+    assert_eq!(fs::read(&path).unwrap(), expected);
+    editor.read_with(visual_cx, |editor, _cx| {
+        assert!(!editor.external_file_conflict);
+        assert!(!editor.show_external_conflict_dialog);
+        assert!(!editor.document_dirty);
+        assert!(editor.save_task.is_none());
     });
     let _ = fs::remove_file(path);
 }

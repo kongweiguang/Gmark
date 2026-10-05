@@ -7,6 +7,10 @@ use derive_more::{Deref, DerefMut};
 use smallvec::SmallVec;
 use std::sync::Arc;
 
+#[cfg(test)]
+#[path = "line_tests.rs"]
+mod tests;
+
 /// Set the text decoration for a run of text.
 #[derive(Debug, Clone)]
 pub struct DecorationRun {
@@ -185,6 +189,8 @@ impl WrappedLine {
     }
 }
 
+/// 字形位置从当前显示行原点直接投影；横向平移的大坐标不能逐字累加 f32 差值，
+/// 否则文字和依赖 shaped 坐标的光标会随行长产生可见漂移。
 fn paint_line(
     origin: Point<Pixels>,
     layout: &LineLayout,
@@ -224,18 +230,14 @@ fn paint_line(
             ),
             origin.y,
         );
-        let mut prev_glyph_position = Point::default();
+        let mut visual_line_origin_x = glyph_origin.x;
+        let mut visual_line_start_x = px(0.0);
         let mut max_glyph_size = size(px(0.), px(0.));
-        let mut first_glyph_x = origin.x;
         for (run_ix, run) in layout.runs.iter().enumerate() {
             max_glyph_size = text_system.bounding_box(run.font_id, layout.font_size).size;
 
             for (glyph_ix, glyph) in run.glyphs.iter().enumerate() {
-                glyph_origin.x += glyph.position.x - prev_glyph_position.x;
-                if glyph_ix == 0 && run_ix == 0 {
-                    first_glyph_x = glyph_origin.x;
-                }
-
+                glyph_origin.x = visual_line_origin_x + (glyph.position.x - visual_line_start_x);
                 if wraps.peek() == Some(&&WrapBoundary { run_ix, glyph_ix }) {
                     wraps.next();
                     if let Some((underline_origin, underline_style)) = current_underline.as_mut() {
@@ -273,9 +275,10 @@ fn paint_line(
                         layout,
                         wraps.peek(),
                     );
+                    visual_line_origin_x = glyph_origin.x;
+                    visual_line_start_x = glyph.position.x;
                     glyph_origin.y += line_height;
                 }
-                prev_glyph_position = glyph.position;
 
                 let mut finished_underline: Option<(Point<Pixels>, UnderlineStyle)> = None;
                 let mut finished_strikethrough: Option<(Point<Pixels>, StrikethroughStyle)> = None;
@@ -389,12 +392,7 @@ fn paint_line(
             }
         }
 
-        let mut last_line_end_x = first_glyph_x + layout.width;
-        if let Some(boundary) = wrap_boundaries.last() {
-            let run = &layout.runs[boundary.run_ix];
-            let glyph = &run.glyphs[boundary.glyph_ix];
-            last_line_end_x -= glyph.position.x;
-        }
+        let last_line_end_x = visual_line_origin_x + (layout.width - visual_line_start_x);
 
         if let Some((mut underline_start, underline_style)) = current_underline.take() {
             if last_line_end_x == underline_start.x {
@@ -422,6 +420,7 @@ fn paint_line(
     })
 }
 
+/// 背景与字形使用同一绝对投影规则，保证长行平移和软换行后装饰仍贴合文字。
 fn paint_line_background(
     origin: Point<Pixels>,
     layout: &LineLayout,
@@ -457,13 +456,14 @@ fn paint_line_background(
             ),
             origin.y,
         );
-        let mut prev_glyph_position = Point::default();
+        let mut visual_line_origin_x = glyph_origin.x;
+        let mut visual_line_start_x = px(0.0);
         let mut max_glyph_size = size(px(0.), px(0.));
         for (run_ix, run) in layout.runs.iter().enumerate() {
             max_glyph_size = text_system.bounding_box(run.font_id, layout.font_size).size;
 
             for (glyph_ix, glyph) in run.glyphs.iter().enumerate() {
-                glyph_origin.x += glyph.position.x - prev_glyph_position.x;
+                glyph_origin.x = visual_line_origin_x + (glyph.position.x - visual_line_start_x);
 
                 if wraps.peek() == Some(&&WrapBoundary { run_ix, glyph_ix }) {
                     wraps.next();
@@ -491,9 +491,10 @@ fn paint_line_background(
                         layout,
                         wraps.peek(),
                     );
+                    visual_line_origin_x = glyph_origin.x;
+                    visual_line_start_x = glyph.position.x;
                     glyph_origin.y += line_height;
                 }
-                prev_glyph_position = glyph.position;
 
                 let mut finished_background: Option<(Point<Pixels>, Hsla)> = None;
                 if glyph.index >= run_end {
@@ -543,12 +544,7 @@ fn paint_line_background(
             }
         }
 
-        let mut last_line_end_x = origin.x + layout.width;
-        if let Some(boundary) = wrap_boundaries.last() {
-            let run = &layout.runs[boundary.run_ix];
-            let glyph = &run.glyphs[boundary.glyph_ix];
-            last_line_end_x -= glyph.position.x;
-        }
+        let last_line_end_x = visual_line_origin_x + (layout.width - visual_line_start_x);
 
         if let Some((mut background_origin, background_color)) = current_background.take() {
             if last_line_end_x == background_origin.x {

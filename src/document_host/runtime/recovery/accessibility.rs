@@ -48,6 +48,7 @@ impl DocumentHost {
             .into()
     }
 
+    /// 无障碍正文复用当前有界输入表面；候选与刚输入的文字无需等待后台行缓存追平。
     pub(crate) fn accessibility_snapshot(
         &self,
         cx: &App,
@@ -62,11 +63,20 @@ impl DocumentHost {
                     .strings()
                     .large_document_text("untitled")
             });
+        let input = self.source_accessibility_input(cx);
         let lines = self
             .displayed_screen_lines
             .rows
             .iter()
-            .map(|(line, row)| (*line as u64, row.text.to_string()))
+            .map(|(line, row)| {
+                let text = match input {
+                    Some((input_line, block)) if input_line == *line => {
+                        block.read(cx).display_text_with_ime().to_string()
+                    }
+                    _ => row.text.to_string(),
+                };
+                (*line as u64, text)
+            })
             .collect();
         let folds = self
             .fold_projection
@@ -115,7 +125,8 @@ impl DocumentHost {
         }
     }
 
-    pub(crate) fn accessibility_revision(&self) -> u64 {
+    /// 布局缓存与输入表面共用发布身份，避免正文未变的候选更新或移动插入点被忽略。
+    pub(crate) fn accessibility_revision(&self, cx: &App) -> u64 {
         use std::hash::{Hash, Hasher};
 
         let flags = u64::from(document_dirty_state(&self.document))
@@ -163,6 +174,23 @@ impl DocumentHost {
         self.coordinator.recovery_error.hash(&mut message_hasher);
         self.mode_notice.hash(&mut message_hasher);
         self.coordinator.external_status.hash(&mut message_hasher);
+        if let Some(document) = self.document.as_ref() {
+            document.revision().hash(&mut message_hasher);
+            let selection = document.source_selection();
+            selection.anchor.byte_offset.hash(&mut message_hasher);
+            selection.head.byte_offset.hash(&mut message_hasher);
+        }
+        if let Some((line, owner)) = self.source_accessibility_input(cx) {
+            let block = owner.read(cx);
+            line.hash(&mut message_hasher);
+            owner.entity_id().hash(&mut message_hasher);
+            block
+                .display_text_with_ime()
+                .as_ref()
+                .hash(&mut message_hasher);
+            block.selected_range.hash(&mut message_hasher);
+            block.selection_reversed.hash(&mut message_hasher);
+        }
         self.displayed_screen_lines
             .cache_epoch
             .wrapping_mul(31)
@@ -183,6 +211,20 @@ impl DocumentHost {
             .wrapping_add(message_hasher.finish())
             .wrapping_mul(512)
             .wrapping_add(flags)
+    }
+
+    /// 只投影与权威 revision 一致的输入 owner；旧实体不能把候选带到新的文档位置。
+    fn source_accessibility_input(&self, cx: &App) -> Option<(usize, &Entity<Block>)> {
+        let revision = self.document.as_ref()?.revision();
+        if let Some(snapshot) = self.source_ime_snapshot.as_ref()
+            && snapshot.revision == revision
+            && !snapshot.row_entity.read(cx).is_read_only()
+        {
+            return Some((snapshot.line, &snapshot.row_entity));
+        }
+        let active = self.active_edit.as_ref()?;
+        (active.base_revision == revision && !active.block.read(cx).is_read_only())
+            .then_some((active.line, &active.block))
     }
 
     pub(crate) fn activate_accessibility_error(&mut self, cx: &mut Context<Self>) {

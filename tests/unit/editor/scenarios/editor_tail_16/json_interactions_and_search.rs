@@ -216,6 +216,7 @@ async fn json_graph_search_next_cycles_all_loaded_matches(cx: &mut TestAppContex
     );
 }
 
+/// 小文件可能在首帧前已完成加载；按当前结构状态验证，避免依赖已消失的加载提示索引。
 #[gpui::test]
 async fn empty_json_stays_in_preview_while_loading_then_installs_one_empty_root(
     cx: &mut TestAppContext,
@@ -232,9 +233,17 @@ async fn empty_json_stays_in_preview_while_loading_then_installs_one_empty_root(
         Editor::from_source_backed_file(cx, path, probe, source)
     });
 
-    redraw(visual);
+    visual.update(|window, cx| window.draw(cx).clear());
     assert!(editor.read_with(visual, |editor, _cx| editor.view_mode == ViewMode::Preview));
-    assert!(visual.debug_bounds("json-graph-empty-state").is_some());
+    let initial_graph = editor.read_with(visual, |editor, cx| {
+        editor.document_host.as_ref().unwrap().read(cx).json_graph_state_for_test()
+    });
+    if let Some((nodes, edges, _, _, _)) = initial_graph {
+        assert_eq!((nodes, edges), (1, 0));
+        assert!(visual.debug_bounds("json-graph-canvas").is_some());
+    } else {
+        assert!(visual.debug_bounds("json-graph-empty-state").is_some());
+    }
 
     visual.run_until_parked();
     redraw(visual);

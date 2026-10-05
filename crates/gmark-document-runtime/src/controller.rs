@@ -22,6 +22,7 @@ use std::time::Duration;
 use gmark_document::{LineEnding, SourceFormatSnapshot};
 use gmark_document_core::{
     DocumentMutationMap, DocumentRevision, SourceEdit, SourceSelection, TextEncoding, Transaction,
+    TypingGroupId,
 };
 use gmark_paged_document::{FileSource, LineIndex};
 use thiserror::Error;
@@ -71,6 +72,14 @@ pub enum DocumentCommand {
         selection_before: SourceSelection,
         selection_after: SourceSelection,
     },
+    ApplyTypingTransaction {
+        view_id: DocumentViewInstanceId,
+        transaction_id: TransactionId,
+        transaction: Transaction,
+        selection_before: SourceSelection,
+        selection_after: SourceSelection,
+        group_id: TypingGroupId,
+    },
     NormalizeLineEndings {
         view_id: DocumentViewInstanceId,
         transaction_id: TransactionId,
@@ -102,6 +111,13 @@ pub enum DocumentCommand {
     /// Atomically install an IO-prepared session after validating the
     /// revision, identity, and dirty state observed before the load.
     ReloadPreparedDocument {
+        expected_revision: DocumentRevision,
+        expected_identity: FileIdentity,
+        prepared: DocumentSession,
+    },
+    /// Reload after an explicit user decision to discard edits, while still
+    /// rejecting any revision or file-identity change that happened during IO.
+    ReloadPreparedDocumentAfterConfirmation {
         expected_revision: DocumentRevision,
         expected_identity: FileIdentity,
         prepared: DocumentSession,
@@ -214,6 +230,7 @@ pub struct DocumentController {
     views: BTreeMap<DocumentViewInstanceId, ViewRuntimeState>,
     undo_transactions: Vec<TransactionRuntimeRecord>,
     redo_transactions: Vec<TransactionRuntimeRecord>,
+    active_typing_group: Option<ActiveTypingGroup>,
     next_transaction_id: u64,
 }
 
@@ -230,6 +247,24 @@ struct TransactionRuntimeRecord {
     mutation: DocumentMutationMap,
     selection_before: SourceSelection,
     selection_after: SourceSelection,
+    typing_group: Option<TypingGroupId>,
+}
+
+#[derive(Clone, Debug)]
+struct ActiveTypingGroup {
+    group_id: TypingGroupId,
+    view_id: DocumentViewInstanceId,
+    revision: DocumentRevision,
+    selection_after: SourceSelection,
+    mutation: DocumentMutationMap,
+}
+
+impl DocumentController {
+    /// 清除 Controller 与后端的分组资格，确保旧 ID 不能在边界后重接历史。
+    fn break_typing_group(&mut self) {
+        self.active_typing_group = None;
+        self.session.break_typing_group();
+    }
 }
 
 /// 跨窗口共享的文档句柄。锁只覆盖 Controller 状态转换，慢速 IO 由 adapter 在锁外执行。

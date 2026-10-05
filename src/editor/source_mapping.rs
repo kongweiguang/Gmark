@@ -225,3 +225,7 @@ impl Editor {
 
 #[path = "source_mapping_parts/mapper.rs"]
 mod mapper;
+
+#[path = "source_mapping_parts/spelling.rs"]
+mod spelling;
+pub(super) use spelling::SourceSpellingMap;

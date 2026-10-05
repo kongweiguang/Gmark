@@ -2,7 +2,7 @@
 
 //! Editor-level selection spanning multiple rendered blocks.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -33,7 +33,7 @@ mod autoscroll;
 mod selection_pointer;
 
 impl Editor {
-    /// Clears highlight flags only from the projection that owns the selection snapshot.
+    /// 树内块与树外表格 cell 共用镜像清理边界，新鼠标手势与过期拖选不能留下旧全文高亮。
     fn clear_cross_block_selection_visuals_for_surface(
         &mut self,
         surface: SelectionSurface,
@@ -51,6 +51,8 @@ impl Editor {
                 }
             });
         }
+        changed |=
+            self.sync_cross_block_table_cell_text_selections_for(surface, &HashSet::new(), cx);
         changed
     }
 
@@ -59,7 +61,7 @@ impl Editor {
         self.clear_cross_block_selection_for_surface(SelectionSurface::Main, cx);
     }
 
-    /// Ends only the selection owned by one surface, which avoids clearing the other Split pane.
+    /// 结束所属表面的选区与拖选；视觉镜像统一由清理边界处理，保留兄弟窗格及 cell 局部选区。
     pub(super) fn clear_cross_block_selection_for_surface(
         &mut self,
         surface: SelectionSurface,
@@ -109,7 +111,7 @@ impl Editor {
             && selection.focus.offset == last.read(cx).visible_len()
     }
 
-    /// Selects the entire active projection on the first command, matching document-surface semantics.
+    /// 全文选择显式保存完整源码跨度；常驻 Main 使用规范投影坐标，虚拟与 Split 右侧保持原源码坐标。
     fn select_all_rendered_surface(&mut self, surface: SelectionSurface, cx: &mut Context<Self>) {
         if self.rendered_surface_is_fully_selected(surface, cx) {
             return;
@@ -134,14 +136,34 @@ impl Editor {
             None,
             cx,
         );
-        if surface == SelectionSurface::Main && self.virtual_surface.is_some() {
-            let revision = self.source_document.snapshot().revision();
+        let revision = self.source_document.snapshot().revision();
+        let source_projection_is_current = match surface {
+            SelectionSurface::Main => self
+                .virtual_surface
+                .as_ref()
+                .is_some_and(|virtual_surface| virtual_surface.projection_revision() == revision),
+            SelectionSurface::SplitPreview => self
+                .split_preview
+                .as_ref()
+                .is_some_and(|preview| preview.revision == revision),
+        };
+        if source_projection_is_current {
             selection.source_anchor = Some(CrossBlockSourceAnchor {
                 byte_offset: 0,
                 revision,
             });
             selection.source_focus = Some(CrossBlockSourceAnchor {
                 byte_offset: self.source_document.len(),
+                revision,
+            });
+        } else if surface == SelectionSurface::Main && self.virtual_surface.is_none() {
+            // 只靠文字端点无法越过零文字长度的表格；该分支与 resident mapper 共用规范源码真值。
+            selection.source_anchor = Some(CrossBlockSourceAnchor {
+                byte_offset: 0,
+                revision,
+            });
+            selection.source_focus = Some(CrossBlockSourceAnchor {
+                byte_offset: self.document.cached_markdown_text(cx).len(),
                 revision,
             });
         }
@@ -172,7 +194,7 @@ impl Editor {
         cx.notify();
     }
 
-    /// 首按全选所属文档表面，避免用户把块内选区误认为全文选择。
+    /// 首按全选真实输入所属表面；Split 的独立 cell 也由注册表归属，不能只检查树内块。
     pub(super) fn on_rendered_select_all_press(
         &mut self,
         block: Entity<Block>,
@@ -181,10 +203,8 @@ impl Editor {
         let surface = match self.view_mode {
             ViewMode::Rendered | ViewMode::Preview => SelectionSurface::Main,
             ViewMode::Split
-                if self.selection_surface_contains_entity(
-                    SelectionSurface::SplitPreview,
-                    block.entity_id(),
-                ) =>
+                if self.selection_surface_for_block_id(block.entity_id())
+                    == Some(SelectionSurface::SplitPreview) =>
             {
                 SelectionSurface::SplitPreview
             }
@@ -208,7 +228,7 @@ impl Editor {
         ))
     }
 
-    /// Restores direction from canonical source bytes so history survives virtual entity remounts.
+    /// 历史按完整源码跨度恢复；全文表格使用父块端点保留零文字长度范围，实际焦点仍交给原映射中的文字目标。
     pub(super) fn apply_cross_block_selection_snapshot_if_possible(
         &mut self,
         snapshot: &UndoSelectionSnapshot,
@@ -227,14 +247,23 @@ impl Editor {
         let Some(end) = self.endpoint_for_source_offset(range.end, &mappings, cx) else {
             return false;
         };
+        let mapped_focus_entity_id = if reversed {
+            start.entity_id
+        } else {
+            end.entity_id
+        };
         let start_index = self.document.visible_index_for_entity_id(start.entity_id);
         let end_index = self.document.visible_index_for_entity_id(end.entity_id);
+        let resident_full_atomic_selection = self.virtual_surface.is_none()
+            && (start_index.is_none() || end_index.is_none())
+            && range.start == 0
+            && range.end == self.document.cached_markdown_text(cx).len();
         let (start, end) = if start_index
             .zip(end_index)
             .is_some_and(|(start, end)| start != end)
         {
             (start, end)
-        } else if self.virtual_surface.is_some() {
+        } else if self.virtual_surface.is_some() || resident_full_atomic_selection {
             let visible = self.document.visible_blocks();
             let (Some(first), Some(last)) = (visible.first(), visible.last()) else {
                 return false;
@@ -285,8 +314,14 @@ impl Editor {
         });
         self.cross_block_drag = None;
         self.sync_cross_block_selection_visuals(cx);
-        let focus = if reversed { start } else { end };
-        self.focus_block(focus.entity_id);
+        let focus_entity_id = if resident_full_atomic_selection {
+            mapped_focus_entity_id
+        } else if reversed {
+            start.entity_id
+        } else {
+            end.entity_id
+        };
+        self.focus_block(focus_entity_id);
         cx.notify();
         true
     }
@@ -404,7 +439,53 @@ impl Editor {
         self.sync_cross_block_selection_visuals_for_surface(SelectionSurface::Main, cx);
     }
 
-    /// Mirrors a surface-local anchor/focus onto Block highlights without granting read-only commands.
+    /// 整表选择需完整跨度证明；原源码全文锚点可覆盖规范拼写长度不同的 Split/虚拟表格。
+    fn cross_block_selection_fully_covers_table_for_surface(
+        &self,
+        surface: SelectionSurface,
+        selection: NormalizedCrossBlockSelection,
+        table_index: usize,
+        table_entity_id: gpui::EntityId,
+        cx: &App,
+    ) -> bool {
+        if matches!(
+            (selection.start_index, selection.end_index),
+            (Some(start), Some(end)) if start < table_index && table_index < end
+        ) {
+            return true;
+        }
+        let Some((source_start, source_end)) = selection.source_start.zip(selection.source_end)
+        else {
+            return false;
+        };
+        let uses_original_source =
+            surface == SelectionSurface::SplitPreview || self.virtual_surface.is_some();
+        if uses_original_source
+            && source_start.byte_offset == 0
+            && source_end.byte_offset == self.source_document.len()
+            && self.rendered_surface_is_fully_selected(surface, cx)
+        {
+            return true;
+        }
+        let table_source_range = match surface {
+            SelectionSurface::Main => self
+                .build_source_target_mapping_and_range_for_entity(table_entity_id, cx)
+                .map(|(_, range)| range),
+            SelectionSurface::SplitPreview => self
+                .split_preview
+                .as_ref()
+                .filter(|preview| preview.revision == self.source_document.snapshot().revision())
+                .and_then(|preview| preview.source_ranges.get(&table_entity_id).cloned()),
+        };
+        let Some(table_source_range) = table_source_range else {
+            return false;
+        };
+        table_source_range.start < table_source_range.end
+            && source_start.byte_offset <= table_source_range.start
+            && source_end.byte_offset >= table_source_range.end
+    }
+
+    /// 将跨块选区同步到 block 与 cell 文字范围，同时保留表格结构选择状态。
     pub(super) fn sync_cross_block_selection_visuals_for_surface(
         &mut self,
         surface: SelectionSurface,
@@ -412,6 +493,14 @@ impl Editor {
     ) {
         let normalized = self.normalized_cross_block_selection_for_surface(surface, cx);
         let visible_blocks = self.selection_surface_entities(surface);
+        let table_cells_are_projected = matches!(
+            (self.view_mode, surface),
+            (
+                ViewMode::Rendered | ViewMode::Preview,
+                SelectionSurface::Main
+            ) | (ViewMode::Split, SelectionSurface::SplitPreview)
+        );
+        let mut fully_selected_table_ids = HashSet::new();
         let virtual_ranges = if surface == SelectionSurface::Main && self.virtual_surface.is_some()
         {
             normalized
@@ -460,6 +549,21 @@ impl Editor {
                 })
             };
 
+            let table_is_fully_selected = table_cells_are_projected
+                && entity.read(cx).kind() == BlockKind::Table
+                && normalized.is_some_and(|selection| {
+                    self.cross_block_selection_fully_covers_table_for_surface(
+                        surface,
+                        selection,
+                        index,
+                        entity.entity_id(),
+                        cx,
+                    )
+                });
+            if table_is_fully_selected {
+                fully_selected_table_ids.insert(entity.entity_id());
+            }
+
             entity.update(cx, |block, cx| {
                 let next_support = next_range.is_some() && inline_commands_safe;
                 if block.editor_selection_range != next_range
@@ -470,6 +574,14 @@ impl Editor {
                     cx.notify();
                 }
             });
+        }
+        let changed_cell_visuals = self.sync_cross_block_table_cell_text_selections_for(
+            surface,
+            &fully_selected_table_ids,
+            cx,
+        );
+        if changed_cell_visuals {
+            cx.notify();
         }
     }
 }

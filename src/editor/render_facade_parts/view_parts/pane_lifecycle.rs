@@ -122,6 +122,7 @@ impl Editor {
         }
     }
 
+    /// 仅在文档身份改变时创建子窗格；两类正文都按活动窗格同步标题与输入归属。
     pub(super) fn sync_pane_canvas_entities(&mut self, cx: &mut Context<Self>) {
         let Some(workspace_entity) = self.pane_workspace.clone() else {
             return;
@@ -214,6 +215,9 @@ impl Editor {
                         }))
                     }
                 };
+                if let Some(host) = canvas.document_host(cx) {
+                    Self::observe_document_host_accessibility(&host, cx);
+                }
                 self.pane_canvas_entities
                     .borrow_mut()
                     .insert(pane, (tab_id, document.view_id(), canvas));
@@ -231,6 +235,19 @@ impl Editor {
                 entity.update(cx, |canvas, cx| {
                     canvas.set_view_mode(self.view_mode, cx);
                     canvas.set_focus_enabled(pane == focused_pane, cx);
+                });
+            }
+            let host_entity = self.pane_canvas_entities.borrow().get(&pane).and_then(
+                |(_, _, entity)| match entity {
+                    crate::editor::panes::PaneCanvasEntity::DocumentHost(entity) => {
+                        Some(entity.clone())
+                    }
+                    _ => None,
+                },
+            );
+            if let Some(entity) = host_entity {
+                entity.update(cx, |canvas, cx| {
+                    canvas.set_focus_enabled(pane == focused_pane, cx)
                 });
             }
             // The factory is stable for the lifetime of this canvas. Replacing
@@ -356,15 +373,14 @@ impl Editor {
         states.into_values().collect()
     }
 
-    /// Applies one pane command, then persists only successful structural
-    /// mutations so rejected operations cannot alter session generations.
+    /// 结构操作可拆卸所有挂载画布，须先等每个视图的确认文字；成功变更才更新会话代次。
     pub(in crate::editor) fn handle_pane_event(
         &mut self,
         event: crate::editor::panes::PaneEvent,
         mut window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
-        if self.has_active_ime_composition(cx) {
+        if self.has_active_ime_composition(cx) || self.has_pending_source_input_in_window(cx) {
             self.queue_ime_operation(
                 crate::editor::ime_lifecycle::DeferredImeOperation::Pane(event),
                 cx,
@@ -574,8 +590,7 @@ impl Editor {
         let _ = window;
     }
 
-    /// Applies a validated pane-model close and retires its request identity so
-    /// late callbacks cannot target a replacement tab.
+    /// 窗格关闭成功后仅当目标活动画布被卸载时清除保存焦点，保留非活动标签的当前输入目标。
     pub(in crate::editor) fn close_pane_tab_now(
         &mut self,
         workspace: &Entity<crate::editor::panes::PaneWorkspaceView>,
@@ -605,6 +620,9 @@ impl Editor {
         let Some(closed) = closed else {
             return false;
         };
+        if active {
+            self.close_dialog_restore_input_focus = None;
+        }
         let _ = self.view_state.close_tab(tab.as_uuid());
         let empty_last_pane = workspace.read(cx).workspace().pane_count() == 1
             && workspace

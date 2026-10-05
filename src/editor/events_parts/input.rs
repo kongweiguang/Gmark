@@ -303,13 +303,16 @@ impl Editor {
         true
     }
 
-    /// Captures Tab before block-local actions so indentation waits for native IME completion.
+    /// 模态先消费按键；工具栏只处理所属编辑器实际聚焦的文字实体，保留选区导航。
     pub(crate) fn on_editor_key_down_capture(
         &mut self,
         event: &KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.handle_close_dialog_key(event, window, cx) {
+            return;
+        }
         if event.keystroke.key == "escape" && self.tabs.dismiss_new_or_split_menu() {
             cx.notify();
             cx.stop_propagation();

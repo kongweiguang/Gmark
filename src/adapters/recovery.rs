@@ -262,8 +262,16 @@ pub(crate) fn load_recovery_documents(
         .collect())
 }
 
+/// Keep the editor's save baseline stable when a successful-save event replaces
+/// the user's path spelling with the canonical path returned by the file writer.
 pub(crate) fn fingerprint_file(path: &Path) -> anyhow::Result<FileFingerprint> {
-    Ok(fingerprint_resident_file(path)?.into())
+    let mut fingerprint: FileFingerprint = fingerprint_resident_file(path)?.into();
+    fingerprint.path = path
+        .canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned();
+    Ok(fingerprint)
 }
 
 #[cfg(test)]

@@ -59,6 +59,22 @@ impl DocumentHost {
         self.source_row_blocks.get(&line).cloned()
     }
 
+    /// Lets Source command tests establish a real Host-focused selection without depending on hit-test coordinates.
+    pub(crate) fn select_source_range_and_focus_for_test(
+        &mut self,
+        range: std::ops::Range<u64>,
+        reversed: bool,
+        window: &mut Window,
+    ) {
+        self.select_source_range_for_test(range, reversed);
+        self.focus_handle.focus(window);
+    }
+
+    /// Injects one native clipboard preflight failure so Cut preservation is deterministic in headless tests.
+    pub(crate) fn fail_next_native_clipboard_write_for_test(&mut self) {
+        self.fail_next_native_clipboard_write_for_test = true;
+    }
+
     #[cfg(test)]
     pub(crate) fn inactive_source_row_block_for_test(&self) -> Option<(usize, Entity<Block>)> {
         let active_line = self.active_edit.as_ref().map(|active| active.line);

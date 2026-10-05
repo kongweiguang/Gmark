@@ -26,6 +26,8 @@ use gmark_document_runtime::{
     TransactionId,
 };
 
+#[path = "document_session_parts/reload.rs"]
+mod reload;
 #[path = "document_session_parts/types.rs"]
 mod session_types;
 pub(crate) use session_types::DocumentEventPoll;
@@ -91,6 +93,7 @@ impl EditorDocumentSession {
         )
     }
 
+    /// 新文档仍由此入口创建 Controller，避免调用方直接组装共享运行时状态。
     pub(super) fn try_new_with_open_context_and_dirty(
         source: SourceDocument,
         limits: LoadingLimits,
@@ -98,6 +101,25 @@ impl EditorDocumentSession {
         source_identity: Option<gmark_paged_document::FileIdentity>,
         initial_dirty: bool,
     ) -> Result<Self, EditorDocumentSessionError> {
+        let session = Self::try_prepare_session_with_open_context_and_dirty(
+            source,
+            limits,
+            text_encoding,
+            source_identity,
+            initial_dirty,
+        )?;
+        let handle = DocumentHandle::new(DocumentController::new(DocumentId::new(), session));
+        Self::from_handle(handle)
+    }
+
+    /// 让新建与原位重载共用同一构造路径，保留读取时冻结的编码、身份和内存上限。
+    pub(super) fn try_prepare_session_with_open_context_and_dirty(
+        source: SourceDocument,
+        limits: LoadingLimits,
+        text_encoding: TextEncoding,
+        source_identity: Option<gmark_paged_document::FileIdentity>,
+        initial_dirty: bool,
+    ) -> Result<DocumentSession, EditorDocumentSessionError> {
         let len = source.len() as u64;
         let estimated_lines = source.text().lines().count().max(1) as u64;
         let profile = DocumentProfile {
@@ -128,8 +150,7 @@ impl EditorDocumentSession {
         let mut session = DocumentSession::new(profile, store, plan, identity)
             .map_err(|error| ControllerError::open_failed(error.to_string()))?;
         session.dirty = initial_dirty;
-        let handle = DocumentHandle::new(DocumentController::new(DocumentId::new(), session));
-        Self::from_handle(handle)
+        Ok(session)
     }
 
     /// Construct an adapter for an already registered/shared handle.

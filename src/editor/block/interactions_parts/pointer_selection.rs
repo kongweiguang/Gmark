@@ -216,14 +216,18 @@ impl Block {
         }
     }
 
-    /// Use the same text selection granularity in Preview while keeping the
-    /// block read-only and allowing only an explicit Ctrl+click to follow links.
+    /// 只读选择沿用文字粒度；原生表格容器必须让独立 cell 保持焦点，不能冒泡后抢回空父块。
     pub(crate) fn on_read_only_mouse_down(
         &mut self,
         event: &MouseDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.kind() == BlockKind::Table && self.table_runtime.is_some() {
+            self.is_selecting = false;
+            self.pointer_selection = None;
+            return;
+        }
         if event.modifiers.secondary() && self.pointer_link_hit(event.position).is_some() {
             self.is_selecting = false;
             self.pointer_selection = None;

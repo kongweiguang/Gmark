@@ -1,5 +1,6 @@
 // @author kongweiguang
 
+/// 固定初始主题后验证布局缓存复用与失效，不能假设用户偏好尚未处于目标配色。
 #[gpui::test]
 async fn large_source_shaped_layout_cache_reuses_and_invalidates_complete_keys(
     cx: &mut TestAppContext,
@@ -19,6 +20,16 @@ async fn large_source_shaped_layout_cache_reuses_and_invalidates_complete_keys(
     let source = gmark_paged_document::FileSource::open(&path).expect("layout cache source");
     let (editor, visual) = cx.add_window_view(move |_window, cx| {
         Editor::from_source_backed_file(cx, path, probe, source)
+    });
+    visual.update(|_window, cx| {
+        let platform_appearance = cx.window_appearance();
+        cx.update_global::<ThemeManager, _>(|manager, _cx| {
+            manager.set_theme_preference(
+                ThemeAppearance::Dark,
+                ThemePalette::Xcode,
+                platform_appearance,
+            )
+        });
     });
     visual.run_until_parked();
     redraw(visual);
@@ -180,6 +191,72 @@ async fn large_source_pointer_selection_is_character_precise_cross_line_and_reve
     visual.update(|window, cx| {
         assert!(large_view.read(cx).host_is_focused_for_test(window));
     });
+}
+
+/// Windows 点击可能在按下与释放之间发送同点移动；它不能把行内输入焦点交给只负责命令的宿主。
+#[gpui::test]
+async fn large_source_click_on_second_line_focuses_it_for_text_input(cx: &mut TestAppContext) {
+    init_editor_test_app(cx);
+    let temp = tempfile::tempdir().expect("large Source click tempdir");
+    let path = temp.path().join("source-click.txt");
+    let original = "first line\nalpha_beta\nthird line\n";
+    fs::write(&path, original).expect("large Source click fixture");
+    let probe = gmark_paged_document::probe_file(
+        &path,
+        gmark_paged_document::ProbeOptions {
+            max_resident_bytes: 1,
+            ..gmark_paged_document::ProbeOptions::default()
+        },
+    )
+    .expect("large Source click probe");
+    assert_eq!(probe.strategy, gmark_paged_document::OpenStrategy::Paged);
+    let source = gmark_paged_document::FileSource::open(&path).expect("large Source click source");
+    let (editor, visual) = cx.add_window_view(move |_window, cx| {
+        Editor::from_source_backed_file(cx, path, probe, source)
+    });
+    visual.simulate_resize(size(px(720.0), px(520.0)));
+    visual.run_until_parked();
+    redraw(visual);
+    let large_view = editor
+        .read_with(visual, |editor, _cx| editor.document_host.clone())
+        .expect("large Source click Host");
+    assert_eq!(
+        large_view.read_with(visual, |view, _cx| view.source_text_for_test()),
+        original,
+        "the Paged Source session must be installed before the pointer event"
+    );
+
+    let body = visual
+        .debug_bounds("document-host-line-body-1")
+        .expect("second Source row body");
+    let target = point(body.left() + px(45.0), body.center().y);
+    visual.simulate_mouse_down(target, MouseButton::Left, Modifiers::default());
+    visual.simulate_mouse_move(target, MouseButton::Left, Modifiers::default());
+    visual.simulate_mouse_up(target, MouseButton::Left, Modifiers::default());
+    visual.run_until_parked();
+    visual.simulate_input("1");
+    visual.run_until_parked();
+    redraw(visual);
+
+    let edited = large_view.read_with(visual, |view, _cx| view.source_text_for_test());
+    let edited_line = edited.lines().nth(1).expect("edited second Source line");
+    assert_eq!(edited_line.len(), "alpha_beta".len() + 1);
+    let inserted_at = edited_line
+        .find('1')
+        .expect("typed character in Source line");
+    assert!(
+        inserted_at > 0 && inserted_at < "alpha_beta".len(),
+        "the click must place the caret inside alpha_beta; line={edited_line:?}"
+    );
+    let selection = large_view
+        .read_with(visual, |view, _cx| view.source_selection_for_test())
+        .expect("shared Source selection after input");
+    let line_start = "first line\n".len() as u64;
+    assert_eq!(selection.anchor.byte_offset, selection.head.byte_offset);
+    assert!(
+        selection.head.byte_offset > line_start + 1,
+        "the caret must remain beyond column one: {selection:?}"
+    );
 }
 
 /// Keeps selection expansion tied to the newly mounted rows while the edge timer advances.
@@ -497,14 +574,17 @@ async fn large_source_cross_line_paste_is_one_reversible_source_transaction(
     );
 }
 
-/// Verifies the first Ctrl+A selects the entire virtual Source document.
+/// 首次 Ctrl+A 必须覆盖未挂载的长文；全文替换与撤销一起验证 Host 输入桥的范围闭环。
 #[gpui::test]
 async fn large_source_first_ctrl_a_selects_lazy_document_range(cx: &mut TestAppContext) {
     init_editor_test_app(cx);
     let temp = tempfile::tempdir().expect("large select-all tempdir");
     let path = temp.path().join("select-all-source.txt");
-    let source_text = "alpha\n世界🙂\nomega\n";
-    fs::write(&path, source_text).expect("large select-all fixture");
+    let source_text = (0..4096)
+        .map(|line| format!("line-{line}: 世界🙂"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&path, &source_text).expect("large select-all fixture");
     let probe = gmark_paged_document::probe_file(
         &path,
         gmark_paged_document::ProbeOptions {
@@ -537,4 +617,27 @@ async fn large_source_first_ctrl_a_selects_lazy_document_range(cx: &mut TestAppC
             .read_with(visual, |view, _cx| view.active_edit_for_test())
             .is_none()
     );
+
+    visual.simulate_input("替换🙂");
+    visual.run_until_parked();
+    assert_eq!(
+        large_view.read_with(visual, |view, _cx| view.source_text_for_test()),
+        "替换🙂",
+        "typing after select-all must replace every unmounted line in one operation"
+    );
+
+    visual.simulate_keystrokes("ctrl-z");
+    visual.run_until_parked();
+    assert_eq!(
+        large_view.read_with(visual, |view, _cx| view.source_text_for_test()),
+        source_text,
+        "one undo must restore the entire long document"
+    );
+    let restored_selection = large_view
+        .read_with(visual, |view, _cx| view.source_selection_for_test())
+        .expect("whole-document selection after undo");
+    assert_eq!(restored_selection.range(), 0..source_text.len() as u64);
 }
+
+#[path = "source_interaction_regressions.rs"]
+mod source_interaction_regressions;

@@ -11,6 +11,7 @@ impl PieceDocument {
         self.save_atomic_cancellable(path, &SearchCancellation::default())
     }
 
+    /// 取消令牌覆盖替换等待；只有替换成功后才发布新的 base source。
     pub fn save_atomic_cancellable(
         &mut self,
         path: impl AsRef<Path>,
@@ -68,7 +69,7 @@ impl PieceDocument {
         }
         // Windows 目标被当前进程持有时无法原子替换；所有 base piece 已写完，可安全关闭句柄。
         self.source.take();
-        if let Err(error) = crate::source::persist_temporary(temporary, path) {
+        if let Err(error) = crate::source::persist_temporary(temporary, path, cancellation) {
             self.source = FileSource::open(path).ok();
             return Err(error);
         }
@@ -93,6 +94,7 @@ impl PieceDocument {
     }
 
     /// 将源码选区流式导出到独立文件；不物化完整选区，也不改变文档 pristine/history。
+    /// 将取消传递到最后的替换边界，避免取消后的范围导出仍发布暂存文件。
     pub fn save_range_atomic_cancellable(
         &self,
         range: Range<u64>,
@@ -136,7 +138,7 @@ impl PieceDocument {
                 path: temporary.path().to_path_buf(),
                 source,
             })?;
-        crate::source::persist_temporary(temporary, path)?;
+        crate::source::persist_temporary(temporary, path, cancellation)?;
         crate::source::sync_parent_directory(parent)
     }
 }

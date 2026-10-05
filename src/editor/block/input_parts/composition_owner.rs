@@ -67,13 +67,19 @@ impl Block {
         self.ime_selection_snapshot_with_text_len(owner, text_len)
     }
 
-    /// Reuses an already resolved input length so formula slot selection avoids rematerializing text.
+    /// Reuses the resolved input length; compact Source rows take their visible shared-selection overlay as the IME range.
     pub(super) fn ime_selection_snapshot_with_text_len(
         &self,
         owner: &BlockImeCompositionOwner,
         text_len: usize,
     ) -> Option<BlockImeOriginalSelection> {
         let (range, reversed) = match owner {
+            BlockImeCompositionOwner::BlockText if self.compact_source_host() => (
+                self.editor_selection_range
+                    .clone()
+                    .unwrap_or_else(|| self.selected_range.clone()),
+                self.selection_reversed,
+            ),
             BlockImeCompositionOwner::BlockText => {
                 (self.selected_range.clone(), self.selection_reversed)
             }

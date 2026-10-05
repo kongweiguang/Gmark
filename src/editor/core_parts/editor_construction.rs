@@ -442,6 +442,7 @@ impl Editor {
         folds
     }
 
+    /// 按实际活动窗格或输入表面的发布身份更新读屏投影，候选不需要写入正文 revision。
     pub(in crate::editor) fn current_accessibility_revision(&self, cx: &App) -> u64 {
         if let Some(revision) = self.focused_pane_accessibility_revision(cx) {
             return revision
@@ -449,7 +450,7 @@ impl Editor {
                 ^ (u64::from(self.show_unsaved_changes_dialog) << 15);
         }
         if let Some(document_host) = self.document_host.as_ref() {
-            return document_host.read(cx).accessibility_revision()
+            return document_host.read(cx).accessibility_revision(cx)
                 ^ (update_accessibility_revision(cx) << 5)
                 ^ (u64::from(self.show_unsaved_changes_dialog) << 15);
         }

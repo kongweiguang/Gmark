@@ -14,6 +14,12 @@ impl DocumentRecoveryJournal {
 }
 
 impl DocumentHost {
+    /// 生命周期回归直接检查共享保存队列；视图暂停不能用丢失本地状态冒充共享 IO 已结束。
+    #[cfg(test)]
+    pub(crate) fn document_handle_for_test(&self) -> Option<DocumentHandle> {
+        self.document.as_ref().map(SharedDocument::handle)
+    }
+
     #[cfg(test)]
     pub(crate) fn recovered_text_for_test(&self) -> Option<Vec<u8>> {
         let document = self.document.as_ref()?;
@@ -309,7 +315,7 @@ impl DocumentHost {
         self.source_drag_autoscroll_tick(cx)
     }
 
-    /// Mirrors the production Source callback timing so host actions cannot re-enter an updating Block.
+    /// 测试激活先把目标行带入视口，再解除 Host 桥建立原生焦点，保持真实命中与输入归属。
     #[cfg(test)]
     pub(crate) fn begin_line_edit_for_test(
         &mut self,
@@ -317,7 +323,7 @@ impl DocumentHost {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.saving || self.reloading {
+        if self.reloading {
             return;
         }
         let Some(document) = &self.document else {
@@ -367,7 +373,8 @@ impl DocumentHost {
             trailing_truncated,
             ..
         } = windowed;
-        block.update(cx, |block, _cx| {
+        block.update(cx, |block, cx| {
+            block.set_source_host_input_focus_handle(None, cx);
             block.selected_range = block.display_text().len()..block.display_text().len();
             block.focus_handle.focus(window);
         });
@@ -380,6 +387,7 @@ impl DocumentHost {
             trailing_truncated,
             block,
         });
+        self.scroll_source_line(line, ScrollStrategy::Center);
         cx.emit(DocumentHostEvent::StateChanged);
         cx.notify();
     }

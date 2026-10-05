@@ -48,10 +48,11 @@ impl BlockTextElement {
 /// Prepared text layout and paint geometry for one `BlockTextElement` frame.
 pub struct PrepaintState {
     lines: Vec<WrappedLine>,
+    text_bounds: Bounds<Pixels>,
+    source_horizontal_offset: Pixels,
     source_layout_cache_key: Option<SourceLayoutCacheKey>,
     source_layout_cache_hit: bool,
     source_line_numbers: Vec<ShapedLine>,
-    source_line_number_gutter_width: Pixels,
     source_gutter_separator: Option<PaintQuad>,
     active_source_line: Option<PaintQuad>,
     cursor: Option<PaintQuad>,
@@ -65,6 +66,47 @@ pub struct BlockTextRequestLayoutState {
     lines: Rc<RefCell<Option<Vec<WrappedLine>>>>,
     source_layout_cache_key: Rc<RefCell<Option<SourceLayoutCacheKey>>>,
     source_layout_cache_hit: Rc<Cell<bool>>,
+}
+
+/// 有界源码行仍可超过可见宽度；用实际裁剪边界跟随插入点，绘制、命中与候选坐标共用平移。
+/// 拖选期间保留原位置，避免按下点在同一手势里漂移；非 Source 表面完全沿用原排版。
+fn source_text_viewport_bounds(
+    input: &Block,
+    lines: &[WrappedLine],
+    bounds: Bounds<Pixels>,
+    cursor: usize,
+    line_height: Pixels,
+    window: &Window,
+) -> (Bounds<Pixels>, Pixels) {
+    if !input.compact_source_host() {
+        return (bounds, px(0.0));
+    }
+    let right = bounds
+        .right()
+        .min(window.content_mask().bounds.right())
+        .min(window.viewport_size().width);
+    let width = (right - bounds.left()).max(px(1.0));
+    let margin = px(8.0).min(width / 4.0);
+    let text_width = lines
+        .first()
+        .map_or(px(0.0), |line| line.size(line_height).width);
+    let maximum = (text_width - width + margin).max(px(0.0));
+    let mut offset = input.source_horizontal_offset.max(px(0.0)).min(maximum);
+    if input.text_input_focus_handle().is_focused(window) && !input.is_selecting {
+        if let Some(position) = lines
+            .first()
+            .and_then(|line| line.position_for_index(cursor, line_height))
+        {
+            if position.x - offset < margin {
+                offset = (position.x - margin).max(px(0.0));
+            } else if position.x - offset > width - margin {
+                offset = (position.x - width + margin).min(maximum);
+            }
+        }
+    }
+    let mut translated = bounds;
+    translated.origin.x -= offset;
+    (translated, offset)
 }
 
 impl IntoElement for BlockTextElement {
@@ -257,6 +299,7 @@ impl Element for BlockTextElement {
     }
 
     /// Computes selection and caret geometry against the visible candidate text rather than source.
+    /// 源码平移在排版完成后计算；所有选区、光标与平台候选框使用同一帧的实际文字坐标。
     fn prepaint(
         &mut self,
         _id: Option<&GlobalElementId>,
@@ -287,7 +330,7 @@ impl Element for BlockTextElement {
             .map(|(range, reversed)| if *reversed { range.start } else { range.end })
             .unwrap_or_else(|| input.cursor_offset());
         let line_height = window.line_height();
-        let focused = input.focus_handle.is_focused(window);
+        let focused = input.text_input_focus_handle().is_focused(window);
         let show_inline_code_backgrounds = !input.is_source_raw_mode();
         let show_source_line_numbers =
             input.show_source_line_numbers() || input.kind().is_code_block();
@@ -300,6 +343,8 @@ impl Element for BlockTextElement {
             .then(|| source_line_number_gutter_width(lines.len().max(1), font_size))
             .unwrap_or(px(0.0));
         let text_bounds = source_text_bounds(bounds, source_line_number_gutter_width);
+        let (text_bounds, source_horizontal_offset) =
+            source_text_viewport_bounds(input, &lines, text_bounds, cursor, line_height, window);
         let source_line_numbers = if show_source_line_numbers {
             let run_color = if input.kind().is_code_block() {
                 theme.colors.code_syntax_comment
@@ -465,10 +510,11 @@ impl Element for BlockTextElement {
 
         PrepaintState {
             lines,
+            text_bounds,
+            source_horizontal_offset,
             source_layout_cache_key: request_layout.source_layout_cache_key.borrow().clone(),
             source_layout_cache_hit: request_layout.source_layout_cache_hit.get(),
             source_line_numbers,
-            source_line_number_gutter_width,
             source_gutter_separator,
             active_source_line,
             cursor: cursor_quad,
@@ -479,7 +525,7 @@ impl Element for BlockTextElement {
         }
     }
 
-    /// Paints block text and consumes only samples matching its current revision and selection.
+    /// 复用预绘制的文字平移，确保可见文字、命中与 IME 坐标一致；采样只消费当前输入快照。
     fn paint(
         &mut self,
         _id: Option<&GlobalElementId>,
@@ -492,7 +538,7 @@ impl Element for BlockTextElement {
     ) {
         let (focus_handle, hovering_link, input_snapshot) = {
             let input = self.input.read(cx);
-            let text_bounds = source_text_bounds(bounds, prepaint.source_line_number_gutter_width);
+            let text_bounds = prepaint.text_bounds;
             let hovering_link = !self.is_placeholder
                 && input.ime_composition_owner().is_none()
                 && !input.is_source_raw_mode()
@@ -506,7 +552,7 @@ impl Element for BlockTextElement {
                 )
                 .is_some();
             (
-                input.focus_handle.clone(),
+                input.text_input_focus_handle().clone(),
                 hovering_link,
                 input.input_paint_snapshot(crate::perf::InputPaintSurface::BlockText),
             )
@@ -523,7 +569,7 @@ impl Element for BlockTextElement {
         }
 
         if focus_handle.is_focused(window) {
-            let text_bounds = source_text_bounds(bounds, prepaint.source_line_number_gutter_width);
+            let text_bounds = prepaint.text_bounds;
             window.handle_input(
                 &focus_handle,
                 ElementInputHandler::new(text_bounds, self.input.clone()),
@@ -550,7 +596,7 @@ impl Element for BlockTextElement {
         let line_height = prepaint.line_height;
         let lines = std::mem::take(&mut prepaint.lines);
         let text_align = self.input.read(cx).text_align();
-        let text_bounds = source_text_bounds(bounds, prepaint.source_line_number_gutter_width);
+        let text_bounds = prepaint.text_bounds;
         let line_number_tops = source_line_number_tops(&lines, line_height);
         let line_number_gap = px(SOURCE_LINE_NUMBER_GAP);
         let line_numbers = std::mem::take(&mut prepaint.source_line_numbers);
@@ -610,6 +656,7 @@ impl Element for BlockTextElement {
                 }
             }
             input.last_bounds = Some(text_bounds);
+            input.source_horizontal_offset = prepaint.source_horizontal_offset;
             input.last_line_height = line_height;
         });
     }

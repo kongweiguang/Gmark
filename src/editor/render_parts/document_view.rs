@@ -22,7 +22,7 @@ fn markdown_callout_colors(
 }
 
 impl Editor {
-    /// 四种模式共用这个滚动面，以便首行顶距只由统一的 Source 基准决定。
+    /// 按实际编辑区尺寸同步浮层与行高缓存，避免旧字体度量影响虚拟窗口定位。
     pub(super) fn render_document_content(
         &mut self,
         window: &mut Window,
@@ -67,6 +67,12 @@ impl Editor {
         } else {
             crate::ui::centered_column_width(viewport_width, &theme.dimensions)
         };
+        self.sync_row_stride_layout_identity(
+            crate::editor::selection_surface::SelectionSurface::Main,
+            theme.clone(),
+            crate::config::EditorSettings::editor_font_family(cx),
+            centered_width,
+        );
         let current_scroll_y = (-f32::from(self.scroll_handle.offset().y)).clamp(0.0, max_scroll_y);
         self.sync_virtual_surface_mounts(current_scroll_y, viewport_height, RENDER_OVERDRAW_PX, cx);
         let virtual_layout = self.virtual_surface_layout();
@@ -80,7 +86,15 @@ impl Editor {
         let virtual_pinned_roots = virtual_layout
             .map(|layout| layout.pinned_roots)
             .unwrap_or_default();
-        let local_scroll_y = (current_scroll_y - virtual_top_h).max(0.0);
+        for block in &virtual_pinned_roots {
+            block.update(cx, |block, _cx| {
+                block.set_selection_toolbar_viewport(Some(viewport_bounds));
+            });
+        }
+        let local_scroll_y = (current_scroll_y
+            - virtual_top_h
+            - editor_top_padding(self.view_mode, self.typewriter_mode, viewport_height, d))
+        .max(0.0);
         let visible_blocks = self.document.visible_blocks().to_vec();
         let scrollbar_geometry =
             Self::scrollbar_geometry(viewport_height, max_scroll_y, current_scroll_y);
@@ -236,14 +250,11 @@ impl Editor {
                     .saturating_sub(1)
             });
 
-        // A row's first block keys its cached height; its painted top (from last
-        // frame) feeds the footprints below.
+        // 首个块实体作为行包装器高度缓存键；结构变化时重开未知测量前沿。
         let row_first_ids: Vec<EntityId> = row_starts
             .iter()
             .map(|&start| visible_blocks[start].entity.entity_id())
             .collect();
-        // On a structural edit the row indices no longer match last frame, so the
-        // cache refresh below is skipped; its block-keyed entries still hold.
         let structural_change = visible_blocks.len() != self.prev_visible_block_ids.len()
             || visible_blocks
                 .iter()
@@ -254,31 +265,8 @@ impl Editor {
                 .iter()
                 .map(|v| v.entity.entity_id())
                 .collect();
-        }
-
-        // Rows mounted together last frame shared one scroll offset, so their
-        // adjacent painted-top differences are scroll-free heights. Caching those,
-        // not raw positions, is what keeps the window stable while scrolling.
-        if !structural_change {
-            if let Some((prev_start, prev_end)) = self.prev_render_window {
-                let prev_end = prev_end.min(row_first_ids.len());
-                for row in prev_start..prev_end.saturating_sub(1) {
-                    let top = visible_blocks[row_starts[row]]
-                        .entity
-                        .read_with(cx, |block, _cx| block.last_bounds)
-                        .map(|bounds| f32::from(bounds.top()));
-                    let next_top = visible_blocks[row_starts[row + 1]]
-                        .entity
-                        .read_with(cx, |block, _cx| block.last_bounds)
-                        .map(|bounds| f32::from(bounds.top()));
-                    if let (Some(top), Some(next_top)) = (top, next_top) {
-                        let stride = next_top - top;
-                        if stride > 0.0 && stride.is_finite() {
-                            self.row_stride_cache.insert(row_first_ids[row], stride);
-                        }
-                    }
-                }
-            }
+            self.row_stride_cache.clear();
+            self.prev_render_window = None;
         }
 
         // 未测量行先用最小块高估算；深滚动恢复时再从测量前沿连续挂载，避免估算
@@ -309,7 +297,7 @@ impl Editor {
                     if spacing_for(rows[row].start).hidden {
                         0.0
                     } else {
-                        1.0
+                        0.0
                     }
                 } else {
                     self.row_stride_cache.get(id).copied().unwrap_or(estimate)
@@ -344,13 +332,29 @@ impl Editor {
                 (row, top)
             });
 
-        // The first mounted row re-applies its `mt`, so drop it from the top
-        // spacer to avoid shifting content down by a gap.
-        let top_h = virtual_top_h
-            + match rows.get(render_window.run_start) {
-                Some(row) => (render_window.top_h - row.top_gap).max(0.0),
-                None => render_window.top_h,
-            };
+        // Update only entities mounted this frame, including the detached focus row.
+        for row in &rows[render_window.run_start..render_window.run_end] {
+            for index in row.start..row.end {
+                visible_blocks[index].entity.update(cx, |block, _cx| {
+                    block.set_selection_toolbar_viewport(Some(viewport_bounds));
+                });
+            }
+        }
+        if let Some((focus_row, _)) = detached_focus {
+            visible_blocks[row_starts[focus_row]]
+                .entity
+                .update(cx, |block, _cx| {
+                    block.set_selection_toolbar_viewport(Some(viewport_bounds));
+                });
+        }
+        let spacing_for = |index: usize| -> RenderedRowSpacingInfo {
+            visible_blocks[index]
+                .entity
+                .read_with(cx, |block, _cx| RenderedRowSpacingInfo::from_block(block))
+        };
+
+        // 每行测量包含自己的顶部间距，前缀累计无需再补偿首个挂载行的 margin。
+        let top_h = virtual_top_h + render_window.top_h;
         let mut block_rows: Vec<AnyElement> =
             Vec::with_capacity(render_window.run_end - render_window.run_start + 2);
         if top_h > 0.5 {
@@ -541,7 +545,12 @@ impl Editor {
                         .into_any_element()
                 }
             };
-            block_rows.push(element);
+            block_rows.push(Self::render_measured_document_row(
+                editor.clone(),
+                row_first_ids[descriptor_index],
+                crate::editor::selection_surface::SelectionSurface::Main,
+                element,
+            ));
         }
         let bottom_h = render_window.bottom_h + virtual_bottom_h;
         if bottom_h > 0.5 {

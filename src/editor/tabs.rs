@@ -635,6 +635,11 @@ pub(super) struct TabState {
 }
 
 impl TabState {
+    /// Exposes close-prompt visibility to sibling editor modules without opening the state field for mutation.
+    pub(super) fn is_close_dialog_open(&self) -> bool {
+        self.show_close_dialog
+    }
+
     pub(super) fn has_new_or_split_menu(&self) -> bool {
         self.new_tab_menu.is_some() || self.split_pane_menu.is_some()
     }

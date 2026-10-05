@@ -230,7 +230,7 @@ impl Editor {
         self.on_workspace_resize_mouse_up(event, window, cx);
     }
 
-    /// Split 预览拥有独立滚动容器，因此显式复用 Source 顶距才能与左侧首行对齐。
+    /// Split 使用自身实际列宽识别行高缓存；投影或宽度变化后从未知测量前沿恢复深滚。
     pub(super) fn render_split_preview_pane(
         &mut self,
         theme: &Theme,
@@ -279,7 +279,6 @@ impl Editor {
         };
         let mut rows = Vec::new();
         let mut row_starts = Vec::new();
-        let mut row_top_gaps = Vec::new();
         let mut gap_state = RenderedRowGapState::default();
         let mut index = 0usize;
 
@@ -313,7 +312,6 @@ impl Editor {
                 }
                 let (accent, background) = callout_colors(callout_variant, theme);
                 row_starts.push(index);
-                row_top_gaps.push(top_gap);
                 rows.push(
                     div()
                         .w(px(centered_width))
@@ -357,7 +355,6 @@ impl Editor {
                     end += 1;
                 }
                 row_starts.push(index);
-                row_top_gaps.push(top_gap);
                 rows.push(
                     div()
                         .w(px(centered_width))
@@ -373,7 +370,6 @@ impl Editor {
             }
 
             row_starts.push(index);
-            row_top_gaps.push(top_gap);
             rows.push(
                 div()
                     .w(px(centered_width))
@@ -482,35 +478,24 @@ impl Editor {
             .iter()
             .map(|&start| visible[start].entity.entity_id())
             .collect();
-        let row_tops: Vec<Option<f32>> = row_starts
+        let visible_ids: Vec<EntityId> = visible
             .iter()
-            .map(|&start| {
-                visible[start]
-                    .entity
-                    .read(cx)
-                    .last_bounds
-                    .map(|bounds| f32::from(bounds.top()))
-            })
+            .map(|block| block.entity.entity_id())
             .collect();
+        self.sync_row_stride_layout_identity(
+            crate::editor::selection_surface::SelectionSurface::SplitPreview,
+            cx.global::<crate::theme::ThemeManager>().current_arc(),
+            crate::config::EditorSettings::editor_font_family(cx),
+            centered_width,
+        );
         let state = self
             .split_preview
             .as_mut()
             .expect("Split 模式必须持有右侧预览投影");
-        let structural_change = row_ids != state.previous_visible_ids;
-        if !structural_change {
-            if let Some((start, end)) = state.previous_render_window {
-                let end = end.min(row_ids.len());
-                for row in start..end.saturating_sub(1) {
-                    if let (Some(top), Some(next_top)) = (row_tops[row], row_tops[row + 1]) {
-                        let stride = next_top - top;
-                        if stride > 0.0 && stride.is_finite() {
-                            state.row_stride_cache.insert(row_ids[row], stride);
-                        }
-                    }
-                }
-            }
-        } else {
-            state.previous_visible_ids = row_ids.clone();
+        if visible_ids != state.previous_visible_ids {
+            state.previous_visible_ids = visible_ids;
+            state.row_stride_cache.clear();
+            state.previous_render_window = None;
         }
         if state.row_stride_cache.len() > row_ids.len().saturating_mul(2) {
             let live: std::collections::HashSet<EntityId> = row_ids.iter().copied().collect();
@@ -521,19 +506,29 @@ impl Editor {
             .iter()
             .map(|id| state.row_stride_cache.get(id).copied().unwrap_or(estimate))
             .collect();
+        let measurement_frontier = row_ids
+            .iter()
+            .position(|id| !state.row_stride_cache.contains_key(id))
+            .unwrap_or(row_ids.len());
+        let restoring_deep_offset = state.previous_render_window.is_none();
+        let local_scroll_y = (current_scroll_y - top_padding).max(0.0);
         let render_window = Self::rendered_window(
             &strides,
-            current_scroll_y,
+            local_scroll_y,
             viewport_height,
             RENDER_OVERDRAW_PX,
             None,
         );
+        let render_window = Self::recover_render_window_to_measurement_frontier(
+            render_window,
+            &strides,
+            local_scroll_y,
+            measurement_frontier,
+            restoring_deep_offset,
+        );
         state.previous_render_window = Some((render_window.run_start, render_window.run_end));
 
-        let top_height = match row_top_gaps.get(render_window.run_start) {
-            Some(gap) => (render_window.top_h - gap).max(0.0),
-            None => render_window.top_h,
-        };
+        let top_height = render_window.top_h;
         let mut mounted = Vec::with_capacity(
             render_window
                 .run_end
@@ -549,8 +544,16 @@ impl Editor {
                     .into_any_element(),
             );
         }
+        let editor = cx.entity().downgrade();
         mounted.extend(rows.into_iter().enumerate().filter_map(|(row, element)| {
-            (row >= render_window.run_start && row < render_window.run_end).then_some(element)
+            (row >= render_window.run_start && row < render_window.run_end).then(|| {
+                Self::render_measured_document_row(
+                    editor.clone(),
+                    row_ids[row],
+                    crate::editor::selection_surface::SelectionSurface::SplitPreview,
+                    element,
+                )
+            })
         }));
         if render_window.bottom_h > 0.5 {
             mounted.push(

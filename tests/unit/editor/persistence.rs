@@ -47,6 +47,21 @@ fn external_conflict_preview_reports_metadata_only_change() {
     assert!(preview.disk_error.is_none());
 }
 
+/// 验证 CRLF 磁盘换行不会把未变化的首行误报为冲突差异。
+#[test]
+fn external_conflict_preview_ignores_crlf_when_finding_first_difference() {
+    let local = "<!-- @author kongweiguang -->\nlocal";
+    let disk = "<!-- @author kongweiguang -->\r\n输入法验收（外部重载）";
+    let preview =
+        build_external_conflict_preview(Path::new("notes.md"), local, disk, disk.len(), None);
+
+    assert_eq!(preview.first_difference_line, Some(2));
+    assert_eq!(preview.local_line, "local");
+    assert_eq!(preview.disk_line, "输入法验收（外部重载）");
+    assert_eq!(preview.local_line_count, 2);
+    assert_eq!(preview.disk_line_count, 2);
+}
+
 #[test]
 fn external_conflict_preview_handles_missing_or_unreadable_disk_file() {
     let preview = build_external_conflict_preview(

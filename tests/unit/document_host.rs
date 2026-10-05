@@ -6,6 +6,14 @@ use super::*;
 
 #[path = "document_runtime/document_host_lifecycle.rs"]
 mod document_host_lifecycle;
+#[path = "document_runtime/source_boundary_requests.rs"]
+mod source_boundary_requests;
+#[path = "document_runtime/source_boundary_unicode.rs"]
+mod source_boundary_unicode;
+#[path = "document_runtime/source_horizontal_navigation.rs"]
+mod source_horizontal_navigation;
+#[path = "document_runtime/source_pointer_boundaries.rs"]
+mod source_pointer_boundaries;
 
 fn open_document(text: &str) -> (tempfile::TempDir, DocumentSession) {
     let temp = tempfile::tempdir().expect("bounded line tempdir");
@@ -431,6 +439,7 @@ fn screen_lines_top_anchor_tracks_the_visible_source_row() {
     );
 }
 
+/// provisional 与精确后端复用有效当前帧；测试不能用默认旧缓存代次绕过窗口身份校验。
 #[gpui::test]
 async fn provisional_source_row_is_read_only_until_piece_document_is_installed(
     cx: &mut gpui::TestAppContext,
@@ -447,6 +456,8 @@ async fn provisional_source_row_is_read_only_until_piece_document_is_installed(
     let provisional_block = view.update(cx, |view, cx| {
         view.suspend_for_closed_tab();
         view.displayed_screen_lines = Arc::new(ScreenLines {
+            cache_epoch: view.source_cache_epoch,
+            column_window_start: view.source_window_start,
             visible: 0..1,
             rows: Arc::new(BTreeMap::from([(
                 0,

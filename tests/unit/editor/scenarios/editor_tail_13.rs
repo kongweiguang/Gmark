@@ -445,6 +445,7 @@ async fn slash_menu_stays_within_compact_and_standard_editor_bounds(cx: &mut Tes
     }
 }
 
+/// 验证窄窗口中的工具栏和附着菜单都约束在所属编辑视口内。
 #[gpui::test]
 async fn selection_toolbar_popovers_stay_inside_narrow_editor_viewport(cx: &mut TestAppContext) {
     init_editor_test_app(cx);
@@ -465,7 +466,18 @@ async fn selection_toolbar_popovers_stay_inside_narrow_editor_viewport(cx: &mut 
 
     let content = visual.debug_bounds("editor-content").unwrap();
     let toolbar = visual.debug_bounds("selection-toolbar").unwrap();
-    assert!(toolbar.left() >= content.left());
+    let owner_viewport = editor.update(visual, |editor, cx| {
+        editor
+            .document
+            .first_root()
+            .expect("root")
+            .read(cx)
+            .selection_toolbar_viewport
+    });
+    assert!(
+        toolbar.left() >= content.left(),
+        "toolbar={toolbar:?} content={content:?} owner_viewport={owner_viewport:?}"
+    );
     assert!(toolbar.right() <= content.right());
     assert!(
         toolbar.top() >= content.top(),

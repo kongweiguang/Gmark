@@ -8,7 +8,7 @@ use std::{
     path::PathBuf,
     rc::{Rc, Weak},
     str::FromStr,
-    sync::{Arc, Once},
+    sync::{Arc, Once, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -46,6 +46,11 @@ pub(crate) struct WindowsImeComposition {
 }
 
 impl WindowsImeComposition {
+    /// Identifies the current native session so opt-in diagnostics can correlate asynchronous messages.
+    pub(crate) fn generation(&self) -> usize {
+        self.generation
+    }
+
     /// Exposes only whether a native finish request has an active Windows session to complete.
     pub(crate) fn is_active(&self) -> bool {
         self.active
@@ -227,6 +232,16 @@ impl WindowsImeComposition {
         };
         self.result_received = false;
         Some((self.owner.take(), end))
+    }
+}
+
+/// Emits opt-in Windows IME metadata without adding a per-message environment lookup.
+pub(super) fn trace_ime(event: std::fmt::Arguments<'_>) {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    if *ENABLED
+        .get_or_init(|| std::env::var_os("GMARK_IME_TRACE").is_some_and(|value| value == "1"))
+    {
+        eprintln!("[gmark-ime] {event}");
     }
 }
 
@@ -943,19 +958,26 @@ impl PlatformWindow for WindowsWindow {
         self.0.state.borrow_mut().input_handler.take()
     }
 
-    /// Posts a generation-tagged IMM completion request so native result messages cannot reenter
-    /// the caller's current editor update; rejection is reported asynchronously to the pinned owner.
+    /// Keeps IMM completion asynchronous to avoid reentry into the active editor update.
+    /// Opt-in trace output contains session and acceptance metadata only.
     fn finish_ime_composition(&self) -> Result<bool> {
-        let Some((generation, should_post)) = self
-            .0
-            .state
-            .borrow_mut()
-            .ime_composition
-            .queue_finish_request()
-        else {
+        let (current_generation, owner_present, request) = {
+            let mut state = self.0.state.borrow_mut();
+            let generation = state.ime_composition.generation();
+            let owner_present = state.ime_composition.owner.is_some();
+            let request = state.ime_composition.queue_finish_request();
+            (generation, owner_present, request)
+        };
+        let Some((generation, should_post)) = request else {
+            trace_ime(format_args!(
+                "event=finish_request generation={current_generation} owner_present={owner_present} accepted=false outcome=no_active_session"
+            ));
             return Ok(false);
         };
         if !should_post {
+            trace_ime(format_args!(
+                "event=finish_request generation={generation} owner_present={owner_present} accepted=true outcome=already_pending"
+            ));
             return Ok(true);
         }
 
@@ -974,8 +996,14 @@ impl PlatformWindow for WindowsWindow {
                 .borrow_mut()
                 .ime_composition
                 .reject_finish_request(generation);
+            trace_ime(format_args!(
+                "event=finish_request generation={generation} owner_present={owner_present} accepted=false outcome=post_failed"
+            ));
             return Err(error);
         }
+        trace_ime(format_args!(
+            "event=finish_request generation={generation} owner_present={owner_present} accepted=true outcome=queued"
+        ));
         Ok(true)
     }
 

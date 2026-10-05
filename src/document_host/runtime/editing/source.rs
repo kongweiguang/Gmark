@@ -88,6 +88,7 @@ impl DocumentHost {
             return;
         }
         self.select_source_lines(0..line_count, false);
+        self.sync_source_selection_visuals(cx);
         self.focus_handle.focus(window);
         cx.notify();
     }
@@ -168,6 +169,8 @@ impl DocumentHost {
         self.start_clipboard_read(document, range, false, cx);
     }
 
+    /// 固定命令时的快照与 revision；剪切只有原生剪贴板确认成功后才能删除，
+    /// 后台读取失败、目标变化或剪贴板被占用都必须保留原文及选区。
     fn start_clipboard_read(
         &mut self,
         document: SharedDocument,
@@ -218,11 +221,19 @@ impl DocumentHost {
                 view.coordinator.external_status = None;
                 match result {
                     Ok(bytes) => {
+                        let text = String::from_utf8_lossy(&bytes).into_owned();
+                        if delete_after_copy && !view.accept_native_cut_clipboard(&text) {
+                            view.error = Some("无法写入剪贴板，文字已保留，请重试".into());
+                            cx.notify();
+                            return;
+                        }
                         view.metrics.copied_bytes =
                             view.metrics.copied_bytes.saturating_add(bytes.len() as u64);
-                        cx.write_to_clipboard(ClipboardItem::new_string(
-                            String::from_utf8_lossy(&bytes).into_owned(),
-                        ));
+                        // 生产 Cut 已完成原生写入；只为无窗口测试同步 GPUI 剪贴板，
+                        // 避免再次写入一个不能报告失败的平台接口。
+                        if !delete_after_copy || cfg!(test) {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text));
+                        }
                         if delete_after_copy {
                             let current_revision =
                                 view.document.as_ref().map(SharedDocument::revision);
@@ -246,6 +257,22 @@ impl DocumentHost {
             });
         });
         cx.notify();
+    }
+
+    /// GPUI 的写入接口不返回错误，剪切及未写入文字的恢复先用原生 Result 确认接收；
+    /// 无窗口测试只替换该适配器的结果，不接触用户的系统剪贴板。
+    pub(super) fn accept_native_cut_clipboard(&mut self, text: &str) -> bool {
+        #[cfg(test)]
+        {
+            let _ = text;
+            !std::mem::take(&mut self.fail_next_native_clipboard_write_for_test)
+        }
+        #[cfg(not(test))]
+        {
+            arboard::Clipboard::new()
+                .and_then(|mut clipboard| clipboard.set_text(text.to_owned()))
+                .is_ok()
+        }
     }
 
     /// Read an immutable snapshot in bounded chunks so a cancelled copy does
@@ -281,8 +308,9 @@ impl DocumentHost {
         Ok(bytes)
     }
 
+    /// 保存持有不可变快照，当前选区仍可修改；重新载入会替换正文，必须继续拒绝写入。
     pub(super) fn delete_selected_source(&mut self, cx: &mut Context<Self>) {
-        if self.saving || self.reloading {
+        if self.reloading {
             return;
         }
         if self
@@ -299,7 +327,7 @@ impl DocumentHost {
     }
 
     /// Rejects shared Source writes during native composition before issuing one replacement transaction.
-    fn replace_source_range(
+    pub(super) fn replace_source_range(
         &mut self,
         range: Range<u64>,
         replacement: &str,
@@ -417,7 +445,7 @@ impl DocumentHost {
         );
     }
 
-    /// Completes a committed source edit and records its explicit selection so undo restores the user's range.
+    /// 完成已提交的源码编辑并记录显式选区，使撤销可以恢复原范围与方向。
     pub(super) fn install_source_replacement_with_selection(
         &mut self,
         range: Range<u64>,
@@ -426,6 +454,54 @@ impl DocumentHost {
         preserve_view: bool,
         preserve_structure: bool,
         preserve_folds: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.install_source_replacement_with_selection_and_group(
+            range,
+            replacement,
+            selection,
+            preserve_view,
+            preserve_structure,
+            preserve_folds,
+            None,
+            cx,
+        );
+    }
+
+    /// 安装已提交的输入组事务，只追加带组 ID 的恢复记录，避免重复写入普通事务。
+    pub(super) fn install_source_replacement_with_typing_group(
+        &mut self,
+        range: Range<u64>,
+        replacement: &str,
+        selection: Option<SourceSelection>,
+        preserve_view: bool,
+        preserve_structure: bool,
+        preserve_folds: bool,
+        group_id: TypingGroupId,
+        cx: &mut Context<Self>,
+    ) {
+        self.install_source_replacement_with_selection_and_group(
+            range,
+            replacement,
+            selection,
+            preserve_view,
+            preserve_structure,
+            preserve_folds,
+            Some(group_id),
+            cx,
+        );
+    }
+
+    /// 统一更新 Source 投影，并按事务类型写入唯一一条普通或分组恢复记录。
+    fn install_source_replacement_with_selection_and_group(
+        &mut self,
+        range: Range<u64>,
+        replacement: &str,
+        selection: Option<SourceSelection>,
+        preserve_view: bool,
+        preserve_structure: bool,
+        preserve_folds: bool,
+        typing_group_id: Option<TypingGroupId>,
         cx: &mut Context<Self>,
     ) {
         if !preserve_folds && let Some(document) = self.document.as_ref() {
@@ -453,15 +529,28 @@ impl DocumentHost {
             // queue owns all journal I/O, so a recovery failure cannot re-lock
             // the Controller while this UI transaction is still unwinding.
             let base_revision = document.revision().saturating_sub(1);
-            self.enqueue_recovery_transaction(
-                &document,
-                base_revision,
-                range.clone(),
-                replacement,
-                selection,
-                recovery_view_id(self.view_mode),
-                cx,
-            );
+            if let Some(group_id) = typing_group_id {
+                self.enqueue_recovery_typing_transaction(
+                    &document,
+                    base_revision,
+                    range.clone(),
+                    replacement,
+                    selection,
+                    recovery_view_id(self.view_mode),
+                    group_id,
+                    cx,
+                );
+            } else {
+                self.enqueue_recovery_transaction(
+                    &document,
+                    base_revision,
+                    range.clone(),
+                    replacement,
+                    selection,
+                    recovery_view_id(self.view_mode),
+                    cx,
+                );
+            }
         }
         let Some(document) = self.document.as_ref() else {
             return;
@@ -472,6 +561,9 @@ impl DocumentHost {
             .unwrap_or_default();
         self.active_edit = None;
         self.source_drag_anchor = None;
+        if typing_group_id.is_none() {
+            self.break_source_typing_group();
+        }
         self.selection_anchor = Some(line);
         self.selected_lines = Some(line..line.saturating_add(1));
         self.tail_enabled = false;
@@ -503,7 +595,7 @@ impl DocumentHost {
         cx.notify();
     }
 
-    /// Defers clipboard replacement until the Source composition has either committed or cancelled.
+    /// 候选结束后替换源码选区；后台保存不锁住当前正文，独立行仍由原输入 Block 处理。
     pub(super) fn on_paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if self.defer_source_action_for_ime(
             super::source_ime::DeferredSourceAction::Paste,
@@ -513,7 +605,7 @@ impl DocumentHost {
             return;
         }
         // 聚焦行由 Block 的 EntityInputHandler 处理；宿主只处理跨行或卸载选区。
-        if self.active_edit.is_some() || self.saving || self.reloading {
+        if self.active_edit.is_some() || self.reloading {
             return;
         }
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
@@ -539,7 +631,7 @@ impl DocumentHost {
         self.replace_source_range(range, &text, cx);
     }
 
-    /// Defers cut until native composition settles, then lets the asynchronous clipboard read guard the eventual write.
+    /// 剪切绑定命令时的不可变快照与 revision；保存可并发，删除仍等待剪贴板成功并重检 revision。
     pub(super) fn on_cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
         if self.defer_source_action_for_ime(
             super::source_ime::DeferredSourceAction::Cut,
@@ -548,7 +640,7 @@ impl DocumentHost {
         ) {
             return;
         }
-        if self.saving || self.reloading || self.active_edit.is_some() {
+        if self.reloading || self.active_edit.is_some() {
             return;
         }
         let Some(range) = self.selected_source_byte_range() else {

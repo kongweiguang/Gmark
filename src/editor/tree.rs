@@ -48,6 +48,10 @@ impl VisibleTreeSnapshot {
 
 #[path = "tree_parts/model.rs"]
 mod model;
+#[path = "tree_parts/source_recovery.rs"]
+mod source_recovery;
+#[path = "tree_parts/source_regions.rs"]
+mod source_regions;
 
 /// Canonical owner of the runtime block tree.
 ///
@@ -60,6 +64,12 @@ pub(super) struct DocumentTree {
     snapshot: VisibleTreeSnapshot,
     /// 根块级 Markdown 缓存；普通输入只重建所属根块，结构事务才全量重建。
     root_markdown_cache: Vec<RootMarkdownCache>,
+    /// 当前投影区域在规范 LF 源文档及根块序列中的对应关系。
+    source_regions: Option<source_regions::SourceRegionBindings>,
+    /// 最近一次局部 Source 提交失败，随当前树和标签保留以供恢复 UI 读取。
+    source_commit_error: Option<String>,
+    /// 等待用户恢复的跨根输入，避免提交失败时载荷只存在于事件栈中。
+    source_commit_replacement: Option<String>,
 }
 
 struct RootMarkdownCache {
@@ -69,11 +79,15 @@ struct RootMarkdownCache {
 }
 
 impl DocumentTree {
+    /// 新树从未绑定投影或提交错误开始，避免身份跨文档复用。
     pub(super) fn new(roots: Vec<Entity<Block>>) -> Self {
         Self {
             roots,
             snapshot: VisibleTreeSnapshot::default(),
             root_markdown_cache: Vec::new(),
+            source_regions: None,
+            source_commit_error: None,
+            source_commit_replacement: None,
         }
     }
 
@@ -142,8 +156,12 @@ impl DocumentTree {
         self.block_entity_by_id(descendant_id)
     }
 
+    /// 根序列替换会使旧 root-index 范围和局部提交错误失效，必须等待新投影重绑。
     pub(super) fn replace_roots(&mut self, roots: Vec<Entity<Block>>, cx: &mut Context<Editor>) {
         self.roots = roots;
+        self.source_regions = None;
+        self.source_commit_error = None;
+        self.source_commit_replacement = None;
         self.rebuild_metadata_and_snapshot(cx);
     }
 

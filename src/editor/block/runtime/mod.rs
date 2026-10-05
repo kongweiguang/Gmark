@@ -220,13 +220,23 @@ pub struct Block {
     pub(crate) ime_surface_selection_pending: bool,
     /// One terminal maps queued BlockText pointer offsets from their baseline into committed text.
     pub(crate) ime_interaction_rebase: Option<ime_interaction::BlockImeInteractionRebase>,
+    /// Source keeps Host command focus while this mounted row owns native text input.
+    pub(crate) source_host_input_focus_handle: Option<FocusHandle>,
     pub(crate) spelling_diagnostics: Arc<[crate::spellcheck::SpellingDiagnostic]>,
     pub last_layout: Option<Vec<WrappedLine>>,
     pub(crate) source_layout_identity: Option<SourceLayoutIdentity>,
     pub(crate) source_layout_cache_key: Option<SourceLayoutCacheKey>,
+    /// 行窗口仍可能宽于屏幕；只平移排版，不改源码锚点或已读取范围。
+    pub(crate) source_horizontal_offset: Pixels,
     pub(crate) source_layout_cache_hits: u64,
     pub(crate) source_layout_cache_misses: u64,
     pub last_bounds: Option<Bounds<Pixels>>,
+    /// 块内浮层所属的真实滚动视口，坐标包含当前窗格的原点。
+    pub(crate) selection_toolbar_viewport: Option<Bounds<Pixels>>,
+    /// 最近一次同步到表格 cell 的视口，避免大表格每帧更新所有实体。
+    pub(crate) table_cells_toolbar_viewport: Option<Bounds<Pixels>>,
+    /// 视口缓存相同时仍需同步新建或替换的表格 cell。
+    pub(crate) table_cells_toolbar_viewport_dirty: bool,
     pub last_line_height: Pixels,
     pub render_depth: usize,
     /// Position inside the direct sibling list. This is projection metadata,
@@ -383,6 +393,8 @@ pub struct Block {
     pub(crate) selection_toolbar_overflow_open: bool,
     pub(crate) selection_toolbar_type_menu_open: bool,
     pub(crate) selection_toolbar_link_input: Option<Entity<Block>>,
+    /// 父 Block 缓存浮层焦点句柄，提交回调期间不能再次借用正在更新的输入实体。
+    pub(crate) selection_toolbar_link_focus: Option<FocusHandle>,
     pub(crate) selection_toolbar_link_range: Option<Range<usize>>,
     pub(crate) selection_toolbar_link_had_target: bool,
 }
@@ -429,7 +441,7 @@ impl Block {
     }
 
     /// 切换投影可编辑性，并同步清理所有可能跨模式残留的瞬态编辑状态；尤其是
-    /// 代码语言菜单不能在 Live 实体转为 Preview 后继续接受局部修改。
+    /// 代码语言菜单和独立链接输入不能在 Live 实体转为 Preview 后继续接受局部修改。
     pub(crate) fn set_read_only(&mut self, read_only: bool) {
         if self.read_only == read_only {
             return;
@@ -442,6 +454,12 @@ impl Block {
         self.code_language_marked_range = None;
         self.math_marked_range = None;
         if read_only {
+            self.selection_toolbar_link_input = None;
+            self.selection_toolbar_link_focus = None;
+            self.selection_toolbar_link_range = None;
+            self.selection_toolbar_link_had_target = false;
+            self.selection_toolbar_overflow_open = false;
+            self.selection_toolbar_type_menu_open = false;
             if self.kind() == BlockKind::MermaidBlock {
                 self.mermaid_view_mode = MermaidViewMode::Preview;
             }
@@ -526,6 +544,35 @@ impl Block {
     pub(crate) fn set_compact_source_host(&mut self) {
         self.set_source_raw_mode();
         self.compact_source_host = true;
+    }
+
+    /// 原生输入桥只绑定当前挂载的 Source 行，快捷键继续由 Host 持有焦点。
+    pub(crate) fn set_source_host_input_focus_handle(
+        &mut self,
+        focus_handle: Option<FocusHandle>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.compact_source_host
+            || self.source_host_input_focus_handle.is_some() == focus_handle.is_some()
+        {
+            return;
+        }
+        self.source_host_input_focus_handle = focus_handle;
+        cx.notify();
+    }
+
+    /// Source 通过 Host 桥接原生输入，其它 Block 仍使用自身焦点，避免影响独立字段。
+    pub(crate) fn text_input_focus_handle(&self) -> &FocusHandle {
+        self.source_host_input_focus_handle
+            .as_ref()
+            .unwrap_or(&self.focus_handle)
+    }
+
+    /// 校验 Source 原生输入回调的 Host 焦点；无桥接标记的普通 Block 沿用自身输入路由。
+    pub(crate) fn source_host_input_is_focused(&self, window: &Window) -> bool {
+        self.source_host_input_focus_handle
+            .as_ref()
+            .is_none_or(|focus_handle| focus_handle.is_focused(window))
     }
 
     pub(crate) fn set_host_text_size(&mut self, text_size: f32) {

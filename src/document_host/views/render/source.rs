@@ -89,6 +89,7 @@ impl DocumentHost {
         }
     }
 
+    /// 可见行全部挂载后再统一投影选区，避免逐行构建时中间 Block 暂时接管 Host 输入桥。
     pub(super) fn render_source_list(
         &mut self,
         surface: SourceSurfaceMetrics,
@@ -148,19 +149,22 @@ impl DocumentHost {
                                 .retained_rows(this.show_line_endings)
                         })
                         .unwrap_or_default();
-                    real_lines
+                    let elements = real_lines
                         .into_iter()
                         .map(|line| {
-                            let exact_row = this.displayed_screen_lines.row(line).map(|row| {
-                                (
-                                    row.leading_truncated,
-                                    row.trailing_truncated,
-                                    (!row.trailing_truncated && this.show_line_endings)
-                                        .then(|| rendered_line_ending(&row.ending))
-                                        .filter(|marker| !marker.is_empty()),
-                                    row.rendered(this.show_line_endings),
-                                )
-                            });
+                            let exact_row = this
+                                .current_pinned_source_row(line, _cx)
+                                .or_else(|| this.displayed_screen_lines.row(line))
+                                .map(|row| {
+                                    (
+                                        row.leading_truncated,
+                                        row.trailing_truncated,
+                                        (!row.trailing_truncated && this.show_line_endings)
+                                            .then(|| rendered_line_ending(&row.ending))
+                                            .filter(|marker| !marker.is_empty()),
+                                        row.rendered(this.show_line_endings),
+                                    )
+                                });
                             let retained_row = exact_row
                                 .is_none()
                                 .then(|| {
@@ -307,7 +311,9 @@ impl DocumentHost {
                                 })
                                 .into_any_element()
                         })
-                        .collect::<Vec<_>>()
+                        .collect::<Vec<_>>();
+                    this.sync_source_selection_visuals(_cx);
+                    elements
                 },
             ),
         )

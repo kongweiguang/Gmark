@@ -129,6 +129,8 @@ pub struct Editor {
     /// Inactive sibling projections still render, but cannot steal the shared
     /// window input handler while they resynchronize.
     pane_canvas_focus_enabled: bool,
+    /// 子窗格的实际内容尺寸供 Split 列宽和拖动使用，不能用整个窗口代替。
+    pane_canvas_viewport: Option<Size<Pixels>>,
     /// Durable pane tab identity used to key Markdown presentation snapshots.
     /// The shell's legacy tab id is intentionally not reused for child views.
     pane_tab_id: Option<uuid::Uuid>,
@@ -151,6 +153,7 @@ pub struct Editor {
     render_asset_scope: uuid::Uuid,
     /// Live、Preview 与 Split 共用的最近一次纯语义投影，可落后于正在编辑的源码 revision。
     projection_cache: Option<Arc<PreparedSplitProjection>>,
+    source_spelling_cache: std::cell::RefCell<Option<source_mapping::SourceSpellingMap>>,
     document: DocumentTree,
     split_preview: Option<SplitPreviewState>,
     /// Split 分隔比例属于窗口布局状态；拖动期间不得进入文档事务或投影 revision。
@@ -236,18 +239,17 @@ pub struct Editor {
     allow_external_overwrite_once: bool,
     scroll_handle: ScrollHandle,
     last_scroll_viewport_size: Option<Size<Pixels>>,
-    /// Last frame's visible block ids, to detect structural edits so the height
-    /// cache is refreshed only when the row/block mapping is unchanged.
+    /// 上一帧可见块 ID，用于在文档结构变化时重新学习行高度。
     prev_visible_block_ids: Vec<EntityId>,
-    /// Per-row footprint (height plus trailing gap), keyed by the row's first
-    /// block. Scroll-invariant, unlike raw painted positions, so windowing from
-    /// their running sum stays correct as the document scrolls. Filled as rows
-    /// paint; unknown rows use a minimum-height estimate.
+    /// 已测行包装器高度（包含自身顶部间距），按首块 ID 索引。
     row_stride_cache: HashMap<EntityId, f32>,
+    /// 主编辑表面的主题、字体族与内容列宽身份。
+    row_stride_layout_identity: Option<RowStrideLayoutIdentity>,
+    /// Split 预览使用独立列宽，因此单独保留其布局身份。
+    split_row_stride_layout_identity: Option<RowStrideLayoutIdentity>,
     /// 结构或分组语义未变化时跨滚动帧复用，避免逐 Entity 重扫行分组。
     render_row_cache: Option<render::RenderedRowCache>,
-    /// Row range mounted last frame; only those rows shared one scroll offset, so
-    /// their adjacent-top differences are valid footprints for the cache.
+    /// None 表示行高缓存已失效，深滚时需允许从首个未测量行恢复。
     prev_render_window: Option<(usize, usize)>,
     close_guard_installed: bool,
     show_unsaved_changes_dialog: bool,
@@ -255,6 +257,10 @@ pub struct Editor {
     pending_close_after_save: bool,
     /// Focus target to restore when the close dialog is dismissed.
     close_dialog_restore_focus: Option<EntityId>,
+    /// 模态键盘目标独立于正文；Source 与 pane 焦点通过原句柄恢复，不依赖 Markdown EntityId。
+    close_dialog_focus_handles: [FocusHandle; 3],
+    close_dialog_keyboard_index: usize,
+    close_dialog_restore_input_focus: Option<FocusHandle>,
     pending_drop_replace_path: Option<PathBuf>,
     show_drop_replace_dialog: bool,
     pending_drop_replace_after_save: bool,
@@ -407,8 +413,6 @@ pub struct Editor {
     virtual_surface: Option<VirtualSurfaceState>,
     /// 仅在性能追踪开启时存在，默认渲染路径不分配采样记录。
     first_render_started: Option<Instant>,
-    /// 从块输入开始跨 Entity 事件保留到下一次 Editor render 的时间戳。
-    pending_input_trace: Option<perf::PendingInputTrace>,
 }
 
 impl Drop for Editor {

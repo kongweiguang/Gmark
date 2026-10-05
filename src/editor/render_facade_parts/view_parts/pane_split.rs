@@ -278,11 +278,15 @@ impl Editor {
         self.drain_pane_events(cx);
     }
 
+    /// 输入终态与后台定位先完成，再创建工作区；否则首次迁移会吞掉拆分或丢失待提交文字。
     pub(in crate::editor) fn split_pane_toward(
         &mut self,
         direction: crate::editor::panes::PaneSplitDirection,
         cx: &mut Context<Self>,
     ) {
+        if self.defer_pane_split_for_input(direction, cx) {
+            return;
+        }
         self.ensure_pane_workspace(cx);
         let Some(workspace) = self.pane_workspace.as_ref() else {
             return;

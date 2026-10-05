@@ -7,13 +7,13 @@ use super::*;
 use crate::components::{LineOperation, plan_line_operation};
 
 impl DocumentHost {
-    /// Reuses the editor planner and commits body plus directional selection as one transaction.
+    /// 复用行操作规划器原子提交正文和方向选区；保存使用旧快照，不锁住新的行操作。
     pub(super) fn apply_source_line_operation(
         &mut self,
         operation: LineOperation,
         cx: &mut Context<Self>,
     ) {
-        if self.saving || self.reloading || self.document.is_none() {
+        if self.reloading || self.document.is_none() {
             return;
         }
         let Some(document) = self.document.clone() else {

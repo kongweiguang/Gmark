@@ -5,23 +5,22 @@
 use super::*;
 
 impl Render for Editor {
-    /// 先处理平台终态与共享事件，并将编辑动作留在 Editor IME 门控之后执行。
+    /// 先处理平台终态与共享事件，并在应用待处理导航后同步模态焦点，以保存真实输入目标。
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _trace = crate::perf::span("editor_render_sync");
         self.sync_shared_document_events(cx);
         self.sync_pending_ime_operations(window, cx);
         self.ensure_markdown_view_state();
         if self.pane_canvas {
-            // Pane canvases skip the window chrome below, but they still own
-            // block focus and scroll requests. Without these two synchronizers
-            // a clicked block leaves its focus request pending forever and the
-            // pane cannot receive keyboard input.
+            // 子窗格只省略窗口装饰，文档选区、查找与保存仍由实际输入目标收尾。
             if self.pane_canvas_focus_enabled {
                 self.apply_pending_focus(window, cx);
             } else {
                 self.pending_focus = None;
             }
             self.apply_pending_scroll_into_view(window, cx);
-            return self.render_document_content(window, cx).into_any_element();
+            self.sync_document_frame(window, cx);
+            return self.render_pane_document_canvas(window, cx);
         }
         self.drain_pane_events(cx);
         // Keep the existing single-document editor path lazy.  A normal
@@ -46,27 +45,13 @@ impl Render for Editor {
                 Some("GPUI render boundary; not draw or platform present"),
             );
         }
-        if let Some(input_trace) = self.pending_input_trace.take() {
-            input_trace.record_next_render(source_bytes);
-        }
         self.install_close_guard(cx, window);
         self.install_menu_window_activation_observer(window, cx);
-        self.sync_split_scroll_handles(cx);
         self.apply_pending_focus(window, cx);
-        if let Some(focus_handle) = self.diagram_overlay_restore_focus.take() {
-            window.defer(cx, move |window, _cx| focus_handle.focus(window));
-        }
+        self.sync_close_dialog_focus(window, cx);
         self.apply_pending_scroll_into_view(window, cx);
-        if !self.has_active_ime_composition(cx) {
-            self.last_selection_snapshot = self.capture_source_selection_snapshot(cx);
-            self.source_document
-                .sync_source_selection(self.last_selection_snapshot.source_selection());
-        }
-        self.refresh_find_if_stale(cx);
+        self.sync_document_frame(window, cx);
         self.sync_workspace_session_view_state(cx);
-        self.sync_pending_save(window, cx);
-        self.sync_pending_save_as(window, cx);
-        self.sync_pending_open_link(window, cx);
         self.sync_window_edited_state(window);
 
         let content_area = if self.pane_workspace.is_some() {
@@ -100,8 +85,6 @@ impl Render for Editor {
             } else {
                 0.0
             };
-        let editor = cx.entity().downgrade();
-        let split_divider_editor = editor.clone();
         let has_menus = cx
             .get_menus()
             .map(|menus| !menus.is_empty())
@@ -376,106 +359,23 @@ impl Render for Editor {
         } else {
             main_content
         };
-        let resident_content = if self.view_mode == super::ViewMode::Split {
-            let available_width = (f32::from(window.viewport_size().width)
+        let resident_content = self.render_resident_surface(
+            content_area.into_any_element(),
+            &theme,
+            (f32::from(window.viewport_size().width)
                 - effective_workspace_width
                 - effective_document_sidebar_width
                 - SPLIT_DIVIDER_HIT_WIDTH)
-                .max(1.0);
-            let ratio = clamped_split_pane_ratio(self.split_pane_ratio, available_width);
-            let source_width = available_width * ratio;
-            let preview_width = available_width - source_width;
-            let editor_viewport_height = (f32::from(window.viewport_size().height)
+                .max(1.0),
+            (f32::from(window.viewport_size().height)
                 - titlebar_height
                 - menu_bar_height
                 - tab_strip_height
                 - status_bar_height)
-                .max(1.0);
-            let preview = self
-                .render_split_preview_pane(&theme, preview_width, editor_viewport_height, cx)
-                .unwrap_or_else(|| div().flex_1().into_any_element());
-            let divider_editor = split_divider_editor.clone();
-            let divider_focused = self.split_divider_focus_handle.is_focused(window);
-            let divider_active = self.split_resize_session.is_some() || divider_focused;
-            let divider_focus_handle = self.split_divider_focus_handle.clone();
-            let divider_key_editor = split_divider_editor.clone();
-            div()
-                .w_full()
-                .h_full()
-                .flex()
-                .min_w(px(0.0))
-                .child(
-                    div()
-                        .id("split-source-pane-shell")
-                        .debug_selector(|| "split-source-pane-shell".to_owned())
-                        .h_full()
-                        .w(px(source_width))
-                        .flex_none()
-                        .min_w(px(0.0))
-                        .child(content_area),
-                )
-                .child(
-                    div()
-                        .id("split-divider")
-                        .debug_selector(|| "split-divider".to_owned())
-                        .relative()
-                        .h_full()
-                        .w(px(SPLIT_DIVIDER_HIT_WIDTH))
-                        .flex_none()
-                        .tab_index(0)
-                        .track_focus(&divider_focus_handle)
-                        .cursor_col_resize()
-                        .hover(|this| this.bg(theme.colors.workbench.accent_soft))
-                        .focus(|this| this.bg(theme.colors.workbench.accent_soft))
-                        .child(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .bottom_0()
-                                .left(px((SPLIT_DIVIDER_HIT_WIDTH - 1.0) * 0.5))
-                                .w(px(1.0))
-                                .bg(if divider_active {
-                                    theme.colors.workbench.focus_ring
-                                } else {
-                                    theme.colors.workbench.border_subtle
-                                })
-                                .debug_selector(|| "split-divider-line".to_owned()),
-                        )
-                        .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-                            divider_focus_handle.focus(window);
-                            let _ = divider_editor.update(cx, |editor, cx| {
-                                if event.click_count >= 2 {
-                                    editor.split_pane_ratio = 0.5;
-                                    editor.split_resize_session = None;
-                                    editor.schedule_workspace_session_save(cx);
-                                    cx.notify();
-                                } else {
-                                    editor.start_split_resize(
-                                        event.position.x,
-                                        available_width,
-                                        ratio,
-                                        cx,
-                                    );
-                                }
-                            });
-                            cx.stop_propagation();
-                        })
-                        .on_key_down(move |event, window, cx| {
-                            let _ = divider_key_editor.update(cx, |editor, cx| {
-                                editor.on_split_divider_key_down(
-                                    event,
-                                    available_width,
-                                    window,
-                                    cx,
-                                );
-                            });
-                        }),
-                )
-                .child(preview)
-                .into_any_element()
-        } else {
-            content_area.into_any_element()
-        };
+                .max(1.0),
+            window,
+            cx,
+        );
         let editor_content = if let Some(pane_workspace) = self.pane_workspace.as_ref() {
             let pane_viewport = crate::editor::panes::PaneViewport::new(
                 (viewport_width - effective_workspace_width - effective_document_sidebar_width)
@@ -695,19 +595,6 @@ impl Render for Editor {
         } else {
             base
         };
-        if self.show_external_conflict_dialog {
-            base.child(self.render_external_conflict_overlay(&theme, window, cx))
-        } else if self.show_encoding_conversion_dialog {
-            base.child(self.render_encoding_conversion_overlay(&theme, cx))
-        } else if let Some(kind) = self.info_dialog {
-            base.child(self.render_info_dialog_overlay(&theme, kind, cx))
-        } else if self.show_drop_replace_dialog {
-            base.child(self.render_drop_replace_overlay(&theme, cx))
-        } else if self.show_unsaved_changes_dialog {
-            base.child(self.render_unsaved_changes_overlay(&theme, cx))
-        } else {
-            base
-        }
-        .into_any_element()
+        self.render_document_dialogs(base, &theme, window, cx)
     }
 }

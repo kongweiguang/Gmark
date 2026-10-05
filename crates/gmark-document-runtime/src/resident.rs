@@ -10,7 +10,7 @@ use gmark_document::{
 };
 use gmark_document_core::{
     DocumentRevision, DocumentSnapshot, SourceAffinity, SourceAnchor, SourceEdit, TextEncoding,
-    Transaction,
+    Transaction, TypingGroupId,
 };
 use gmark_paged_document::{
     ExternalChange, FileIdentity, FileSource, PagedDocumentError, SearchCancellation, SearchMatch,
@@ -274,6 +274,7 @@ impl ResidentDocument {
             .collect())
     }
 
+    /// 单步替换作为普通事务提交，自动结束任何先前的连续输入分组。
     pub fn replace_text(
         &mut self,
         range: Range<u64>,
@@ -282,6 +283,7 @@ impl ResidentDocument {
         self.apply_edits(
             self.revision(),
             &[SourceEdit::new(range.clone(), replacement)],
+            None,
         )?;
         Ok(())
     }
@@ -302,8 +304,22 @@ impl ResidentDocument {
     }
 
     pub fn apply_transaction(&mut self, transaction: &Transaction) -> Result<(), String> {
-        self.apply_edits(transaction.base_revision.0, &transaction.edits)
+        self.apply_edits(transaction.base_revision.0, &transaction.edits, None)
             .map_err(|error| error.to_string())
+    }
+
+    /// 应用 Controller 标记的输入组并同步行指标，保持 Resident 与 Paged 撤销边界一致。
+    pub fn apply_typing_transaction(
+        &mut self,
+        transaction: &Transaction,
+        group_id: TypingGroupId,
+    ) -> Result<(), String> {
+        self.apply_edits(
+            transaction.base_revision.0,
+            &transaction.edits,
+            Some(group_id),
+        )
+        .map_err(|error| error.to_string())
     }
 
     pub fn undo(&mut self) -> bool {
@@ -417,8 +433,10 @@ impl ResidentDocument {
         &mut self,
         base_revision: u64,
         edits: &[SourceEdit],
+        group_id: Option<TypingGroupId>,
     ) -> Result<(), PagedDocumentError> {
         if base_revision != self.revision() {
+            self.document.break_typing_group();
             return Err(PagedDocumentError::SourceChanged);
         }
         let resident_edits = edits
@@ -431,12 +449,14 @@ impl ResidentDocument {
                 Ok(TextEdit::new(start..end, edit.replacement.clone()))
             })
             .collect::<Result<Vec<_>, PagedDocumentError>>()?;
-        self.document
-            .apply_transaction(ResidentTransaction::new(
-                self.document.revision(),
-                resident_edits,
-            ))
-            .map_err(|error| map_document_error(error.to_string(), self.len(), 0..0))?;
+        let transaction = ResidentTransaction::new(self.document.revision(), resident_edits);
+        let result = match group_id {
+            Some(group_id) => self
+                .document
+                .apply_typing_transaction(transaction, group_id),
+            None => self.document.apply_transaction(transaction),
+        };
+        result.map_err(|error| map_document_error(error.to_string(), self.len(), 0..0))?;
         if !edits.is_empty() {
             self.rebuild_lines();
         }

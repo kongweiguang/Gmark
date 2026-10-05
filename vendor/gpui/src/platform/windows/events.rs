@@ -18,6 +18,7 @@ use windows::{
     core::PCWSTR,
 };
 
+use super::window::trace_ime;
 use crate::*;
 
 pub(crate) const WM_GPUI_CURSOR_STYLE_CHANGED: u32 = WM_USER + 1;
@@ -476,36 +477,83 @@ impl WindowsWindowInner {
         if handled { Some(0) } else { Some(1) }
     }
 
-    /// Suppresses duplicate IME result characters before normal text dispatch.
+    /// Preserves ordinary character dispatch while tracing only the route taken during an active native session.
     fn handle_char_msg(&self, wparam: WPARAM) -> Option<isize> {
-        {
+        let (active, generation, owner_present, duplicate, owner_missing) = {
             let mut state = self.state.borrow_mut();
-            if state
+            let active = state.ime_composition.is_active();
+            let generation = state.ime_composition.generation();
+            let owner_present = state.ime_composition.owner.is_some();
+            let duplicate = state
                 .ime_composition
-                .consume_duplicate_char(wparam.0 as u16)
-                || (state.ime_composition.is_active() && state.ime_composition.owner.is_none())
-            {
-                return Some(0);
+                .consume_duplicate_char(wparam.0 as u16);
+            (
+                active,
+                generation,
+                owner_present,
+                duplicate,
+                active && !owner_present,
+            )
+        };
+        if duplicate || owner_missing {
+            if active {
+                trace_ime(format_args!(
+                    "event=character generation={generation} source=WM_CHAR owner_present={owner_present} delivery=suppressed"
+                ));
             }
+            return Some(0);
         }
-        let input = self.parse_char_message(wparam)?;
-        self.with_input_handler(|input_handler| {
-            input_handler.replace_text_in_range(None, &input);
-        });
+        let Some(input) = self.parse_char_message(wparam) else {
+            if active {
+                trace_ime(format_args!(
+                    "event=character generation={generation} source=WM_CHAR owner_present={owner_present} delivery=parse_failed"
+                ));
+            }
+            return None;
+        };
+        let delivered = self
+            .with_input_handler(|input_handler| input_handler.replace_text_in_range(None, &input))
+            .unwrap_or(false);
+        if active {
+            trace_ime(format_args!(
+                "event=character generation={generation} source=WM_CHAR owner_present={owner_present} delivery={}",
+                if delivered {
+                    "delivered"
+                } else {
+                    "not_delivered"
+                }
+            ));
+        }
 
         Some(0)
     }
 
-    /// Suppresses a compatibility character already delivered as an explicit IME result.
+    /// Traces whether an active-session compatibility character is suppressed or left to native dispatch.
     fn handle_ime_char_msg(&self, wparam: WPARAM) -> Option<isize> {
-        let mut state = self.state.borrow_mut();
-        if state
-            .ime_composition
-            .consume_duplicate_char(wparam.0 as u16)
-            || (state.ime_composition.is_active() && state.ime_composition.owner.is_none())
-        {
+        let (active, generation, owner_present, duplicate) = {
+            let mut state = self.state.borrow_mut();
+            let active = state.ime_composition.is_active();
+            let generation = state.ime_composition.generation();
+            let owner_present = state.ime_composition.owner.is_some();
+            let duplicate = state
+                .ime_composition
+                .consume_duplicate_char(wparam.0 as u16);
+            (active, generation, owner_present, duplicate)
+        };
+        let owner_missing = active && !owner_present;
+        if duplicate || owner_missing {
+            if active {
+                trace_ime(format_args!(
+                    "event=character generation={generation} source=WM_IME_CHAR owner_present={owner_present} delivery=suppressed"
+                ));
+            }
             Some(0)
         } else {
+            if active {
+                trace_ime(format_args!(
+                    "event=character generation={generation} source=WM_IME_CHAR owner_present={owner_present} delivery=left_to_native_dispatch"
+                ));
+            }
             None
         }
     }
@@ -730,7 +778,7 @@ impl WindowsWindowInner {
         }
     }
 
-    /// Starts by pinning the current platform handler before candidate placement can run.
+    /// Pins the current handler before candidate placement, then records only owner presence for diagnostics.
     fn handle_ime_start_composition(&self, handle: HWND) -> Option<isize> {
         let started = {
             let mut state = self.state.borrow_mut();
@@ -742,6 +790,13 @@ impl WindowsWindowInner {
             }
         };
         if started {
+            let state = self.state.borrow();
+            trace_ime(format_args!(
+                "event=start generation={} owner_present={}",
+                state.ime_composition.generation(),
+                state.ime_composition.owner.is_some()
+            ));
+            drop(state);
             self.with_input_handler(|owner| {
                 owner.composition_started();
             });
@@ -749,28 +804,47 @@ impl WindowsWindowInner {
         self.handle_ime_position(handle)
     }
 
-    /// Delivers one terminal outcome to the handler retained by the IME session.
+    /// Classifies the terminal session once before notifying the pinned handler, so logs reflect the committed state.
     fn notify_ime_composition_end(&self) {
         let ended = self.state.borrow_mut().ime_composition.finish();
-        if let Some((Some(mut owner), end)) = ended {
-            owner.composition_ended(end);
+        if let Some((owner, end)) = ended {
+            let outcome = match end {
+                CompositionEnd::Committed => "committed",
+                CompositionEnd::Cancelled => "cancelled",
+            };
+            trace_ime(format_args!(
+                "event=terminal generation={} owner_present={} outcome={outcome}",
+                self.state.borrow().ime_composition.generation(),
+                owner.is_some()
+            ));
+            if let Some(mut owner) = owner {
+                owner.composition_ended(end);
+            }
         }
     }
 
-    /// Performs the IMM call from a later window-message turn so it cannot reenter an editor
-    /// while `Window::finish_ime_composition` is still running inside that editor's callback.
+    /// Performs IMM completion on a later turn and records whether Windows accepted the request.
     fn handle_ime_finish_request(&self, handle: HWND, generation: usize) -> Option<isize> {
-        if !self
-            .state
-            .borrow()
-            .ime_composition
-            .has_finish_request(generation)
-        {
+        let (current_generation, owner_present, is_pending) = {
+            let state = self.state.borrow();
+            (
+                state.ime_composition.generation(),
+                state.ime_composition.owner.is_some(),
+                state.ime_composition.has_finish_request(generation),
+            )
+        };
+        if !is_pending {
+            trace_ime(format_args!(
+                "event=imm_complete generation={generation} current_generation={current_generation} owner_present={owner_present} accepted=false outcome=stale_request"
+            ));
             return Some(0);
         }
 
         let context = unsafe { ImmGetContext(handle) };
         if context.0.is_null() {
+            trace_ime(format_args!(
+                "event=imm_complete generation={generation} owner_present={owner_present} accepted=false outcome=no_context"
+            ));
             self.notify_ime_finish_failed(generation);
             return Some(0);
         }
@@ -778,13 +852,16 @@ impl WindowsWindowInner {
         let accepted =
             unsafe { ImmNotifyIME(context, NI_COMPOSITIONSTR, CPS_COMPLETE, 0).as_bool() };
         unsafe { ImmReleaseContext(handle, context).ok().log_err() };
+        trace_ime(format_args!(
+            "event=imm_complete generation={generation} owner_present={owner_present} accepted={accepted}"
+        ));
         if !accepted {
             self.notify_ime_finish_failed(generation);
         }
         Some(0)
     }
 
-    /// Clears only the failed request bit, then reports failure through the pinned input owner.
+    /// Clears only the failed request bit so the caller can retry against the same pinned session.
     fn notify_ime_finish_failed(&self, generation: usize) {
         let rejected = self
             .state
@@ -792,6 +869,9 @@ impl WindowsWindowInner {
             .ime_composition
             .reject_finish_request(generation);
         if rejected {
+            trace_ime(format_args!(
+                "event=finish_failure generation={generation} outcome=retryable"
+            ));
             self.with_input_handler(|owner| owner.composition_finish_failed());
         }
     }
@@ -802,13 +882,25 @@ impl WindowsWindowInner {
         None
     }
 
-    /// Converts an actual empty composition message into cancellation, never an empty commit.
+    /// Records native flags without text while preserving the existing cancellation classification.
     fn handle_ime_composition(
         &self,
         handle: HWND,
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> Option<isize> {
+        let (generation, active, owner_present) = {
+            let state = self.state.borrow();
+            (
+                state.ime_composition.generation(),
+                state.ime_composition.is_active(),
+                state.ime_composition.owner.is_some(),
+            )
+        };
+        trace_ime(format_args!(
+            "event=composition_message generation={generation} active={active} owner_present={owner_present} flags={}",
+            lparam.0 as u32
+        ));
         if ime_composition_message_cancelled(lparam.0 as u32) {
             self.notify_ime_composition_end();
             return None;
@@ -820,7 +912,7 @@ impl WindowsWindowInner {
         result
     }
 
-    /// Routes preedit and result text only through the composition's original input handler.
+    /// Routes text only to the pinned owner and logs result lengths instead of candidate contents.
     fn handle_ime_composition_inner(
         &self,
         ctx: HIMC,
@@ -848,12 +940,32 @@ impl WindowsWindowInner {
         let has_result = lparam & GCS_RESULTSTR.0 > 0;
         if has_result {
             if self.state.borrow().ime_composition.can_receive_result() {
-                let comp_result = parse_ime_composition_string(ctx, GCS_RESULTSTR)?;
+                let Some(comp_result) = parse_ime_composition_string(ctx, GCS_RESULTSTR) else {
+                    trace_ime(format_args!(
+                        "event=result generation={} source=GCS_RESULTSTR flags={} delivery=parse_failed",
+                        self.state.borrow().ime_composition.generation(),
+                        lparam
+                    ));
+                    return None;
+                };
                 let delivered = self
                     .with_input_handler(|input_handler| {
                         input_handler.replace_text_in_range(None, &comp_result)
                     })
                     .unwrap_or(false);
+                trace_ime(format_args!(
+                    "event=result generation={} source=GCS_RESULTSTR flags={} bytes={} utf16_units={} non_ascii={} delivery={}",
+                    self.state.borrow().ime_composition.generation(),
+                    lparam,
+                    comp_result.len(),
+                    comp_result.encode_utf16().count(),
+                    !comp_result.is_ascii(),
+                    if delivered {
+                        "delivered"
+                    } else {
+                        "not_delivered"
+                    }
+                ));
                 if delivered {
                     self.state
                         .borrow_mut()

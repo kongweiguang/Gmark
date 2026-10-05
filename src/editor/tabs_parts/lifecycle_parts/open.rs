@@ -307,13 +307,13 @@ impl Editor {
         self.new_tab_from_snapshot(snapshot, cx)
     }
 
-    /// 新标签数据准备完成也先等待输入终态，不能拆卸正在接收系统回调的旧视图。
+    /// 新标签激活先等待候选与分页确认文字，准备好的快照留在既有意图队列而不拆卸旧输入。
     pub(crate) fn new_tab_from_snapshot(
         &mut self,
         snapshot: DocumentTabSnapshot,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.has_active_ime_composition(cx) {
+        if self.has_active_ime_composition(cx) || self.has_pending_source_input_in_window(cx) {
             self.queue_ime_operation(
                 crate::editor::ime_lifecycle::DeferredImeOperation::NewTab(Box::new(snapshot)),
                 cx,

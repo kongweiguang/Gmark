@@ -3,6 +3,7 @@
 use super::*;
 
 impl Editor {
+    /// 同时接收 Esc Action 和裸按键，避免 Action 优先派发时跳过提示关闭与焦点恢复。
     pub(in crate::editor) fn render_tab_close_dialog_overlay(
         &self,
         theme: &crate::theme::Theme,
@@ -13,8 +14,22 @@ impl Editor {
             return None;
         }
         let d = &theme.dimensions;
+        let focus_ring = vec![BoxShadow {
+            color: theme.colors.workbench.focus_ring,
+            offset: point(px(0.0), px(0.0)),
+            blur_radius: px(0.0),
+            spread_radius: px(2.0),
+        }];
         Some(
             modal_overlay("tab-close-dialog-overlay", theme)
+                .on_action(cx.listener(
+                    |editor, _: &crate::components::DismissTransientUi, window, cx| {
+                        if editor.tabs.is_close_dialog_open() {
+                            editor.cancel_tab_close_dialog(window, cx);
+                        }
+                    },
+                ))
+                .on_key_down(cx.listener(Self::on_close_dialog_key_down))
                 .child(
                     dialog_panel("tab-close-dialog", d.dialog_width.min(520.0), theme)
                         .child(
@@ -36,6 +51,9 @@ impl Editor {
                                         DialogButtonKind::Secondary,
                                         theme,
                                     )
+                                    .tab_index(0)
+                                    .track_focus(&self.close_dialog_focus_handles[0])
+                                    .focus(|style| style.shadow(focus_ring.clone()))
                                     .on_click(cx.listener(Self::on_cancel_tab_close)),
                                 )
                                 .child(
@@ -45,6 +63,9 @@ impl Editor {
                                         DialogButtonKind::Danger,
                                         theme,
                                     )
+                                    .tab_index(1)
+                                    .track_focus(&self.close_dialog_focus_handles[1])
+                                    .focus(|style| style.shadow(focus_ring.clone()))
                                     .on_click(cx.listener(Self::on_discard_tab_close)),
                                 )
                                 .child(
@@ -54,6 +75,9 @@ impl Editor {
                                         DialogButtonKind::Primary,
                                         theme,
                                     )
+                                    .tab_index(2)
+                                    .track_focus(&self.close_dialog_focus_handles[2])
+                                    .focus(|style| style.shadow(focus_ring.clone()))
                                     .on_click(cx.listener(Self::on_save_tab_close)),
                                 ),
                         ),

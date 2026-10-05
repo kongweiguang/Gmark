@@ -1,5 +1,6 @@
 // @author kongweiguang
 
+use std::collections::HashSet;
 use std::ops::RangeInclusive;
 
 use gpui::*;
@@ -193,6 +194,42 @@ impl Editor {
                 }
             });
         }
+    }
+
+    /// 将整表跨块文字选区同步到独立 cell 实体，同时保留表格结构选择状态。
+    pub(super) fn sync_cross_block_table_cell_text_selections_for(
+        &self,
+        surface: super::selection_surface::SelectionSurface,
+        fully_selected_table_ids: &HashSet<EntityId>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let bindings = self
+            .table_bindings_for_surface(surface)
+            .map(|bindings| {
+                bindings
+                    .values()
+                    .map(|binding| (binding.table_block.entity_id(), binding.cell.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut changed = false;
+        for (table_block_id, cell) in bindings {
+            let selected = fully_selected_table_ids.contains(&table_block_id);
+            cell.update(cx, |cell, cx| {
+                let next = if selected {
+                    let len = cell.visible_len();
+                    (len > 0).then_some(0..len)
+                } else {
+                    None
+                };
+                if cell.editor_selection_range != next {
+                    cell.editor_selection_range = next;
+                    cx.notify();
+                    changed = true;
+                }
+            });
+        }
+        changed
     }
 
     /// Prevents cell text ranges from competing with the explicit rectangular table selection.

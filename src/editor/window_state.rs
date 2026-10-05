@@ -63,6 +63,7 @@ impl Editor {
         }
     }
 
+    /// 快捷键与状态栏使用同一窗口模式来源，避免子窗格在下一帧被旧模式覆盖。
     pub(crate) fn on_toggle_view_mode_action(
         &mut self,
         _: &crate::components::ToggleViewMode,
@@ -72,11 +73,12 @@ impl Editor {
         self.toggle_view_mode_from_ui(cx);
     }
 
+    /// Markdown 模式由窗口统一下发；set_view_mode 的门控仍等待活动子窗格的组合终态。
     pub(super) fn toggle_view_mode_from_ui(&mut self, cx: &mut Context<Self>) {
         if !self.pane_canvas {
             let (markdown, host) = self.focused_pane_entities(cx);
-            if let Some(editor) = markdown {
-                editor.update(cx, |editor, cx| editor.toggle_view_mode_from_ui(cx));
+            if markdown.is_some() {
+                self.toggle_view_mode(cx);
                 return;
             }
             if let Some(host) = host {
@@ -420,9 +422,12 @@ impl Editor {
         self.set_view_mode(target, cx);
     }
 
-    /// 模式切换会更换输入投影，必须先等待原目标的系统组合输入终态。
+    /// 模式切换更换输入投影，等待原候选与分页确认文字收尾，避免旧坐标写入新表面。
     pub(crate) fn set_view_mode(&mut self, target: ViewMode, cx: &mut Context<Self>) {
-        if target != self.view_mode && self.has_active_ime_composition(cx) {
+        if target != self.view_mode
+            && (self.has_active_ime_composition(cx)
+                || self.has_pending_source_input_for_active_target(cx))
+        {
             let tab = self.tabs.records.get(self.tabs.active).map(|tab| tab.id);
             self.queue_ime_operation(
                 ime_lifecycle::DeferredImeOperation::Mode { tab, mode: target },

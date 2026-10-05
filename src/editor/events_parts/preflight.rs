@@ -3,9 +3,9 @@
 use super::*;
 
 impl Editor {
-    /// 处理不进入文档结构主状态机的高优先级事件。
+    /// 确认文字事件总是消费并在失败时保留，避免结构状态机或局部回退绕过原选区写入边界。
     ///
-    /// 返回 true 表示事件已经完全消费；调用方不得继续执行表格或结构分支。
+    /// 返回 true 表示事件已消费；调用方不得继续执行表格或结构分支。
     pub(super) fn handle_block_event_preflight(
         &mut self,
         block: &Entity<super::Block>,
@@ -55,20 +55,40 @@ impl Editor {
             self.prepare_undo_capture_from_stable_snapshot(*kind);
             return true;
         }
+        if let BlockEvent::PrepareUndoFromSourceSnapshot {
+            kind,
+            markdown_selection,
+            reversed,
+        } = event
+        {
+            self.prepare_undo_capture_from_source_document_snapshot(
+                *kind,
+                block.entity_id(),
+                markdown_selection.clone(),
+                *reversed,
+                cx,
+            );
+            return true;
+        }
         if let BlockEvent::RequestReplaceCrossBlockSelection {
             text,
             selected_range_relative,
             mark_inserted_text,
             undo_kind,
         } = event
-            && self.replace_cross_block_selection_with_text(
-                text,
-                selected_range_relative.clone(),
-                *mark_inserted_text,
-                *undo_kind,
-                cx,
-            )
         {
+            let replaced = self.document.source_commit_error().is_none()
+                && self.replace_cross_block_selection_with_text(
+                    text,
+                    selected_range_relative.clone(),
+                    *mark_inserted_text,
+                    *undo_kind,
+                    cx,
+                );
+            // 非 Windows 的兼容预编辑仍由原组合会话管理，不能当作确认结果逐次追加。
+            if !replaced && !*mark_inserted_text && !text.is_empty() {
+                self.retain_unsubmitted_resident_text(text, cx);
+            }
             return true;
         }
         if matches!(event, BlockEvent::RequestRenderedSelectAll) {
@@ -188,6 +208,7 @@ impl Editor {
             event,
             BlockEvent::Changed
                 | BlockEvent::PrepareUndo { .. }
+                | BlockEvent::PrepareUndoFromSourceSnapshot { .. }
                 | BlockEvent::RequestNewline { .. }
                 | BlockEvent::RequestEnterCalloutBody
                 | BlockEvent::RequestQuoteBreak

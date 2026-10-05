@@ -5,7 +5,7 @@
 use super::*;
 
 impl DocumentHost {
-    /// Waits for the current Source composition before undo so confirmed input is recorded before history moves.
+    /// 先等待候选终态再移动历史；Source 同步重锚输入行，避免续键或关闭提示记录外层容器焦点。
     pub(crate) fn on_undo(&mut self, _: &Undo, window: &mut Window, cx: &mut Context<Self>) {
         if self.defer_source_action_for_ime(
             super::source_ime::DeferredSourceAction::Block(BlockHostAction::Undo),
@@ -14,7 +14,7 @@ impl DocumentHost {
         ) {
             return;
         }
-        if self.saving || self.reloading {
+        if self.reloading {
             return;
         }
         let changed = self
@@ -38,6 +38,9 @@ impl DocumentHost {
             }
             self.focus_handle.focus(window);
             self.invalidate_source_rows();
+            if self.view_mode == DocumentHostViewMode::Source {
+                self.restore_source_navigation_input(window, cx);
+            }
             let dirty = self
                 .document
                 .as_ref()
@@ -70,7 +73,7 @@ impl DocumentHost {
         }
     }
 
-    /// Waits for the current Source composition before redo so native candidate text never races history.
+    /// 重做保留原保存快照并恢复 Source 的真实输入焦点；新 revision 仍由 Controller 独立标记 dirty。
     pub(crate) fn on_redo(&mut self, _: &Redo, window: &mut Window, cx: &mut Context<Self>) {
         if self.defer_source_action_for_ime(
             super::source_ime::DeferredSourceAction::Block(BlockHostAction::Redo),
@@ -79,7 +82,7 @@ impl DocumentHost {
         ) {
             return;
         }
-        if self.saving || self.reloading {
+        if self.reloading {
             return;
         }
         let changed = self
@@ -103,6 +106,9 @@ impl DocumentHost {
             }
             self.focus_handle.focus(window);
             self.invalidate_source_rows();
+            if self.view_mode == DocumentHostViewMode::Source {
+                self.restore_source_navigation_input(window, cx);
+            }
             let preserve_live_table = self.is_delimited_document()
                 && matches!(
                     self.view_mode,

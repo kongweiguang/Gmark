@@ -25,10 +25,6 @@ const TOOLBAR_HEIGHT: f32 = 32.0;
 const TOOLBAR_GAP: f32 = 6.0;
 const OVERFLOW_MENU_HEIGHT: f32 = 174.0;
 const VIEWPORT_INSET: f32 = 8.0;
-// Windows 的菜单标题栏与文档标签栏都在 GPUI client viewport 内；附着浮层
-// 必须为标签栏预留这一层高度，不能只按整个窗口的 y=0 做碰撞判断。
-const DOCUMENT_TAB_STRIP_RESERVE: f32 = 36.0;
-const WINDOW_CHROME_RESERVE: f32 = 70.0;
 const CODE_ICON: &str = "icon/ui/code.svg";
 const LINK_ICON: &str = "icon/ui/link.svg";
 const MORE_ICON: &str = "icon/ui/more-horizontal.svg";
@@ -168,17 +164,27 @@ struct ToolbarPosition {
     above: bool,
 }
 
+/// 区分布局尚未测量与已测量但无法显示工具栏，供绘制和键盘入口共用。
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SelectionToolbarGeometry {
+    Unmeasured,
+    Hidden,
+    Positioned(ToolbarPosition),
+}
+
+/// 依据文字行与所属视口的交集选取紧凑宽度，避免浮层覆盖到相邻窗格。
 fn selection_toolbar_width(
     horizontal_bounds: Bounds<Pixels>,
-    viewport: Size<Pixels>,
+    viewport: Bounds<Pixels>,
     expanded_block_type_width: Option<f32>,
 ) -> f32 {
     let Some(expanded_block_type_width) = expanded_block_type_width else {
         return TOOLBAR_WITHOUT_BLOCK_TYPE_WIDTH;
     };
-    let viewport_width = f32::from(viewport.width);
-    let left_edge = (f32::from(horizontal_bounds.left()) + VIEWPORT_INSET).max(VIEWPORT_INSET);
-    let right_edge = f32::from(horizontal_bounds.right()).min(viewport_width) - VIEWPORT_INSET;
+    let left_edge = (f32::from(horizontal_bounds.left()) + VIEWPORT_INSET)
+        .max(f32::from(viewport.left()) + VIEWPORT_INSET);
+    let right_edge =
+        f32::from(horizontal_bounds.right()).min(f32::from(viewport.right())) - VIEWPORT_INSET;
     let expanded_width = TOOLBAR_WITHOUT_BLOCK_TYPE_WIDTH + 2.0 + expanded_block_type_width;
     if right_edge - left_edge >= expanded_width {
         expanded_width
@@ -195,21 +201,56 @@ fn expanded_block_type_width(language_id: &str) -> f32 {
     }
 }
 
+/// 零尺寸只会出现在所属滚动面首次布局前；此时用窗口范围保留首帧工具栏。
+fn resolved_toolbar_viewport(
+    owner_viewport: Option<Bounds<Pixels>>,
+    window_viewport: Size<Pixels>,
+) -> Bounds<Pixels> {
+    owner_viewport
+        .filter(|bounds| bounds.size.width > px(0.0) && bounds.size.height > px(0.0))
+        .unwrap_or_else(|| Bounds::new(point(px(0.0), px(0.0)), window_viewport))
+}
+
+/// 用裁剪后的可见选区定位工具栏；无交集时不生成浮层，保留选区供滚回后恢复。
 fn toolbar_window_position(
     selection: Bounds<Pixels>,
     horizontal_bounds: Bounds<Pixels>,
-    viewport: Size<Pixels>,
+    viewport: Bounds<Pixels>,
     attached_surface_height: f32,
     expanded_block_type_width: Option<f32>,
-) -> ToolbarPosition {
-    let viewport_width = f32::from(viewport.width);
-    let viewport_height = f32::from(viewport.height);
+) -> Option<ToolbarPosition> {
+    let visible_selection = selection.intersect(&viewport);
+    if visible_selection.size.width <= px(0.0) || visible_selection.size.height <= px(0.0) {
+        return None;
+    }
+    let viewport_left = f32::from(viewport.left());
+    let viewport_right = f32::from(viewport.right());
+    let viewport_top = f32::from(viewport.top());
+    let viewport_bottom = f32::from(viewport.bottom());
+    let safe_left = viewport_left + VIEWPORT_INSET;
+    let safe_right = viewport_right - VIEWPORT_INSET;
+    let safe_top = viewport_top + VIEWPORT_INSET;
+    let safe_bottom = viewport_bottom - VIEWPORT_INSET;
     let toolbar_width =
         selection_toolbar_width(horizontal_bounds, viewport, expanded_block_type_width);
-    let min_left = (f32::from(horizontal_bounds.left()) + VIEWPORT_INSET).max(VIEWPORT_INSET);
-    let right_edge = f32::from(horizontal_bounds.right()).min(viewport_width);
-    let max_left = (right_edge - toolbar_width - VIEWPORT_INSET).max(min_left);
-    let ideal_left = f32::from(selection.center().x) - toolbar_width / 2.0;
+    if safe_right - safe_left < toolbar_width || safe_bottom - safe_top < TOOLBAR_HEIGHT {
+        return None;
+    }
+
+    let line_left = (f32::from(horizontal_bounds.left()) + VIEWPORT_INSET).max(safe_left);
+    let line_right = f32::from(horizontal_bounds.right()).min(viewport_right) - VIEWPORT_INSET;
+    let line_max_left = line_right - toolbar_width;
+    let max_left = if line_max_left >= line_left {
+        line_max_left.min(safe_right - toolbar_width)
+    } else {
+        safe_right - toolbar_width
+    };
+    let min_left = if line_max_left >= line_left {
+        line_left
+    } else {
+        safe_left
+    };
+    let ideal_left = f32::from(visible_selection.center().x) - toolbar_width / 2.0;
     let left = ideal_left.clamp(min_left, max_left);
     let required_height = TOOLBAR_HEIGHT
         + if attached_surface_height > 0.0 {
@@ -217,32 +258,30 @@ fn toolbar_window_position(
         } else {
             0.0
         };
-    let available_above = (f32::from(selection.top()) - VIEWPORT_INSET).max(0.0);
-    let available_below =
-        (viewport_height - f32::from(selection.bottom()) - VIEWPORT_INSET).max(0.0);
+    let available_above = (f32::from(visible_selection.top()) - safe_top).max(0.0);
+    let available_below = (safe_bottom - f32::from(visible_selection.bottom())).max(0.0);
     let above = available_above >= required_height
         || (available_below < required_height && available_above > available_below);
     let top = if above {
-        f32::from(selection.top()) - TOOLBAR_HEIGHT - TOOLBAR_GAP
+        f32::from(visible_selection.top()) - TOOLBAR_HEIGHT - TOOLBAR_GAP
     } else {
-        f32::from(selection.bottom()) + TOOLBAR_GAP
-    };
-    ToolbarPosition { left, top, above }
+        f32::from(visible_selection.bottom()) + TOOLBAR_GAP
+    }
+    .clamp(safe_top, safe_bottom - TOOLBAR_HEIGHT);
+    Some(ToolbarPosition { left, top, above })
 }
 
+/// 让工具栏菜单与工具栏共享同一正文边界，避免菜单展开到其它窗格或窗口装饰上。
 fn attached_surface_placement(
     position: ToolbarPosition,
     surface_height: f32,
-    viewport_height: f32,
-    menu_bar_height: f32,
-    status_bar_height: f32,
+    viewport: Bounds<Pixels>,
 ) -> (bool, f32) {
-    let safe_top = menu_bar_height + DOCUMENT_TAB_STRIP_RESERVE + VIEWPORT_INSET;
-    let safe_bottom = viewport_height - status_bar_height - VIEWPORT_INSET;
+    let safe_top = f32::from(viewport.top()) + VIEWPORT_INSET;
+    let safe_bottom = f32::from(viewport.bottom()) - VIEWPORT_INSET;
     let available_above = (position.top - TOOLBAR_GAP - safe_top).max(0.0);
     let available_below = (safe_bottom - position.top - TOOLBAR_HEIGHT - TOOLBAR_GAP).max(0.0);
-    // 工具栏本身与附着浮层可能需要朝不同方向展开；以真实内容区两侧空间
-    // 决定方向并返回可用高度，避免窄窗口中越过标签栏或状态栏。
+    // 菜单与工具栏共享所属滚动面的裁剪范围，因此按该矩形两侧空间决定方向。
     let opens_above = available_above >= surface_height
         || (available_below < surface_height && available_above > available_below);
     let available_height = if opens_above {
@@ -254,9 +293,57 @@ fn attached_surface_placement(
 }
 
 impl Block {
+    /// 只保存有效的所属滚动范围；首次布局的零尺寸留给窗口兜底，避免隐藏正常工具栏。
+    pub(crate) fn set_selection_toolbar_viewport(&mut self, viewport: Option<Bounds<Pixels>>) {
+        let viewport =
+            viewport.filter(|bounds| bounds.size.width > px(0.0) && bounds.size.height > px(0.0));
+        if self.selection_toolbar_viewport != viewport {
+            self.selection_toolbar_viewport = viewport;
+        }
+    }
+
+    /// 绘制与快捷键共用同一位置判断，并保留“尚未测量”以兼容首次布局状态。
+    fn selection_toolbar_geometry(
+        &self,
+        window_viewport: Size<Pixels>,
+        language_id: &str,
+    ) -> SelectionToolbarGeometry {
+        let Some(selection) = self.active_range_or_cursor_bounds() else {
+            return SelectionToolbarGeometry::Unmeasured;
+        };
+        let Some(text_bounds) = self.last_bounds else {
+            return SelectionToolbarGeometry::Unmeasured;
+        };
+        let attached_surface_height = if self.selection_toolbar_type_menu_open {
+            312.0
+        } else if self.selection_toolbar_overflow_open {
+            OVERFLOW_MENU_HEIGHT
+        } else if self.selection_toolbar_link_input.is_some() {
+            42.0
+        } else {
+            0.0
+        };
+        let show_block_type = !self.is_table_cell() && self.editor_selection_range.is_none();
+        let expanded_block_type_width =
+            show_block_type.then(|| expanded_block_type_width(language_id));
+        let viewport = resolved_toolbar_viewport(self.selection_toolbar_viewport, window_viewport);
+
+        match toolbar_window_position(
+            selection,
+            text_bounds,
+            viewport,
+            attached_surface_height,
+            expanded_block_type_width,
+        ) {
+            Some(position) => SelectionToolbarGeometry::Positioned(position),
+            None => SelectionToolbarGeometry::Hidden,
+        }
+    }
+
     /// Closes only transient children of contextual editing UI. The text
     /// selection and base selection toolbar remain intact so an outside click
     /// can establish the next caret without silently discarding user state.
+    /// 浮层实体与焦点缓存同时释放，迟到回调不能把焦点归还给已关闭的输入。
     pub(crate) fn dismiss_contextual_editing_popovers(&mut self) -> bool {
         let had_transient = self.dismiss_slash_menu()
             || self.selection_toolbar_keyboard_active
@@ -267,6 +354,7 @@ impl Block {
         self.selection_toolbar_overflow_open = false;
         self.selection_toolbar_type_menu_open = false;
         self.selection_toolbar_link_input = None;
+        self.selection_toolbar_link_focus = None;
         self.selection_toolbar_link_range = None;
         self.selection_toolbar_link_had_target = false;
         had_transient

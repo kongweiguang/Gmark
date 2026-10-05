@@ -17,6 +17,8 @@ use footnote::footnote_group_shell;
 #[path = "view_parts/accessibility.rs"]
 mod accessibility;
 
+#[path = "view_parts/document_frame.rs"]
+mod document_frame;
 #[path = "view_parts/pane_lifecycle.rs"]
 mod pane_lifecycle;
 #[path = "view_parts/pane_migration.rs"]
@@ -27,6 +29,8 @@ mod pane_split;
 mod render_view;
 #[path = "view_parts/shared_events.rs"]
 mod shared_events;
+#[path = "view_parts/split_surface.rs"]
+mod split_surface;
 
 pub(super) fn submenu_panel_top(
     items: &[OwnedMenuItem],

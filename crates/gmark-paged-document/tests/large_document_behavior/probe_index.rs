@@ -59,6 +59,67 @@ fn probe_keeps_control_free_legacy_text_source_backed() {
     assert_eq!(probe.format, DocumentFormat::PlainText);
 }
 
+/// 区分探测样本截断与文件本身的 EOF 截断，仅前者可按 UTF-8 前缀处理。
+#[test]
+fn probe_recognizes_utf8_when_head_sample_cuts_a_multibyte_scalar() {
+    let dir = tempfile::tempdir().unwrap();
+    let sample_bytes = ProbeOptions::default().sample_bytes;
+
+    for scalar in ["é", "世", "😀"] {
+        let path = dir.path().join(format!("boundary-{}.txt", scalar.len()));
+        let scalar_bytes = scalar.as_bytes();
+        let mut bytes = vec![b'a'; sample_bytes - (scalar_bytes.len() - 1)];
+        bytes.extend_from_slice(scalar_bytes);
+        bytes.extend(std::iter::repeat_n(b'z', sample_bytes * 2));
+        fs::write(&path, bytes).unwrap();
+
+        let probe = probe_file(
+            &path,
+            ProbeOptions {
+                max_resident_bytes: 1,
+                ..ProbeOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            probe.encoding,
+            TextEncoding::Utf8 { bom: false },
+            "{scalar}"
+        );
+        assert_eq!(probe.strategy, OpenStrategy::Paged);
+    }
+}
+
+/// 文件真实 EOF 的不完整 UTF-8 仍须走编码回退，不能误判为完整 UTF-8。
+#[test]
+fn probe_does_not_accept_incomplete_utf8_at_eof_as_utf8() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("incomplete-eof.txt");
+    let mut bytes = vec![b'a'; 128];
+    bytes.extend_from_slice(&"😀".as_bytes()[..3]);
+    fs::write(&path, bytes).unwrap();
+
+    let probe = probe_file(&path, ProbeOptions::default()).unwrap();
+
+    assert!(matches!(probe.encoding, TextEncoding::Legacy(_)));
+}
+
+/// 样本内部的非法 UTF-8 字节仍须走现有编码回退，容忍范围仅限样本末尾。
+#[test]
+fn probe_does_not_accept_an_invalid_utf8_byte_inside_the_head_sample() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("invalid-inside-sample.txt");
+    let mut bytes = b"valid text before ".to_vec();
+    bytes.push(0xff);
+    bytes.extend_from_slice(b" and after\n");
+    fs::write(&path, bytes).unwrap();
+
+    let probe = probe_file(&path, ProbeOptions::default()).unwrap();
+
+    assert!(matches!(probe.encoding, TextEncoding::Legacy(_)));
+}
+
 #[test]
 fn full_index_scan_rejects_binary_bytes_hidden_between_probe_samples() {
     let dir = tempfile::tempdir().unwrap();

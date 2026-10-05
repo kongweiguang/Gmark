@@ -2,6 +2,41 @@
 
 use super::*;
 
+/// 行高只在排版环境相同的视图内可复用，避免旧字体度量污染虚拟窗口位置。
+#[derive(Clone)]
+pub(super) struct RowStrideLayoutIdentity {
+    theme: Arc<crate::theme::Theme>,
+    font_family: String,
+    content_width: f32,
+}
+
+impl RowStrideLayoutIdentity {
+    /// 保留主题 Arc 身份而非颜色值比较，确保任何主题排版参数变化都会失效缓存。
+    pub(super) fn new(
+        theme: Arc<crate::theme::Theme>,
+        font_family: String,
+        content_width: f32,
+    ) -> Self {
+        Self {
+            theme,
+            font_family,
+            content_width,
+        }
+    }
+
+    /// 半像素内的宽度抖动不改变排版；字体族或主题对象变化则必须重测行高。
+    pub(super) fn matches(
+        &self,
+        theme: &Arc<crate::theme::Theme>,
+        font_family: &str,
+        content_width: f32,
+    ) -> bool {
+        Arc::ptr_eq(&self.theme, theme)
+            && self.font_family == font_family
+            && (self.content_width - content_width).abs() <= 0.5
+    }
+}
+
 /// Link navigation request deferred until a `Window` is available.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PendingOpenLink {

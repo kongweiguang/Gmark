@@ -345,6 +345,64 @@ fn updates_windows_atomically_and_removes_paths_with_active_index_repair() -> Re
     Ok(())
 }
 
+/// 会话过滤必须把 Windows 盘符、设备前缀和 UNC 的同一路径视为同一排除目标。
+#[cfg(windows)]
+#[test]
+fn without_paths_matches_drive_and_unc_aliases_in_both_directions() {
+    let aliases = [
+        (r"C:\docs\selection.md", r"\\?\c:\docs\selection.md"),
+        (r"\\?\C:\docs\selection.md", "c:/docs/selection.md"),
+        (
+            r"\\server\share\docs\ime.md",
+            r"\\?\UNC\SERVER\share\docs\ime.md",
+        ),
+        (
+            r"\\?\UNC\server\share\docs\ime.md",
+            "//SERVER/share/docs/ime.md",
+        ),
+    ];
+
+    for (stored_path, excluded_path) in aliases {
+        let workspace = session(Uuid::new_v4(), stored_path, false);
+        assert!(
+            workspace
+                .without_paths(&[PathBuf::from(excluded_path)])
+                .is_none(),
+            "session path {stored_path:?} should match alias {excluded_path:?}"
+        );
+    }
+}
+
+/// Registry 清理使用与会话过滤相同的 Windows 路径身份规则，但保留其它窗口记录。
+#[cfg(windows)]
+#[test]
+fn remove_paths_matches_drive_and_unc_aliases_in_both_directions() -> Result<()> {
+    let (_temporary, store) = temporary_store()?;
+    let aliases = [
+        (r"C:\docs\selection.md", r"\\?\c:\docs\selection.md"),
+        (r"\\?\C:\docs\selection.md", "c:/docs/selection.md"),
+        (
+            r"\\server\share\docs\ime.md",
+            r"\\?\UNC\SERVER\share\docs\ime.md",
+        ),
+        (
+            r"\\?\UNC\server\share\docs\ime.md",
+            "//SERVER/share/docs/ime.md",
+        ),
+    ];
+
+    for (stored_path, excluded_path) in aliases {
+        let id = Uuid::new_v4();
+        store.upsert(&session(id, stored_path, false))?;
+        store.remove_paths(&[PathBuf::from(excluded_path)])?;
+        assert!(
+            store.read()?.iter().all(|workspace| workspace.id != id),
+            "registry path {stored_path:?} should be removed using alias {excluded_path:?}"
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn rejects_unknown_corrupt_and_over_limit_registries() -> Result<()> {
     let (_temporary, store) = temporary_store()?;

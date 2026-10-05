@@ -58,6 +58,15 @@ impl Block {
         self.ime_awaiting_end || self.ime_composition.is_some() || self.ime_reject_until_end
     }
 
+    /// Drops staged Source preedit on a shared-range conflict while rejecting native results until their terminal event.
+    pub(crate) fn reject_source_ime_conflict(&mut self, cx: &mut Context<Self>) {
+        if !self.has_ime_composition() {
+            return;
+        }
+        self.reject_stale_ime_composition();
+        cx.notify();
+    }
+
     /// Transfers only an uncommitted preedit to shared rebase; terminal-pending commits stay pinned.
     pub(crate) fn take_ime_composition(&mut self) -> Option<BlockImeComposition> {
         if self
@@ -131,6 +140,7 @@ impl Block {
         };
         self.ime_composition = Some(composition);
         self.ime_awaiting_end = true;
+        cx.emit(BlockEvent::ImeCompositionStarted);
         cx.notify();
     }
 
@@ -188,6 +198,7 @@ impl Block {
                 return true;
             };
             self.ime_composition = Some(composition);
+            cx.emit(BlockEvent::ImeCompositionStarted);
         }
 
         let Some(composition) = self.ime_composition.as_mut() else {

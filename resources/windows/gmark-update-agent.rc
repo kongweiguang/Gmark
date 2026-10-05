@@ -1,8 +1,8 @@
 // @author kongweiguang
 
 1 VERSIONINFO
-FILEVERSION 0,2,6,0
-PRODUCTVERSION 0,2,6,0
+FILEVERSION 0,2,9,0
+PRODUCTVERSION 0,2,9,0
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0x0L
 FILEOS 0x40004L
@@ -15,12 +15,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "kongweiguang\0"
             VALUE "FileDescription", "Gmark update feedback\0"
-            VALUE "FileVersion", "0.2.6\0"
+            VALUE "FileVersion", "0.2.9\0"
             VALUE "InternalName", "gmark-update-agent\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 kongweiguang\0"
             VALUE "OriginalFilename", "gmark-update-agent.exe\0"
             VALUE "ProductName", "Gmark\0"
-            VALUE "ProductVersion", "0.2.6\0"
+            VALUE "ProductVersion", "0.2.9\0"
         END
     END
     BLOCK "VarFileInfo"

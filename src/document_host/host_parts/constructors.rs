@@ -226,13 +226,12 @@ impl DocumentHost {
         view
     }
 
-    /// Move the view lease into a detached, pane-owned state. All host-local
-    /// workers are cancelled and the Controller view id is closed first.
+    /// 拆卸仅转移纯展示状态；待定位文字仍属于输入实体，必须先完成或复制恢复，不能随租约转移丢失。
     pub(crate) fn detach_view(
         &mut self,
         cx: &mut Context<Self>,
     ) -> Option<DetachedDocumentHostView> {
-        if self.saving || self.reloading {
+        if self.saving || self.reloading || self.has_pending_source_input() {
             return None;
         }
         let presentation = self.capture_presentation(cx);

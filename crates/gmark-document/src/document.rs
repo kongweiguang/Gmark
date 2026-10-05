@@ -2,6 +2,7 @@
 
 use std::{collections::VecDeque, fmt, ops::Range, sync::Arc};
 
+use gmark_document_core::TypingGroupId;
 use thiserror::Error;
 use zed_rope::Rope;
 
@@ -186,6 +187,14 @@ struct HistoryEntry {
     forward: Vec<TextEdit>,
     inverse: Vec<TextEdit>,
     format_patch: FormatPatch,
+    typing: Option<TypingHistorySpan>,
+}
+
+#[derive(Clone, Copy)]
+struct TypingHistorySpan {
+    group_id: TypingGroupId,
+    inserted_end: usize,
+    can_continue: bool,
 }
 
 /// 源码优先文档，负责 revision、transaction 和 undo/redo 历史。
@@ -196,6 +205,7 @@ pub struct SourceDocument {
     source_format: SourceFormat,
     undo: VecDeque<HistoryEntry>,
     redo: Vec<HistoryEntry>,
+    active_typing_group: Option<TypingGroupId>,
     history_limit: usize,
 }
 
@@ -217,6 +227,7 @@ impl SourceDocument {
             source_format,
             undo: VecDeque::new(),
             redo: Vec::new(),
+            active_typing_group: None,
             history_limit,
         }
     }
@@ -234,6 +245,7 @@ impl SourceDocument {
             source_format,
             undo: VecDeque::new(),
             redo: Vec::new(),
+            active_typing_group: None,
             history_limit,
         })
     }
@@ -243,19 +255,17 @@ impl SourceDocument {
         self.revision
     }
 
-    /// Set the externally coordinated revision after replacing a prepared
-    /// session. The replacement owns fresh history, so no old undo entry can
-    /// cross the revision boundary.
+    /// 安装外部协调版本时同时清空历史与输入组，禁止旧正文的分组跨会话边界。
     pub fn set_revision(&mut self, revision: Revision) {
         self.revision = revision;
         self.undo.clear();
         self.redo.clear();
+        self.break_typing_group();
     }
 
-    /// Advance the externally visible revision without recording a content
-    /// transaction.  Metadata-only changes (for example source encoding)
-    /// must invalidate stale writers while preserving the body undo history.
+    /// 元数据 revision 保留正文撤销项，但关闭输入组以免编码等命令夹入连续按键。
     pub fn advance_revision(&mut self) -> Result<Revision, DocumentError> {
+        self.break_typing_group();
         let next_revision = self.revision.next()?;
         self.revision = next_revision;
         Ok(next_revision)
@@ -333,6 +343,7 @@ impl SourceDocument {
         &mut self,
         format: SourceFormatSnapshot,
     ) -> Result<Option<DocumentSnapshot>, DocumentError> {
+        self.break_typing_group();
         let source = self.source.to_string();
         let Some(next_format) = SourceFormat::from_normalized(&source, format) else {
             return Ok(None);
@@ -357,6 +368,7 @@ impl SourceDocument {
             forward: Vec::new(),
             inverse: Vec::new(),
             format_patch,
+            typing: None,
         });
         self.redo.clear();
         Ok(Some(self.snapshot()))
@@ -367,6 +379,7 @@ impl SourceDocument {
         &mut self,
         ending: LineEnding,
     ) -> Result<Option<DocumentSnapshot>, DocumentError> {
+        self.break_typing_group();
         let Some(format_patch) = self.source_format.normalization_patch(ending) else {
             return Ok(None);
         };
@@ -377,6 +390,7 @@ impl SourceDocument {
             forward: Vec::new(),
             inverse: Vec::new(),
             format_patch,
+            typing: None,
         });
         self.redo.clear();
         Ok(Some(self.snapshot()))
@@ -402,45 +416,103 @@ impl SourceDocument {
         !self.redo.is_empty()
     }
 
-    /// 原子应用一组编辑并产生新 revision。
-    ///
-    /// 所有范围都基于 `base_revision`，必须按起始位置升序排列。方法在修改
-    /// Rope 前完成全部校验，因此失败不会留下部分写入。
+    /// 普通 transaction 总是结束 typing group；坐标校验和原子应用契约保持不变。
     pub fn apply_transaction(
         &mut self,
         transaction: Transaction,
     ) -> Result<DocumentSnapshot, DocumentError> {
+        self.apply_transaction_with_group(transaction, None)
+    }
+
+    /// 仅把 Controller 明确标记的连续输入组入同一撤销项，普通调用仍保持独立历史。
+    pub fn apply_typing_transaction(
+        &mut self,
+        transaction: Transaction,
+        group_id: TypingGroupId,
+    ) -> Result<DocumentSnapshot, DocumentError> {
+        self.apply_transaction_with_group(transaction, Some(group_id))
+    }
+
+    /// 组内仅合并单一替换后的相邻插入，避免通用事务组合改变格式与坐标语义。
+    fn apply_transaction_with_group(
+        &mut self,
+        transaction: Transaction,
+        group_id: Option<TypingGroupId>,
+    ) -> Result<DocumentSnapshot, DocumentError> {
         if transaction.base_revision != self.revision {
+            self.break_typing_group();
             return Err(DocumentError::StaleRevision {
                 expected: self.revision,
                 actual: transaction.base_revision,
             });
         }
 
-        validate_edits(&self.source, &transaction.edits)?;
+        if let Err(error) = validate_edits(&self.source, &transaction.edits) {
+            self.break_typing_group();
+            return Err(error);
+        }
         if transaction.edits.is_empty() {
+            self.break_typing_group();
             return Ok(self.snapshot());
         }
 
-        let next_revision = self.revision.next()?;
-        let inverse = build_inverse_edits(&self.source, &transaction.edits)?;
+        let next_revision = match self.revision.next() {
+            Ok(revision) => revision,
+            Err(error) => {
+                self.break_typing_group();
+                return Err(error);
+            }
+        };
+        let inverse = match build_inverse_edits(&self.source, &transaction.edits) {
+            Ok(inverse) => inverse,
+            Err(error) => {
+                self.break_typing_group();
+                return Err(error);
+            }
+        };
         let format_patch = self
             .source_format
             .build_patch(&self.source, &transaction.edits);
         apply_edits(&mut self.source, &transaction.edits);
         self.source_format.apply(&format_patch);
         self.revision = next_revision;
-        self.record_undo(HistoryEntry {
+        let typing =
+            group_id.and_then(|group_id| typing_span_for_edits(group_id, &transaction.edits));
+        let entry = HistoryEntry {
             forward: transaction.edits,
             inverse,
             format_patch,
-        });
+            typing,
+        };
+        if let Some(group_id) = group_id {
+            let merged = if self.active_typing_group == Some(group_id) {
+                self.undo
+                    .back()
+                    .and_then(|previous| merge_adjacent_typing_entry(previous, &entry, group_id))
+            } else {
+                None
+            };
+            if let Some(merged) = merged {
+                if let Some(previous) = self.undo.back_mut() {
+                    *previous = merged;
+                }
+            } else {
+                self.record_undo(entry);
+            }
+            self.active_typing_group = typing
+                .filter(|span| span.can_continue)
+                .map(|span| span.group_id);
+        } else {
+            self.break_typing_group();
+            self.record_undo(entry);
+        }
         self.redo.clear();
         Ok(self.snapshot())
     }
 
-    /// 撤销最近一组 transaction，并为撤销结果分配新 revision。
+    /// 撤销前关闭输入组，确保后续复用旧 ID 不能改写已撤销的历史边界。
     pub fn undo(&mut self) -> Result<Option<DocumentSnapshot>, DocumentError> {
+        self.break_typing_group();
         let Some(entry) = self.undo.back().cloned() else {
             return Ok(None);
         };
@@ -454,8 +526,9 @@ impl SourceDocument {
         Ok(Some(self.snapshot()))
     }
 
-    /// 重做最近撤销的一组 transaction，并为结果分配新 revision。
+    /// 重做保留合并后的单条事务，但关闭输入组以免新按键接回旧历史。
     pub fn redo(&mut self) -> Result<Option<DocumentSnapshot>, DocumentError> {
+        self.break_typing_group();
         let Some(entry) = self.redo.last().cloned() else {
             return Ok(None);
         };
@@ -469,6 +542,11 @@ impl SourceDocument {
         Ok(Some(self.snapshot()))
     }
 
+    /// 只关闭 typing 合并窗口，不清除可撤销内容。
+    pub fn break_typing_group(&mut self) {
+        self.active_typing_group = None;
+    }
+
     fn record_undo(&mut self, entry: HistoryEntry) {
         if self.history_limit == 0 {
             return;
@@ -478,6 +556,75 @@ impl SourceDocument {
         }
         self.undo.push_back(entry);
     }
+}
+
+/// 仅允许一处单行替换后继续合并，避免多编辑事务或换行格式变化跨输入组传播。
+fn typing_span_for_edits(group_id: TypingGroupId, edits: &[TextEdit]) -> Option<TypingHistorySpan> {
+    let [edit] = edits else {
+        return None;
+    };
+    Some(TypingHistorySpan {
+        group_id,
+        inserted_end: edit.range.start.checked_add(edit.replacement.len())?,
+        can_continue: !edit.replacement.is_empty()
+            && !edit.replacement.contains('\r')
+            && !edit.replacement.contains('\n'),
+    })
+}
+
+/// 合并组首替换和后续尾部插入，保留组首逆文和格式补丁供一次撤销恢复。
+fn merge_adjacent_typing_entry(
+    previous: &HistoryEntry,
+    next: &HistoryEntry,
+    group_id: TypingGroupId,
+) -> Option<HistoryEntry> {
+    let previous_typing = previous.typing?;
+    let next_typing = next.typing?;
+    let [previous_forward] = previous.forward.as_slice() else {
+        return None;
+    };
+    let [previous_inverse] = previous.inverse.as_slice() else {
+        return None;
+    };
+    let [next_forward] = next.forward.as_slice() else {
+        return None;
+    };
+    let [next_inverse] = next.inverse.as_slice() else {
+        return None;
+    };
+    if previous_typing.group_id != group_id
+        || next_typing.group_id != group_id
+        || !previous_typing.can_continue
+        || !next_typing.can_continue
+        || !next_forward.range.is_empty()
+        || next_forward.replacement.is_empty()
+        || !next_inverse.replacement.is_empty()
+        || next_forward.range.start != previous_typing.inserted_end
+        || next_inverse.range != (next_forward.range.start..next_typing.inserted_end)
+    {
+        return None;
+    }
+    let combined_len = previous_forward
+        .replacement
+        .len()
+        .checked_add(next_forward.replacement.len())?;
+    let combined_end = previous_forward.range.start.checked_add(combined_len)?;
+    let mut replacement = String::with_capacity(combined_len);
+    replacement.push_str(&previous_forward.replacement);
+    replacement.push_str(&next_forward.replacement);
+
+    Some(HistoryEntry {
+        forward: vec![TextEdit::new(
+            previous_forward.range.clone(),
+            Arc::<str>::from(replacement),
+        )],
+        inverse: vec![TextEdit::new(
+            previous_forward.range.start..combined_end,
+            previous_inverse.replacement.clone(),
+        )],
+        format_patch: previous.format_patch.clone(),
+        typing: Some(next_typing),
+    })
 }
 
 /// 文档 transaction 校验或执行错误。

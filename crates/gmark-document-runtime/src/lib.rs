@@ -516,8 +516,10 @@ impl DocumentStore {
         }
     }
 
+    /// 普通事务保持单独撤销边界；即使 revision 已过期也先关闭后端输入组。
     fn apply_transaction(&mut self, transaction: &Transaction) -> Result<(), SessionEditError> {
         if transaction.base_revision != self.revision() {
+            self.break_typing_group();
             return Err(SessionEditError::Edit(EditError::StaleRevision {
                 expected: self.revision(),
                 actual: transaction.base_revision,
@@ -528,6 +530,37 @@ impl DocumentStore {
                 .apply_transaction(transaction)
                 .map_err(SessionEditError::Resident),
             Self::Paged(document) => apply_paged_transaction(document, transaction),
+        }
+    }
+
+    /// 只让 Controller 明确批准的 transaction 参与连续输入撤销组。
+    fn apply_typing_transaction(
+        &mut self,
+        transaction: &Transaction,
+        group_id: gmark_document_core::TypingGroupId,
+    ) -> Result<(), SessionEditError> {
+        if transaction.base_revision != self.revision() {
+            self.break_typing_group();
+            return Err(SessionEditError::Edit(EditError::StaleRevision {
+                expected: self.revision(),
+                actual: transaction.base_revision,
+            }));
+        }
+        match self {
+            Self::Resident(document) => document
+                .apply_typing_transaction(transaction, group_id)
+                .map_err(SessionEditError::Resident),
+            Self::Paged(document) => {
+                apply_paged_typing_transaction(document, transaction, group_id)
+            }
+        }
+    }
+
+    /// 关闭两类后端的输入合并资格，同时保留已有 undo/redo 项。
+    fn break_typing_group(&mut self) {
+        match self {
+            Self::Resident(document) => document.source_document_mut().break_typing_group(),
+            Self::Paged(document) => document.break_typing_group(),
         }
     }
 }
@@ -649,6 +682,17 @@ fn apply_paged_transaction(
 ) -> Result<(), SessionEditError> {
     document
         .apply_transaction(transaction)
+        .map_err(|error| SessionEditError::Paged(error.to_string()))
+}
+
+/// 把 Controller 核准的文字输入组送入 PieceTree 历史，沿用普通 Paged stale 校验。
+fn apply_paged_typing_transaction(
+    document: &mut PagedDocument,
+    transaction: &Transaction,
+    group_id: gmark_document_core::TypingGroupId,
+) -> Result<(), SessionEditError> {
+    document
+        .apply_typing_transaction(transaction, group_id)
         .map_err(|error| SessionEditError::Paged(error.to_string()))
 }
 

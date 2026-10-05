@@ -196,7 +196,7 @@ impl Block {
             .all(|fragment| fragment.link.as_ref() == Some(first_link))
     }
 
-    /// 链接标签编辑维持既有投影选区，不借用普通标记输入的闭合判断。
+    /// 链接标签维持既有投影选区；纯链接快速路径也须先拒绝只读，避免绕过 title 写边界。
     fn apply_link_projection_edit(
         &mut self,
         link_run: &ExpandedLinkRun,
@@ -206,6 +206,9 @@ impl Block {
         mark_inserted_text: bool,
         cx: &mut Context<Self>,
     ) {
+        if self.is_read_only() {
+            return;
+        }
         let local_visible_range = visible_range.start - link_run.display_range.start
             ..visible_range.end - link_run.display_range.start;
         let local_display_text = self.display_text()[link_run.display_range.clone()].to_string();
@@ -486,6 +489,7 @@ impl Block {
     /// updating the render cache, cursor, and selection state.  Emits
     /// [`BlockEvent::Changed`] if the kind or title actually changed.
     /// 标记被解析吸收时需要重建投影，但原有闭合符仍在光标右侧时必须留在样式内。
+    /// 只读在真正改动 title 前再次校验，阻止迟到浮层提交先污染投影再被上层拒绝。
     pub(in super::super) fn apply_title_edit(
         &mut self,
         next_title: InlineTextTree,
@@ -497,6 +501,9 @@ impl Block {
         caret_before_existing_closer: bool,
         cx: &mut Context<Self>,
     ) {
+        if self.is_read_only() {
+            return;
+        }
         let old_kind = self.record.kind.clone();
         let old_title = self.record.title.clone();
         let old_title_was_empty = old_title.visible_text().is_empty();
@@ -607,7 +614,6 @@ impl Block {
         if self.kind().is_separator() && !self.uses_raw_text_editing() {
             return;
         }
-        crate::perf::begin_input_mutation();
 
         let inserted_attributes = self.replacement_attributes_for_visible_range(&visible_range);
 

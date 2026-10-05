@@ -54,24 +54,6 @@ impl DocumentHost {
         text_encoding_label(&self.probe.encoding)
     }
 
-    pub(crate) fn cursor_position(&self, cx: &App) -> (usize, usize) {
-        if let Some(active) = &self.active_edit {
-            let block = active.block.read(cx);
-            let offset = block.selected_range.end.min(block.display_text().len());
-            let column = block.display_text()[..offset]
-                .chars()
-                .count()
-                .saturating_add(1);
-            return (active.line.saturating_add(1), column);
-        }
-        let line = self
-            .selected_lines
-            .as_ref()
-            .map_or(0, |selection| selection.start)
-            .saturating_add(1);
-        (line, 1)
-    }
-
     pub(super) fn accessibility_caret(&self, cx: &App) -> (u64, usize) {
         if let Some(active) = &self.active_edit {
             let block = active.block.read(cx);

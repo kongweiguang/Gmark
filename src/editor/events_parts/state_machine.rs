@@ -2,14 +2,15 @@
 
 use super::*;
 impl Editor {
-    /// Handles all block-originated editor events against the current cached
-    /// visible-order snapshot.
+    /// 共享写入与历史捕获先由 preflight 收口；结构操作自身也捕获历史，空段插入不能依赖文字 Changed。
+    /// 可见顺序使用事件前快照，避免中途重查导致目标漂移。
     pub(crate) fn on_block_event(
         &mut self,
         block: Entity<super::Block>,
         event: &BlockEvent,
         cx: &mut Context<Self>,
     ) {
+        let _trace = crate::perf::span("block_event_sync");
         if self.handle_block_event_preflight(&block, event, cx) {
             return;
         }
@@ -99,6 +100,7 @@ impl Editor {
                 let Some(location) = self.document.find_block_location(block.entity_id()) else {
                     return;
                 };
+                // 文字拆分携带块级输入前捕获；纯结构入口在这里建立同一个历史边界。
                 if !source_already_mutated {
                     self.prepare_undo_capture(
                         crate::components::UndoCaptureKind::NonCoalescible,
@@ -771,13 +773,16 @@ impl Editor {
             }
             BlockEvent::RequestRenderedSelectAll
             | BlockEvent::ImeCompositionEnded { .. }
+            | BlockEvent::ImeCompositionStarted
             | BlockEvent::ImeCompositionFinishFailed
             | BlockEvent::RequestClipboardFailure
             | BlockEvent::RequestImeInteraction { .. } => {}
             BlockEvent::RequestSlashCommand { .. }
             | BlockEvent::RequestEditingCommand { .. }
             | BlockEvent::RequestMoveBlock { .. } => {}
-            BlockEvent::PrepareUndo { .. } | BlockEvent::RequestJumpToTocHeading { .. } => {}
+            BlockEvent::PrepareUndo { .. }
+            | BlockEvent::PrepareUndoFromSourceSnapshot { .. }
+            | BlockEvent::RequestJumpToTocHeading { .. } => {}
         }
     }
 }

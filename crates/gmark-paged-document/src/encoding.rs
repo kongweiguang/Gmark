@@ -158,6 +158,7 @@ impl EncodedSavePlan {
         self.save_atomic_inner(document, path.as_ref(), None, cancellation)
     }
 
+    /// 将取消令牌传入最终替换阶段，避免 Windows 锁等待后提交过期的范围导出。
     pub fn save_range_atomic_as_cancellable(
         &self,
         document: &PieceDocument,
@@ -192,11 +193,12 @@ impl EncodedSavePlan {
         if cancellation.is_cancelled() {
             return Err(PagedDocumentError::Cancelled);
         }
-        crate::source::persist_temporary(temporary, path)?;
+        crate::source::persist_temporary(temporary, path, cancellation)?;
         crate::source::sync_parent_directory(parent)?;
         FileSource::open(path)?.identity()
     }
 
+    /// 同一取消令牌覆盖原子替换退避，因为锁等待仍属于本次保存事务。
     fn save_atomic_inner(
         &self,
         document: &PieceDocument,
@@ -235,7 +237,7 @@ impl EncodedSavePlan {
         if cancellation.is_cancelled() {
             return Err(PagedDocumentError::Cancelled);
         }
-        crate::source::persist_temporary(temporary, path)?;
+        crate::source::persist_temporary(temporary, path, cancellation)?;
         crate::source::sync_parent_directory(parent)?;
         FileSource::open(path)?.identity()
     }

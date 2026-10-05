@@ -1,6 +1,6 @@
 // @author kongweiguang
 
-/// 大文件沿用标准编辑壳与当前平台历史键位；测试同时锁定虚拟化、保存和重做后的脏状态。
+/// 固定初始主题，避免用户配色影响切换断言；同时锁定标准壳、虚拟化、保存与历史状态。
 #[gpui::test]
 async fn large_document_uses_the_standard_editor_shell(cx: &mut TestAppContext) {
     init_editor_test_app(cx);
@@ -22,6 +22,16 @@ async fn large_document_uses_the_standard_editor_shell(cx: &mut TestAppContext) 
     let source = gmark_paged_document::FileSource::open(&path).expect("large document source");
     let (editor, visual) = cx.add_window_view(move |_window, cx| {
         Editor::from_source_backed_file(cx, path, probe, source)
+    });
+    visual.update(|_window, cx| {
+        let platform_appearance = cx.window_appearance();
+        cx.update_global::<ThemeManager, _>(|manager, _cx| {
+            manager.set_theme_preference(
+                ThemeAppearance::Dark,
+                ThemePalette::Xcode,
+                platform_appearance,
+            )
+        });
     });
 
     for viewport in [size(px(1180.0), px(780.0)), size(px(720.0), px(520.0))] {
@@ -234,7 +244,7 @@ async fn large_document_uses_the_standard_editor_shell(cx: &mut TestAppContext) 
     visual.run_until_parked();
     assert_eq!(
         large_view.read_with(visual, |view, cx| view.cursor_position(cx)),
-        (400, 1)
+        Some((400, 1))
     );
     visual.simulate_keystrokes("enter");
     visual.run_until_parked();

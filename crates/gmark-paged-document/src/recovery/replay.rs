@@ -27,9 +27,18 @@ pub fn replay_paged_recovery(
     let mut document = PieceDocument::open(prepared_source.source().clone(), index)?;
     for command in commands {
         match command {
-            PagedRecoveryCommand::Replace { range, chunks } => {
-                document.replace_text_chunks(range, chunks.iter().map(String::as_str))?;
-            }
+            PagedRecoveryCommand::Replace {
+                range,
+                chunks,
+                typing_group,
+            } => match typing_group {
+                Some(group_id) => document.replace_text_chunks_in_typing_group(
+                    range,
+                    chunks.iter().map(String::as_str),
+                    group_id,
+                )?,
+                None => document.replace_text_chunks(range, chunks.iter().map(String::as_str))?,
+            },
             PagedRecoveryCommand::Undo => {
                 if !document.undo() {
                     return Err(PagedDocumentError::Recovery(
@@ -269,6 +278,7 @@ fn consume_edit(
             chunk_index,
             chunk_count,
             text,
+            typing_group,
             selection: next_selection,
             view_mode: next_view_mode,
         } => {
@@ -298,6 +308,7 @@ fn consume_edit(
                     range: start..end,
                     chunk_count,
                     chunks,
+                    typing_group,
                     selection: next_selection.map(Into::into),
                     view_mode: next_view_mode,
                 });
@@ -308,6 +319,7 @@ fn consume_edit(
             if current.transaction != transaction
                 || current.range != (start..end)
                 || current.chunk_count != chunk_count
+                || current.typing_group != typing_group
                 || chunk_index as usize != current.chunks.len()
             {
                 return Ok(false);
@@ -322,6 +334,7 @@ fn consume_edit(
                 commands.push(PagedRecoveryCommand::Replace {
                     range: completed.range,
                     chunks: completed.chunks,
+                    typing_group: completed.typing_group,
                 });
             }
             Ok(true)

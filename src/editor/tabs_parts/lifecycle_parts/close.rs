@@ -59,7 +59,7 @@ impl Editor {
     /// The result deliberately contains only immutable metadata, leases, and
     /// resident sessions.  Host entities are created later on the UI thread,
     /// because GPUI entities must never cross the background executor boundary.
-    // 原因：关闭标签重开可能触发探测、正文读取或恢复日志扫描；把这些操作集中到后台才能让重开按钮和当前文档继续响应。
+    // 原因：重开在后台重新探测磁盘身份，关闭前的长度与编码可能已因保存而变化；仅保留原加载选项与安全 Source 意图。
     fn prepare_reopen_closed_tab(
         service: crate::app::document_service::DocumentService,
         closed: ClosedTabSnapshot,
@@ -149,6 +149,14 @@ impl Editor {
                 }
             }
             ClosedDocumentSource::Host { path, probe, .. } => {
+                let options = probe.options;
+                let force_safe_source = probe.force_safe_source;
+                let mut probe = service
+                    .probe_file(&path, loading, move |normalized, _policy| {
+                        gmark_paged_document::probe_file(normalized, options)
+                    })
+                    .map_err(|error| error.to_string())?;
+                probe.force_safe_source = force_safe_source;
                 let open = service
                     .open_document_host(&path, probe, loading, |normalized, probe, _| {
                         let source = gmark_paged_document::FileSource::open(normalized).map_err(
@@ -305,13 +313,13 @@ impl Editor {
         self.tabs.closed.insert(insert_at, closed);
     }
 
-    /// 活动标签关闭必须先收尾候选，dirty 决策只能读取提交后的共享状态。
+    /// 关闭等原候选和分页确认文字发布后再读取 dirty；待恢复文字不能随标签销毁。
     pub(in crate::editor) fn request_close_tab_index(
         &mut self,
         index: usize,
         cx: &mut Context<Self>,
     ) {
-        if self.has_active_ime_composition(cx) {
+        if self.has_active_ime_composition(cx) || self.has_pending_source_input_for_tab(index, cx) {
             if let Some(tab) = self.tabs.records.get(index).map(|tab| tab.id) {
                 self.queue_ime_operation(
                     crate::editor::ime_lifecycle::DeferredImeOperation::CloseTab(tab),
@@ -351,6 +359,7 @@ impl Editor {
         self.close_tab_index_without_prompt(index, true, cx);
     }
 
+    /// 活动标签关闭后旧输入句柄已失效，清除恢复目标；关闭非活动标签则保留当前编辑焦点。
     pub(super) fn close_tab_index_without_prompt(
         &mut self,
         index: usize,
@@ -374,6 +383,7 @@ impl Editor {
                 pinned: false,
                 snapshot: None,
             };
+            self.close_dialog_restore_input_focus = None;
             self.replace_document_from_markdown(String::new(), None, cx);
             self.schedule_workspace_session_save(cx);
             return true;
@@ -407,6 +417,7 @@ impl Editor {
         if keep_for_restore {
             self.push_closed_tab(closed, cx);
         }
+        self.close_dialog_restore_input_focus = None;
         self.install_tab_snapshot(target, cx);
         self.schedule_workspace_session_save(cx);
         true
@@ -564,12 +575,20 @@ impl Editor {
         self.switch_to_tab_index(target, cx);
     }
 
-    /// Cancels the visible close decision and invalidates its async save task
-    /// before any late completion can mutate pane state.
+    /// 鼠标与键盘取消立即恢复提示前的输入目标，避免取消后的同帧按键落到已关闭按钮。
     pub(in crate::editor) fn on_cancel_tab_close(
         &mut self,
         _: &ClickEvent,
-        _: &mut Window,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cancel_tab_close_dialog(window, cx);
+    }
+
+    /// 取消同步清理关闭意图并恢复当前仍挂载的输入面；成功关闭时则由卸载路径丢弃旧焦点。
+    pub(in crate::editor) fn cancel_tab_close_dialog(
+        &mut self,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.tabs.show_close_dialog = false;
@@ -577,6 +596,9 @@ impl Editor {
         self.tabs.close_others_keep = None;
         self.invalidate_pane_close_save(cx);
         self.pane_close_target = None;
+        if let Some(focus) = self.close_dialog_restore_input_focus.take() {
+            focus.focus(window);
+        }
         cx.stop_propagation();
         cx.notify();
     }

@@ -14,6 +14,12 @@ use gpui::*;
 
 use super::Editor;
 
+#[path = "close_parts/source_hosts.rs"]
+mod source_hosts;
+
+#[path = "close_parts/keyboard.rs"]
+mod keyboard;
+
 /// The close/quit policy consumes controller-owned identity and lease state,
 /// rather than a tab snapshot's cached dirty bit.  A single Editor can expose
 /// several views of one document, so the per-window count is kept alongside
@@ -34,7 +40,7 @@ impl EditorDocumentCloseState {
 
 impl Editor {
     /// Returns one authoritative state row per document in this window.  Pane
-    /// tabs (Markdown and source-backed hosts) are merged with legacy tabs by
+    /// tabs, root hosts and inactive hosts are merged with legacy tabs by
     /// DocumentId; no UI snapshot dirty flag participates in the result.
     pub(crate) fn document_close_states(&self, cx: &App) -> Vec<EditorDocumentCloseState> {
         let mut states = BTreeMap::<DocumentId, EditorDocumentCloseState>::new();
@@ -67,7 +73,16 @@ impl Editor {
                 add_source(&source);
             }
         }
-        for pane in self.pane_document_close_states(cx) {
+        let mut host_states = self.root_host_close_states(cx);
+        host_states.extend(self.pane_document_close_states(cx).into_iter().map(|pane| {
+            EditorDocumentCloseState {
+                document_id: pane.document_id,
+                dirty: pane.dirty,
+                global_lease_count: pane.global_lease_count,
+                window_lease_count: pane.window_view_count,
+            }
+        }));
+        for pane in host_states {
             let entry = states
                 .entry(pane.document_id)
                 .or_insert(EditorDocumentCloseState {
@@ -80,7 +95,7 @@ impl Editor {
             entry.global_lease_count = entry.global_lease_count.max(pane.global_lease_count);
             entry.window_lease_count = entry
                 .window_lease_count
-                .saturating_add(pane.window_view_count);
+                .saturating_add(pane.window_lease_count);
         }
 
         states.into_values().collect()
@@ -93,12 +108,9 @@ impl Editor {
         Some(workspace.tab(pane, tab)?.view().document_id())
     }
 
+    /// 关闭判断使用实际输入 Host 的身份，未知身份仍保留拦截，不能退回空 Markdown 适配器。
     fn active_last_lease_dirty(&self, cx: &App) -> bool {
-        let document_id = if let Some(document_id) = self.focused_pane_document_id(cx) {
-            document_id
-        } else if let Ok(document_id) = self.source_document.document_id() {
-            document_id
-        } else {
+        let Some(document_id) = self.active_close_document_id(cx) else {
             // A poisoned/partially mounted view cannot prove cleanliness;
             // fail closed and retain the unsaved-changes interception.
             return true;
@@ -121,6 +133,7 @@ impl Editor {
             )
     }
 
+    /// 隐藏 Source Host 和 Markdown 一样参与最后租约关窗提示，切回后复用原保存路径。
     fn activate_last_lease_dirty_for_window_close(&mut self, cx: &mut Context<Self>) -> bool {
         if self.active_last_lease_dirty(cx) {
             return true;
@@ -128,36 +141,13 @@ impl Editor {
         if self.pane_workspace.is_some() {
             return false;
         }
-        let target = self
-            .markdown_tab_sources()
-            .into_iter()
-            .find_map(|(index, source)| {
-                if index == self.active_tab_index() {
-                    return None;
-                }
-                let document_id = match source.document_id() {
-                    Ok(document_id) => document_id,
-                    Err(_) => {
-                        return source
-                            .try_is_dirty()
-                            .map_or(true, |dirty| dirty)
-                            .then_some(index);
-                    }
-                };
-                self.document_close_states(cx)
-                    .into_iter()
-                    .find(|state| state.document_id == document_id)
-                    .is_some_and(|state| state.dirty && state.closes_last_lease())
-                    .then_some(index)
-            });
+        let target = self.inactive_root_close_target(false, cx);
         target.is_some_and(|index| self.switch_to_tab_index(index, cx))
     }
 
+    /// Quit 按真实文档身份去重，不能让 Host 的兼容适配器成为另一个待保存文档。
     fn active_quit_dirty(&self, cx: &App) -> bool {
-        let Some(document_id) = self
-            .focused_pane_document_id(cx)
-            .or_else(|| self.source_document.document_id().ok())
-        else {
+        let Some(document_id) = self.active_close_document_id(cx) else {
             return true;
         };
         self.document_close_states(cx)
@@ -172,18 +162,17 @@ impl Editor {
             )
     }
 
+    /// 与提示使用同一身份登记退出意图，保证确认后能推进原 Quit 协调器。
     fn mark_quit_document_pending(&self, cx: &mut App) {
-        if let Some(document_id) = self
-            .focused_pane_document_id(cx)
-            .or_else(|| self.source_document.document_id().ok())
-        {
+        if let Some(document_id) = self.active_close_document_id(cx) {
             let _ = crate::app_menu::QuitCoordinator::mark_document_pending(cx, document_id);
         }
     }
 
     /// Activates the next dirty document for process quit.  Unlike explicit
     /// window close, every dirty DocumentId participates even while another
-    /// window still holds a lease; the coordinator deduplicates the prompt.
+    /// window still holds a lease; root Source hosts use the same inventory
+    /// and the coordinator deduplicates the prompt.
     fn activate_dirty_tab_for_quit(&mut self, cx: &mut Context<Self>) -> bool {
         if self.active_quit_dirty(cx) {
             self.mark_quit_document_pending(cx);
@@ -207,25 +196,7 @@ impl Editor {
             let _ = crate::app_menu::QuitCoordinator::mark_document_pending(cx, document_id);
             return true;
         }
-        let target = self
-            .markdown_tab_sources()
-            .into_iter()
-            .find_map(|(index, source)| {
-                if index == self.active_tab_index() {
-                    return None;
-                }
-                if !source.try_is_dirty().unwrap_or(true) {
-                    return None;
-                }
-                let document_id = match source.document_id() {
-                    Ok(document_id) => document_id,
-                    Err(_) => return Some(index),
-                };
-                if crate::app_menu::QuitCoordinator::is_document_handled(cx, document_id) {
-                    return None;
-                }
-                Some(index)
-            });
+        let target = self.inactive_root_close_target(true, cx);
         let switched = target.is_some_and(|index| self.switch_to_tab_index(index, cx));
         if switched {
             self.mark_quit_document_pending(cx);
@@ -502,7 +473,7 @@ impl Editor {
         }
     }
 
-    /// 系统关窗同样等待输入法终态，随后重走既有最后租约保存门禁。
+    /// 系统关窗等待候选与所有挂载视图的确认文字，随后按已提交正文执行最后租约保存门禁。
     pub(crate) fn on_window_should_close(
         &mut self,
         window: &mut Window,
@@ -519,17 +490,22 @@ impl Editor {
         should_close
     }
 
+    /// 应用退出与直接关窗共用确认文字门禁；续跑意图只在该输入等待结束后唤醒退出协调器。
     pub(crate) fn on_window_should_close_for_quit(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.defer_action_for_ime(&crate::components::QuitApplication, window, cx) {
+            return false;
+        }
         self.mark_explicit_window_close(false);
         self.last_selection_snapshot = self.capture_source_selection_snapshot(cx);
         self.persist_workspace_session_before_quit(cx);
         self.evaluate_window_should_close_for_quit(window, cx)
     }
 
+    /// Quit 提示保留实际输入焦点，并让模态层成为稳定的键盘目标。
     fn evaluate_window_should_close_for_quit(
         &mut self,
         window: &mut Window,
@@ -550,13 +526,16 @@ impl Editor {
         self.hide_info_dialog(cx);
         if !self.show_unsaved_changes_dialog {
             self.close_dialog_restore_focus = self.document.focused_block_entity_id(window, cx);
+            self.close_dialog_restore_input_focus = window.focused(cx);
             self.show_unsaved_changes_dialog = true;
-            window.blur();
+            self.close_dialog_keyboard_index = 2;
+            self.close_dialog_focus_handles[2].focus(window);
             cx.notify();
         }
         false
     }
 
+    /// 关窗提示先保存真实表面的焦点句柄；取消时恢复原输入，不改变其选区。
     fn evaluate_window_should_close(
         &mut self,
         window: &mut Window,
@@ -580,18 +559,30 @@ impl Editor {
         self.hide_info_dialog(cx);
         if !self.show_unsaved_changes_dialog {
             self.close_dialog_restore_focus = self.document.focused_block_entity_id(window, cx);
+            self.close_dialog_restore_input_focus = window.focused(cx);
             self.show_unsaved_changes_dialog = true;
-            window.blur();
+            self.close_dialog_keyboard_index = 2;
+            self.close_dialog_focus_handles[2].focus(window);
             cx.notify();
         }
 
         false
     }
 
+    /// 鼠标和 Esc 共用取消边界，避免只隐藏浮层却保留关窗、退出或更新意图。
     pub(crate) fn on_cancel_close_dialog(
         &mut self,
         _: &ClickEvent,
-        _window: &mut Window,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cancel_close_dialog(window, cx);
+    }
+
+    /// 取消恢复原编辑焦点与全部关闭协调状态；不丢弃正文或改写 dirty 基线。
+    pub(in crate::editor) fn cancel_close_dialog(
+        &mut self,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         crate::app_menu::abort_pending_quit(cx);
@@ -602,8 +593,12 @@ impl Editor {
         self.close_menu_bar(cx);
         self.hide_unsaved_changes_dialog(cx);
         self.restore_focus_after_close_dialog(cx);
+        if let Some(focus) = self.close_dialog_restore_input_focus.take() {
+            focus.focus(window);
+        }
     }
 
+    /// 丢弃失败继续保留模态键盘目标，不能把失败后的按键交给正文。
     pub(crate) fn on_discard_and_close(
         &mut self,
         _: &ClickEvent,
@@ -622,7 +617,7 @@ impl Editor {
         } else {
             self.show_unsaved_changes_dialog = true;
             self.close_dialog_restore_focus = None;
-            window.blur();
+            self.close_dialog_focus_handles[self.close_dialog_keyboard_index].focus(window);
             cx.notify();
         }
     }

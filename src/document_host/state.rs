@@ -51,6 +51,25 @@ pub(super) struct BoundedLineWindow {
 }
 
 impl BoundedLineWindow {
+    /// 后端 source_range 表示完整逻辑行；可写窗口只拥有已读取的正文及其实际换行，
+    /// 否则首次点击长行后一次输入会把未渲染的尾部当作替换范围删除。
+    pub(super) fn from_viewport(line: gmark_paged_document::ViewportLine) -> Self {
+        let replace_end = line
+            .content_range
+            .end
+            .saturating_add(line.ending.len() as u64)
+            .min(line.source_range.end);
+        let replace_range = line.content_range.start..replace_end;
+        Self::new(
+            line.content_range,
+            replace_range,
+            line.text,
+            line.ending,
+            line.leading_truncated,
+            line.trailing_truncated,
+        )
+    }
+
     pub(super) fn new(
         content_range: Range<u64>,
         replace_range: Range<u64>,

@@ -14,7 +14,7 @@ use std::sync::{Arc, MutexGuard};
 
 use gmark_document_core::{
     DocumentBackendKind, DocumentRevision, DocumentSnapshot, SourceSelection, TextEncoding,
-    Transaction,
+    Transaction, TypingGroupId,
 };
 use gmark_document_runtime::{
     ControllerError, DocumentCommand, DocumentHandle, DocumentLease, DocumentSaveSnapshot,
@@ -419,6 +419,26 @@ impl SharedDocument {
             selection_before,
             selection_after,
         })
+    }
+
+    /// 仅转发明确标记的连续 Source 输入组；历史合并边界仍由 Controller 校验 revision 与组 ID。
+    pub(crate) fn apply_typing_transaction(
+        &self,
+        transaction_id: TransactionId,
+        transaction: Transaction,
+        selection_before: SourceSelection,
+        selection_after: SourceSelection,
+        group_id: TypingGroupId,
+    ) -> Result<(), ControllerError> {
+        self.lock()?
+            .dispatch(DocumentCommand::ApplyTypingTransaction {
+                view_id: self.view_id,
+                transaction_id,
+                transaction,
+                selection_before,
+                selection_after,
+                group_id,
+            })
     }
 
     pub(crate) fn replace_range(

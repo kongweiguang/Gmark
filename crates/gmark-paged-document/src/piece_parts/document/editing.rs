@@ -4,6 +4,8 @@ use std::io::Read;
 use std::ops::Range;
 use std::sync::Arc;
 
+use gmark_document_core::TypingGroupId;
+
 use super::super::*;
 
 impl PieceDocument {
@@ -49,6 +51,26 @@ impl PieceDocument {
         range: Range<u64>,
         chunks: impl IntoIterator<Item = &'a str>,
     ) -> Result<(), PagedDocumentError> {
+        self.replace_text_chunks_with_group(range, chunks, None)
+    }
+
+    /// 以流式文本块恢复已持久化的 typing 组，同时保留 PieceTree 的组首撤销根。
+    pub fn replace_text_chunks_in_typing_group<'a>(
+        &mut self,
+        range: Range<u64>,
+        chunks: impl IntoIterator<Item = &'a str>,
+        group_id: TypingGroupId,
+    ) -> Result<(), PagedDocumentError> {
+        self.replace_text_chunks_with_group(range, chunks, Some(group_id))
+    }
+
+    /// 普通替换与恢复输入组共用范围校验和 PieceTree 安装，只在历史根处区分分组。
+    fn replace_text_chunks_with_group<'a>(
+        &mut self,
+        range: Range<u64>,
+        chunks: impl IntoIterator<Item = &'a str>,
+        group_id: Option<TypingGroupId>,
+    ) -> Result<(), PagedDocumentError> {
         if range.start > range.end || range.end > self.len {
             return Err(PagedDocumentError::InvalidRange {
                 start: range.start,
@@ -59,11 +81,18 @@ impl PieceDocument {
         if !self.is_char_boundary(range.start)? || !self.is_char_boundary(range.end)? {
             return Err(PagedDocumentError::InvalidUtf8Boundary);
         }
+        if group_id.is_none() {
+            self.break_typing_group();
+        }
         let mut replacement_len = 0u64;
+        let mut can_continue = true;
         let mut replacement_pieces = Vec::new();
         for chunk in chunks {
             if chunk.is_empty() {
                 continue;
+            }
+            if chunk.contains('\r') || chunk.contains('\n') {
+                can_continue = false;
             }
             replacement_len = replacement_len
                 .checked_add(chunk.len() as u64)
@@ -81,10 +110,38 @@ impl PieceDocument {
         next.append(PieceTree::from_iter(replacement_pieces));
         next.append(cursor.slice(self.len)?);
         drop(cursor);
-        self.record_undo_root(self.pieces.clone(), self.len);
+        let typing = match group_id {
+            Some(group_id) => Some(TypingHistorySpan {
+                group_id,
+                inserted_end: range
+                    .start
+                    .checked_add(replacement_len)
+                    .ok_or(PagedDocumentError::RangeTooLarge)?,
+                can_continue: can_continue && replacement_len > 0,
+            }),
+            None => None,
+        };
+        let continuing = group_id.and_then(|group_id| {
+            self.continuing_typing_span_for_range(
+                group_id,
+                &range,
+                replacement_len,
+                can_continue && replacement_len > 0,
+            )
+        });
+        if let Some(continuing) = continuing {
+            if let Some(entry) = self.undo.last_mut() {
+                entry.typing = Some(continuing);
+            }
+        } else {
+            self.record_undo_root(self.pieces.clone(), self.len, typing);
+        }
         self.redo.clear();
         self.pieces = next;
         self.len = self.len - (range.end - range.start) + replacement_len;
+        self.active_typing_group = typing
+            .filter(|span| span.can_continue)
+            .map(|span| span.group_id);
         Ok(())
     }
 
@@ -104,6 +161,7 @@ impl PieceDocument {
         if !self.is_char_boundary(range.start)? || !self.is_char_boundary(range.end)? {
             return Err(PagedDocumentError::InvalidUtf8Boundary);
         }
+        self.break_typing_group();
 
         const CHUNK_BYTES: usize = 1024 * 1024;
         let mut pending = Vec::with_capacity(CHUNK_BYTES + 4);
@@ -149,20 +207,39 @@ impl PieceDocument {
         next.append(PieceTree::from_iter(replacement_pieces));
         next.append(cursor.slice(self.len)?);
         drop(cursor);
-        self.record_undo_root(self.pieces.clone(), self.len);
+        self.record_undo_root(self.pieces.clone(), self.len, None);
         self.redo.clear();
         self.pieces = next;
         self.len = self.len - (range.end - range.start) + replacement_len;
         Ok(())
     }
 
-    /// 将基于同一 Source revision 的多个不相交编辑作为一个撤销事务提交。
-    /// 倒序应用可保持所有 range 都在原始字节坐标系中。
+    /// 将基于同一 Source revision 的多个不相交编辑作为独立撤销事务提交。
+    /// 倒序应用可保持所有 range 都在原始字节坐标系中，并关闭旧输入组。
     pub fn replace_text_batch(
         &mut self,
         edits: &[(Range<u64>, Arc<str>)],
     ) -> Result<(), PagedDocumentError> {
+        self.replace_text_batch_with_group(edits, None)
+    }
+
+    /// 为 Controller 已确认连续的 Source 输入复用组首 PieceTree 根。
+    pub fn replace_text_batch_in_typing_group(
+        &mut self,
+        edits: &[(Range<u64>, Arc<str>)],
+        group_id: TypingGroupId,
+    ) -> Result<(), PagedDocumentError> {
+        self.replace_text_batch_with_group(edits, Some(group_id))
+    }
+
+    /// 内部逐段替换产生的临时历史与断组均须复原，再按整个公开事务记录唯一撤销根。
+    fn replace_text_batch_with_group(
+        &mut self,
+        edits: &[(Range<u64>, Arc<str>)],
+        group_id: Option<TypingGroupId>,
+    ) -> Result<(), PagedDocumentError> {
         if edits.is_empty() {
+            self.break_typing_group();
             return Ok(());
         }
         let mut ordered = edits.to_vec();
@@ -195,45 +272,130 @@ impl PieceDocument {
         let original_len = self.len;
         let original_undo = self.undo.clone();
         let original_redo = self.redo.clone();
+        let original_typing_group = self.active_typing_group;
         for (range, replacement) in ordered.iter().rev() {
             if let Err(error) = self.replace_text(range.clone(), replacement) {
                 self.pieces = original_pieces;
                 self.len = original_len;
                 self.undo = original_undo;
                 self.redo = original_redo;
+                self.active_typing_group = original_typing_group;
                 return Err(error);
             }
         }
         self.undo = original_undo;
-        self.record_undo_root(original_pieces, original_len);
         self.redo.clear();
+        self.active_typing_group = original_typing_group;
+        if let Some(span) = group_id.and_then(|id| self.continuing_typing_span(id, &ordered)) {
+            if let Some(entry) = self.undo.last_mut() {
+                entry.typing = Some(span);
+            }
+        } else {
+            let typing = group_id.and_then(|id| typing_span_for_batch(id, &ordered));
+            self.record_undo_root(original_pieces, original_len, typing);
+        }
+        self.active_typing_group = group_id;
         Ok(())
     }
 
+    /// 撤销结束合并窗口，防止同一旧 ID 在撤销后重新接回该历史条目。
     pub fn undo(&mut self) -> bool {
-        let Some((pieces, len)) = self.undo.pop() else {
+        self.break_typing_group();
+        let Some(entry) = self.undo.pop() else {
             return false;
         };
-        self.redo.push((self.pieces.clone(), self.len));
-        self.pieces = pieces;
-        self.len = len;
+        self.redo.push(PieceHistoryEntry {
+            pieces: self.pieces.clone(),
+            len: self.len,
+            typing: entry.typing,
+        });
+        self.pieces = entry.pieces;
+        self.len = entry.len;
         true
     }
 
+    /// 重做保留撤销根元数据，但不让后续输入继续加入刚重做的历史组。
     pub fn redo(&mut self) -> bool {
-        let Some((pieces, len)) = self.redo.pop() else {
+        self.break_typing_group();
+        let Some(entry) = self.redo.pop() else {
             return false;
         };
-        self.record_undo_root(self.pieces.clone(), self.len);
-        self.pieces = pieces;
-        self.len = len;
+        self.record_undo_root(self.pieces.clone(), self.len, entry.typing);
+        self.pieces = entry.pieces;
+        self.len = entry.len;
         true
     }
 
-    fn record_undo_root(&mut self, pieces: PieceTree, len: u64) {
+    /// 单独打断分组而不改动 PieceTree 历史，供共享 Controller 处理视图边界。
+    pub(crate) fn break_typing_group(&mut self) {
+        self.active_typing_group = None;
+    }
+
+    fn continuing_typing_span(
+        &self,
+        group_id: TypingGroupId,
+        edits: &[(Range<u64>, Arc<str>)],
+    ) -> Option<TypingHistorySpan> {
+        let [(range, replacement)] = edits else {
+            return None;
+        };
+        self.continuing_typing_span_for_range(
+            group_id,
+            range,
+            replacement.len() as u64,
+            !replacement.is_empty() && !replacement.contains('\r') && !replacement.contains('\n'),
+        )
+    }
+
+    /// 只扩展同 ID 的单行相邻尾插，保持 replay 与实时事务使用相同的坐标门槛。
+    fn continuing_typing_span_for_range(
+        &self,
+        group_id: TypingGroupId,
+        range: &Range<u64>,
+        replacement_len: u64,
+        can_continue: bool,
+    ) -> Option<TypingHistorySpan> {
+        if self.active_typing_group != Some(group_id) || !can_continue || !range.is_empty() {
+            return None;
+        }
+        let previous = self.undo.last()?.typing?;
+        if previous.group_id != group_id
+            || !previous.can_continue
+            || range.start != previous.inserted_end
+        {
+            return None;
+        }
+        Some(TypingHistorySpan {
+            group_id,
+            inserted_end: range.start.checked_add(replacement_len)?,
+            can_continue: true,
+        })
+    }
+
+    fn record_undo_root(&mut self, pieces: PieceTree, len: u64, typing: Option<TypingHistorySpan>) {
         if self.undo.len() == DEFAULT_HISTORY_LIMIT {
             self.undo.remove(0);
         }
-        self.undo.push((pieces, len));
+        self.undo.push(PieceHistoryEntry {
+            pieces,
+            len,
+            typing,
+        });
     }
+}
+
+fn typing_span_for_batch(
+    group_id: TypingGroupId,
+    edits: &[(Range<u64>, Arc<str>)],
+) -> Option<TypingHistorySpan> {
+    let [(range, replacement)] = edits else {
+        return None;
+    };
+    Some(TypingHistorySpan {
+        group_id,
+        inserted_end: range.start.checked_add(replacement.len() as u64)?,
+        can_continue: !replacement.is_empty()
+            && !replacement.contains('\r')
+            && !replacement.contains('\n'),
+    })
 }

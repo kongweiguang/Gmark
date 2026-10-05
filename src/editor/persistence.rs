@@ -113,6 +113,7 @@ impl Editor {
         }
     }
 
+    /// 派生输入未提交时拒绝旧快照保存；成功输入已在区域事务中发布，保存继续沿用共享 Controller。
     pub(super) fn prepare_background_save(
         &mut self,
         _cx: &App,
@@ -123,6 +124,9 @@ impl Editor {
         )>,
         String,
     > {
+        if let Some(error) = self.document.source_commit_error() {
+            return Err(error.to_owned());
+        }
         // The shared Controller is the save authority even in rendered mode.
         // A completed block edit records the exact projection in
         // `pending_dirty_source`; publish that text before taking an
@@ -269,6 +273,7 @@ impl Editor {
 #[path = "persistence_parts/state_machine.rs"]
 mod state_machine;
 
+/// 比较 CRLF 与 LF 文本时只忽略行尾 CR，保留尾随空行语义且不复制全文。
 fn build_external_conflict_preview(
     path: &Path,
     local: &str,
@@ -278,8 +283,12 @@ fn build_external_conflict_preview(
 ) -> ExternalConflictPreview {
     let mut first_difference = None;
     if disk_error.is_none() {
-        let mut local_lines = local.split('\n');
-        let mut disk_lines = disk.split('\n');
+        let mut local_lines = local
+            .split('\n')
+            .map(|line| line.strip_suffix('\r').unwrap_or(line));
+        let mut disk_lines = disk
+            .split('\n')
+            .map(|line| line.strip_suffix('\r').unwrap_or(line));
         let mut line = 1usize;
         loop {
             match (local_lines.next(), disk_lines.next()) {

@@ -2,6 +2,9 @@
 
 use super::*;
 
+#[path = "resident_source_edit.rs"]
+mod resident_source_edit;
+
 fn selection_range_on_utf8_boundaries(
     text: &str,
     range: std::ops::Range<usize>,
@@ -240,7 +243,7 @@ impl Editor {
         })
     }
 
-    /// Maps a normalized selection only while its anchors and virtual projection match the source revision.
+    /// 只接收当前 revision 锚点，并按所属投影校验字节上限；resident 的规范跨度不能用原拼写长度截断。
     pub(in crate::editor) fn cross_block_source_range_for_normalized(
         &self,
         selection: NormalizedCrossBlockSelection,
@@ -260,7 +263,11 @@ impl Editor {
             if start.revision != revision || end.revision != revision {
                 return None;
             }
-            let source_len = self.source_document.len();
+            let source_len = if self.virtual_surface.is_some() {
+                self.source_document.len()
+            } else {
+                self.document.cached_markdown_text(cx).len()
+            };
             if start.byte_offset >= end.byte_offset || end.byte_offset > source_len {
                 return None;
             }
@@ -310,26 +317,6 @@ impl Editor {
             }
         }
         Some(lo..hi)
-    }
-
-    /// 常驻跨块命令共用源码重建边界，保证一次修改后表格与主投影同步；调用方负责只读和撤销门禁。
-    fn rebuild_after_cross_block_source_edit(&mut self, source: String, cx: &mut Context<Self>) {
-        self.sync_source_document_from_projection(&source);
-        match self.view_mode {
-            ViewMode::Rendered => {
-                self.rebuild_primary_projection_from_source(cx);
-            }
-            ViewMode::Source | ViewMode::Split => {
-                let block = Self::new_block(
-                    cx,
-                    crate::components::BlockRecord::paragraph(source.clone()),
-                );
-                block.update(cx, |block, _cx| block.set_source_document_mode());
-                self.document.replace_roots(vec![block], cx);
-                self.table_cells.clear();
-            }
-            ViewMode::Preview => {}
-        }
     }
 
     /// 跨块编辑可能同时覆盖多个虚拟区域，必须直接提交到 Rope 真值。
@@ -404,13 +391,6 @@ impl Editor {
         self.pending_dirty_source = None;
         self.render_row_cache = None;
 
-        let source_len = self.source_document.len();
-        if let Some(input_trace) = super::perf::take_input_mutation() {
-            input_trace.record_dirty_sync(source_len);
-            if self.pending_input_trace.is_none() {
-                self.pending_input_trace = Some(input_trace);
-            }
-        }
         if !self.document_dirty {
             self.document_dirty = true;
             self.pending_window_edited = true;
@@ -445,7 +425,7 @@ impl Editor {
         });
     }
 
-    /// Replaces the selected source range as one undoable edit after checking its writable surface.
+    /// 常驻 Live 仅授权所属原源码区域；其它表面保持自身坐标与事务，失败保留选区和历史。
     pub(in crate::editor) fn replace_cross_block_selection_with_text(
         &mut self,
         new_text: &str,
@@ -467,12 +447,29 @@ impl Editor {
             return false;
         };
 
+        if self.view_mode == ViewMode::Rendered && self.virtual_surface.is_none() {
+            return self.replace_resident_cross_block_selection(
+                selection,
+                source_range,
+                new_text,
+                selected_range_relative,
+                mark_inserted_text,
+                undo_kind,
+                cx,
+            );
+        }
+
+        let virtual_edit = self.virtual_surface.is_some() && self.view_mode == ViewMode::Rendered;
+        let mut resident_source = (!virtual_edit).then(|| self.current_document_source(cx));
+        if resident_source
+            .as_ref()
+            .is_some_and(|source| source.get(source_range.clone()).is_none())
+        {
+            return false;
+        }
+        let start = source_range.start;
+        let end = source_range.end;
         self.prepare_undo_capture(undo_kind, cx);
-        let source_len = self.source_document.len();
-        let start = source_range.start.min(source_len);
-        let end = source_range.end.min(source_len);
-        self.cross_block_selection = None;
-        self.cross_block_drag = None;
 
         let inserted_start = start;
         let inserted_end = inserted_start + new_text.len();
@@ -485,17 +482,17 @@ impl Editor {
         let marked_source_range =
             (mark_inserted_text && !new_text.is_empty()).then_some(inserted_start..inserted_end);
 
-        let virtual_edit = self.virtual_surface.is_some() && self.view_mode == ViewMode::Rendered;
         if virtual_edit {
             if !self.apply_virtual_cross_block_source_edit(start..end, new_text, cx) {
                 self.pending_virtual_undo_selection = None;
                 return false;
             }
-        } else {
-            let mut source = self.current_document_source(cx);
+        } else if let Some(mut source) = resident_source.take() {
             source.replace_range(start..end, new_text);
             self.rebuild_after_cross_block_source_edit(source, cx);
         }
+        self.cross_block_selection = None;
+        self.cross_block_drag = None;
         self.apply_selection_snapshot_in_current_mode(
             &UndoSelectionSnapshot::from_range(selected_source_range, false),
             cx,
@@ -520,7 +517,7 @@ impl Editor {
         self.cross_block_selected_markdown_for_surface(self.active_selection_surface, cx)
     }
 
-    /// Builds selected Markdown from projection-local blocks; only Main needs canonical source maps.
+    /// 按所属投影构造 Markdown；纯表格全文选区须保留原子内容，才能给富文本剪贴板提供完整表格。
     fn cross_block_selected_markdown_for_surface(
         &self,
         surface: crate::editor::selection_surface::SelectionSurface,
@@ -579,7 +576,16 @@ impl Editor {
             // must serialize those blocks too, including boundary ones, not
             // just interior. Otherwise cut would drop a table from the clipboard
             // that it nonetheless removed from the document.
-            let include_atomic = len == 0 && start_index != end_index;
+            let include_atomic = len == 0
+                && (start_index != end_index
+                    || (block.kind() == BlockKind::Table
+                        && self.cross_block_selection_fully_covers_table_for_surface(
+                            surface,
+                            selection,
+                            index,
+                            entity.entity_id(),
+                            cx,
+                        )));
             if range.is_empty() && !include_atomic {
                 continue;
             }
@@ -685,7 +691,7 @@ impl Editor {
             .unwrap_or_default()
     }
 
-    /// Restricts cross-block deletion to the writable Main selection before touching source or history.
+    /// 常驻删除复用原区域写入授权；其它表面先验证 UTF-8 范围，避免全文表格留下残片或失败清选区。
     pub(super) fn delete_cross_block_selection(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.document_surface_is_editable()
             || self.active_selection_surface
@@ -702,25 +708,40 @@ impl Editor {
         if source_range.is_empty() {
             return false;
         }
-
-        self.prepare_undo_capture(UndoCaptureKind::NonCoalescible, cx);
-        let source_len = self.source_document.len();
-        let start = source_range.start.min(source_len);
-        let end = source_range.end.min(source_len);
-        self.cross_block_selection = None;
-        self.cross_block_drag = None;
+        if self.view_mode == ViewMode::Rendered && self.virtual_surface.is_none() {
+            return self.replace_resident_cross_block_selection(
+                selection,
+                source_range,
+                "",
+                None,
+                false,
+                UndoCaptureKind::NonCoalescible,
+                cx,
+            );
+        }
 
         let virtual_edit = self.virtual_surface.is_some() && self.view_mode == ViewMode::Rendered;
+        let mut resident_source = (!virtual_edit).then(|| self.current_document_source(cx));
+        if resident_source
+            .as_ref()
+            .is_some_and(|source| source.get(source_range.clone()).is_none())
+        {
+            return false;
+        }
+        let start = source_range.start;
+        let end = source_range.end;
+        self.prepare_undo_capture(UndoCaptureKind::NonCoalescible, cx);
         if virtual_edit {
             if !self.apply_virtual_cross_block_source_edit(start..end, "", cx) {
                 self.pending_virtual_undo_selection = None;
                 return false;
             }
-        } else {
-            let mut source = self.current_document_source(cx);
+        } else if let Some(mut source) = resident_source.take() {
             source.replace_range(start..end, "");
             self.rebuild_after_cross_block_source_edit(source, cx);
         }
+        self.cross_block_selection = None;
+        self.cross_block_drag = None;
 
         self.apply_selection_snapshot_in_current_mode(
             &UndoSelectionSnapshot::collapsed(start, gmark_document_core::SourceAffinity::Before),

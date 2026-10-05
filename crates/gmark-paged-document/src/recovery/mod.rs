@@ -5,7 +5,7 @@
 use std::ops::Range;
 use std::path::PathBuf;
 
-use gmark_document_core::{SourceSelection, TextEncoding};
+use gmark_document_core::{SourceSelection, TextEncoding, TypingGroupId};
 
 use crate::{PieceDocument, PreparedUtf8Source};
 
@@ -46,6 +46,7 @@ pub enum PagedRecoveryCommand {
     Replace {
         range: Range<u64>,
         chunks: Vec<String>,
+        typing_group: Option<TypingGroupId>,
     },
     Undo,
     Redo,

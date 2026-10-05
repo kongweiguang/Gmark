@@ -15,6 +15,7 @@ fn open_document(contents: &[u8]) -> (tempfile::TempDir, PieceDocument) {
 }
 
 #[test]
+/// 历史项增加输入组元数据后仍必须复用精确的持久根，不能为了分组复制整棵树。
 fn undo_and_redo_keep_exact_persistent_root_snapshots() {
     let (_dir, mut document) = open_document(b"alpha\nbeta\ngamma");
     let pristine_root = root_identity(&document.pieces);
@@ -23,13 +24,16 @@ fn undo_and_redo_keep_exact_persistent_root_snapshots() {
     let edited_root = root_identity(&document.pieces);
     assert_ne!(edited_root, pristine_root);
     assert_eq!(
-        root_identity(&document.undo.last().unwrap().0),
+        root_identity(&document.undo.last().unwrap().pieces),
         pristine_root
     );
 
     assert!(document.undo());
     assert_eq!(root_identity(&document.pieces), pristine_root);
-    assert_eq!(root_identity(&document.redo.last().unwrap().0), edited_root);
+    assert_eq!(
+        root_identity(&document.redo.last().unwrap().pieces),
+        edited_root
+    );
     assert!(document.redo());
     assert_eq!(root_identity(&document.pieces), edited_root);
 }

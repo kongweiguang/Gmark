@@ -5,7 +5,7 @@ use crate::theme::workbench::SurfaceKind;
 use crate::ui::visual_preferences::VisualPreferencesManager;
 
 impl Editor {
-    /// Renders controls without allowing a click to detach a live IME composition owner.
+    /// Keeps panel controls from detaching an IME owner and handles Escape's action before child Blocks swallow it.
     pub(in crate::editor) fn render_find_panel(
         &self,
         theme: &Theme,
@@ -24,6 +24,19 @@ impl Editor {
         let solid_material = palette.material(SurfaceKind::Solid, visual_preferences);
         let d = &theme.dimensions;
         let t = &theme.typography;
+        let panel_dismiss_action = cx.listener(
+            |editor, _: &crate::components::DismissTransientUi, window, cx| {
+                if editor.find_panel.is_none() {
+                    return;
+                }
+                if editor.has_active_ime_composition(cx) {
+                    cx.stop_propagation();
+                    return;
+                }
+                editor.close_find_panel(window, cx);
+                cx.stop_propagation();
+            },
+        );
         let count = if let Some(error) = state.error.as_ref() {
             error.clone()
         } else if state.matches.is_empty() {
@@ -342,6 +355,7 @@ impl Editor {
                 .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
                     cx.stop_propagation();
                 })
+                .on_action(panel_dismiss_action)
                 .child(find_row)
                 .children(replace_row)
                 .into_any_element(),

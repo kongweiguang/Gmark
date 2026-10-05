@@ -76,6 +76,7 @@ impl Editor {
         self.new_tab_from_snapshot(detached.snapshot, cx)
     }
 
+    /// 拖出标签没有可重放的跨窗口目标；待提交输入期间保留原实体，并让用户在收尾后重试。
     pub(crate) fn detach_tab_by_id(
         &mut self,
         id: uuid::Uuid,
@@ -89,6 +90,10 @@ impl Editor {
             .records
             .iter()
             .position(|record| record.id == id)?;
+        if self.has_active_ime_composition(cx) || self.has_pending_source_input_for_tab(index, cx) {
+            self.show_pane_notice("文字仍在定位或恢复，请稍后重试拖出标签", cx);
+            return None;
+        }
         let snapshot = if index == self.tabs.active {
             let snapshot = self.capture_active_tab(cx);
             self.tabs.records.remove(index);
@@ -264,13 +269,16 @@ impl Editor {
         cx.notify();
     }
 
-    /// 标签安装会拆卸输入实体；候选终态前只记录意图，不抓取带预编辑的快照。
+    /// 标签安装会拆卸输入实体；候选与分页文字发布前仅保留目标身份，不抓取不完整快照。
     pub(in crate::editor) fn switch_to_tab_index(
         &mut self,
         target: usize,
         cx: &mut Context<Self>,
     ) -> bool {
-        if target != self.tabs.active && self.has_active_ime_composition(cx) {
+        if target != self.tabs.active
+            && (self.has_active_ime_composition(cx)
+                || self.has_pending_source_input_for_active_target(cx))
+        {
             if let Some(tab) = self.tabs.records.get(target).map(|tab| tab.id) {
                 self.queue_ime_operation(
                     crate::editor::ime_lifecycle::DeferredImeOperation::SwitchTab(tab),

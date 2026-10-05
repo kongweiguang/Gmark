@@ -26,7 +26,7 @@ pub(super) struct NormalizedCrossBlockSelection {
 }
 
 impl Editor {
-    /// 源码锚点必须与显示的完整字素范围一致；已卸载端点保留当前 revision 的原锚点。
+    /// 源码锚点与字素边界一致；纯表格的零文字端点只有完整、当前源码跨度证明时才代表全文选择。
     pub(super) fn normalized_cross_block_selection_for_surface(
         &self,
         surface: SelectionSurface,
@@ -105,10 +105,29 @@ impl Editor {
         } else {
             source_end
         };
+        let same_display_endpoint =
+            start_index.is_some() && start_index == end_index && start.offset == end.offset;
+        let atomic_document_is_fully_selected = same_display_endpoint
+            && stored_anchors.is_some()
+            && visible.len() == 1
+            && start.offset == 0
+            && self
+                .cross_block_selection_entity_for_surface(start.entity_id, surface)
+                .is_some_and(|entity| entity.read(cx).kind() == BlockKind::Table)
+            && source_start.zip(source_end).is_some_and(|(start, end)| {
+                let source_len = if surface == SelectionSurface::SplitPreview
+                    || self.virtual_surface.is_some()
+                {
+                    self.source_document.len()
+                } else {
+                    self.document.cached_markdown_text(cx).len()
+                };
+                start.byte_offset == 0 && end.byte_offset == source_len && source_len > 0
+            });
         if source_start
             .zip(source_end)
             .is_some_and(|(start, end)| start.byte_offset == end.byte_offset)
-            || (start_index.is_some() && start_index == end_index && start.offset == end.offset)
+            || (same_display_endpoint && !atomic_document_is_fully_selected)
         {
             return None;
         }

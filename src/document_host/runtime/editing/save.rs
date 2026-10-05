@@ -2,11 +2,12 @@
 
 //! Atomic save and post-save session reconciliation.
 
+use super::coordinator::RecoveredAutoSaveGate;
 use super::*;
 use std::io::Write as _;
 
 impl DocumentHost {
-    /// Waits for the Source input target's native terminal event before snapshotting the document for save.
+    /// 先等待原生组合输入结束，再从共享正文捕获快照；保存不应抢走仍有效的 Source 行焦点。
     pub(crate) fn on_save_document(
         &mut self,
         _: &SaveDocument,
@@ -20,6 +21,7 @@ impl DocumentHost {
         ) {
             return;
         }
+        self.break_source_typing_group();
         if self.coordinator.external_monitor_paused {
             self.error = Some(
                 cx.global::<I18nManager>()
@@ -31,8 +33,6 @@ impl DocumentHost {
             cx.notify();
             return;
         }
-        // 保存会卸载活动行 Block；先把焦点交还宿主，保存结束后快捷键仍能继续工作。
-        self.focus_handle.focus(window);
         if crate::source_tools::format_on_save_for_file(
             &self.path,
             crate::preferences::EditorSettings::format_on_save(cx),
@@ -58,6 +58,7 @@ impl DocumentHost {
         ) {
             return;
         }
+        self.break_source_typing_group();
         let default_dir = self.path.parent().map(PathBuf::from).unwrap_or_default();
         let suggested_name = self
             .path
@@ -97,7 +98,7 @@ impl DocumentHost {
         self.start_save(path, true, window_handle, cx);
     }
 
-    /// Captures one immutable revision only when no transient native composition can enter the snapshot.
+    /// 保存等待已确认文字与共享 IO；完成后才捕获不可变修订，避免写出缺少最后按键的快照。
     pub(super) fn start_save(
         &mut self,
         path: PathBuf,
@@ -105,17 +106,37 @@ impl DocumentHost {
         window_handle: gpui::AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
+        if self.has_pending_source_input() {
+            self.enqueue_pending_save(path, save_as, window_handle, cx);
+            return;
+        }
         if self.has_active_ime_composition(cx) {
             self.error = Some("请先确认或取消输入法候选，再保存文档。".into());
             cx.notify();
             return;
         }
-        if self.saving || self.reloading || (!document_dirty_state(&self.document) && !save_as) {
+        self.break_source_typing_group();
+        if self.reloading {
             return;
         }
         let Some(document) = self.document.clone() else {
             return;
         };
+        let shared_save_in_flight = match document.handle().save_in_flight_revision() {
+            Ok(revision) => revision.is_some(),
+            Err(error) => {
+                self.error = Some(error.to_string().into());
+                cx.notify();
+                return;
+            }
+        };
+        if self.saving || shared_save_in_flight {
+            self.enqueue_pending_save(path, save_as, window_handle, cx);
+            return;
+        }
+        if !document_dirty_state(&self.document) && !save_as {
+            return;
+        }
         if let Some(cancellation) = self.coordinator.save.cancellation.take() {
             cancellation.cancel();
         }
@@ -137,17 +158,11 @@ impl DocumentHost {
         };
         let cancellation = SearchCancellation::default();
         self.coordinator.save.cancellation = Some(cancellation.clone());
-        let save_scroll_offset = self.scroll_handle.0.borrow().base_handle.offset();
-        if let Some(cancellation) = self.coordinator.search_cancellation.take() {
-            cancellation.cancel();
-        }
-        self.coordinator.search_task = Task::ready(());
-        self.coordinator.source_task = Task::ready(());
-        self.structured_task = Task::ready(());
-        self.structured_filter_task = Task::ready(());
-        self.json_expand_task = Task::ready(());
+        // 不可变快照写盘不改变正文；独立视口与投影读取继续按原 revision/generation 完成。
+        self.start_recovery_worker(cx);
+        let recovery = document.recovery_state();
+        let recovery_enabled = self.coordinator.recovery_enabled;
         self.coordinator.external_generation = self.coordinator.external_generation.wrapping_add(1);
-        self.active_edit = None;
         self.saving = true;
         self.error = None;
         let snapshot_for_event = snapshot.clone();
@@ -176,6 +191,47 @@ impl DocumentHost {
                     Some(if save_as { "save_as" } else { "save" }),
                 );
             }
+            // 共享 IO 必须先收尾，再考虑视图是否仍存在；关闭或重载不能让在途修订永远占据门禁。
+            let result = match result {
+                Ok(identity) => match document.save_succeeded(
+                    snapshot_for_event.revision,
+                    gmark_document_runtime::FileIdentity::from(&identity),
+                ) {
+                    Ok(()) => {
+                        RecoveredAutoSaveGate::explicit_save_succeeded(&document);
+                        if recovery.has_worker() {
+                            if let Err(error) =
+                                super::recovery_worker::RecoveryWorker::enqueue_shared(
+                                    &recovery,
+                                    super::recovery_worker::RecoveryJob::Checkpoint {
+                                        revision: snapshot_for_event.revision,
+                                        snapshot: snapshot_for_event.clone(),
+                                        replacement: None,
+                                    },
+                                )
+                            {
+                                recovery.set_error(error.to_string());
+                            }
+                        } else if recovery_enabled {
+                            recovery.set_error(
+                                "recovery journal is not ready; checkpoint was not persisted",
+                            );
+                        }
+                        Ok(identity)
+                    }
+                    Err(error) => {
+                        let _ = document
+                            .save_failed(snapshot_for_event.revision, SaveFailureCode::Other);
+                        Err(PagedDocumentError::InvalidTransaction(error.to_string()))
+                    }
+                },
+                Err(error) => {
+                    let _ =
+                        document.save_failed(snapshot_for_event.revision, SaveFailureCode::Other);
+                    Err(error)
+                }
+            };
+            let mut window_edited = None;
             let _ = this.update(cx, |view, cx| {
                 if !task_stamp.accepts_identity(view, view.coordinator.save.generation) {
                     return;
@@ -183,33 +239,21 @@ impl DocumentHost {
                 view.coordinator.save.cancellation = None;
                 view.saving = false;
                 match result {
-                    Ok(identity) => {
-                        let revision = snapshot_for_event.revision;
-                        let save_accepted = document
-                            .save_succeeded(
-                                revision,
-                                gmark_document_runtime::FileIdentity::from(&identity),
-                            )
-                            .is_ok();
-                        if save_accepted {
-                            // The saved revision is the new durable baseline;
-                            // enqueue that exact immutable snapshot after the
-                            // Controller transition so newer edits cannot be
-                            // mistaken for persisted content.
-                            view.enqueue_recovery_checkpoint_snapshot(
-                                snapshot_for_event.clone(),
-                                None,
-                                cx,
-                            );
+                    Ok(_identity) => {
+                        view.coordinator
+                            .clear_pending_recovery_through(snapshot_for_event.revision);
+                        if save_as {
+                            // A new path can change relative resources and syntax, but the
+                            // shared body and any Source input owner remain the same entities.
+                            let previous_epoch = view.document_epoch;
+                            view.document_epoch = view.document_epoch.wrapping_add(1);
+                            for request in &mut view.coordinator.save.pending_requests {
+                                if request.document_epoch == previous_epoch {
+                                    request.document_epoch = view.document_epoch;
+                                }
+                            }
+                            view.invalidate_source_rows();
                         }
-                        view.document_epoch = view.document_epoch.wrapping_add(1);
-                        view.invalidate_source_rows();
-                        view.scroll_handle
-                            .0
-                            .borrow()
-                            .base_handle
-                            .set_offset(save_scroll_offset);
-                        view.active_edit = None;
                         // The immutable save verified the pre-write identity and
                         // installed the written identity as the new Controller
                         // baseline. Any monitor result captured before this save
@@ -224,19 +268,18 @@ impl DocumentHost {
                         }
                     }
                     Err(error) => {
-                        let _ = document
-                            .save_failed(snapshot_for_event.revision, SaveFailureCode::Other);
                         view.error = Some(error.to_string().into());
                     }
                 }
+                window_edited = Some(document_dirty_state(&view.document));
                 cx.emit(DocumentHostEvent::StateChanged);
                 cx.notify();
             });
-            if saved {
+            if let Some(window_edited) = window_edited {
                 let _ = cx.update_window(
                     window_handle,
-                    |_view: AnyView, window: &mut Window, _cx: &mut App| {
-                        window.set_window_edited(false);
+                    move |_view: AnyView, window: &mut Window, _cx: &mut App| {
+                        window.set_window_edited(window_edited);
                     },
                 );
             }
