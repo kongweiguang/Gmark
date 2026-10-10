@@ -167,7 +167,7 @@ impl Editor {
         }
     }
 
-    /// Leaves the palette input mounted when an outside click arrives during pre-edit.
+    /// 候选输入期间保留搜索框，终态关闭后恢复真实窗格焦点，让下一次键盘命令仍可使用。
     pub(super) fn request_command_palette_close(
         &mut self,
         window: &mut Window,
@@ -176,7 +176,7 @@ impl Editor {
         if self.defer_tool_ime_intent(ToolImeIntent::PaletteClose, window, cx) {
             return true;
         }
-        let dismissed = self.dismiss_command_palette();
+        let dismissed = self.dismiss_command_palette(Some(window));
         if dismissed {
             cx.notify();
         }

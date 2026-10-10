@@ -150,6 +150,7 @@ async fn export_html_writes_rendered_document_without_changing_editor_state(
 }
 
 #[gpui::test]
+/// 模拟真实生成阶段的状态，检查进度不改变布局、取消被接受后不再重复触发。
 async fn export_progress_is_non_modal_and_cancel_sets_worker_token(cx: &mut TestAppContext) {
     init_editor_test_app(cx);
     let (editor, visual) =
@@ -157,6 +158,7 @@ async fn export_progress_is_non_modal_and_cancel_sets_worker_token(cx: &mut Test
     let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
     editor.update(visual, |editor, cx| {
         editor.export_cancel = Some(Arc::clone(&cancelled));
+        editor.export_progress = Some(Arc::new(crate::editor::export::ExportProgress::default()));
         editor.export_in_progress = true;
         cx.notify();
     });
@@ -343,7 +345,9 @@ async fn dirty_drop_waits_for_replace_decision_and_cancel_preserves_document(
     editor.update(cx, |editor, cx| {
         let block = editor.document.first_root().unwrap().clone();
         block.update(cx, |block, cx| {
-            block.record.set_title(InlineTextTree::plain("current edited"));
+            block
+                .record
+                .set_title(InlineTextTree::plain("current edited"));
             block.sync_render_cache();
             cx.notify();
         });

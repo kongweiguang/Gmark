@@ -645,6 +645,7 @@ impl Editor {
         self.show_info_dialog(super::InfoDialogKind::Document, cx);
     }
 
+    /// 菜单和命令面板共享活动窗格的选区快照，避免把窗口壳的空选区当成实际输入。
     pub(crate) fn on_export_selection_action(
         &mut self,
         _: &ExportSelection,

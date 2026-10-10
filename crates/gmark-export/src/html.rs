@@ -68,6 +68,7 @@ pub fn contains_tibetan_text(text: &str) -> bool {
         .any(|character| ('\u{0f00}'..='\u{0fff}').contains(&character))
 }
 
+/// 标注正文采用的文字语言，让中文与藏文导出使用合适的读屏语言和字体回退。
 fn render_html_document(
     markdown: &str,
     theme: &ExportTheme,
@@ -77,6 +78,24 @@ fn render_html_document(
 ) -> String {
     let language = if contains_tibetan_text(markdown) || contains_tibetan_text(title) {
         "bo"
+    } else if markdown
+        .chars()
+        .chain(title.chars())
+        .any(|character| ('\u{3040}'..='\u{30ff}').contains(&character))
+    {
+        "ja"
+    } else if markdown
+        .chars()
+        .chain(title.chars())
+        .any(|character| ('\u{ac00}'..='\u{d7af}').contains(&character))
+    {
+        "ko"
+    } else if markdown
+        .chars()
+        .chain(title.chars())
+        .any(|character| ('\u{4e00}'..='\u{9fff}').contains(&character))
+    {
+        "zh"
     } else {
         "en"
     };

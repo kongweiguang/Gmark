@@ -362,6 +362,7 @@ async fn status_bar_file_state_uses_semantic_icons_and_conflict_opens_comparison
     fs::remove_file(path).unwrap();
 }
 
+/// 双倍缩放时按钮仍须留在面板内；导出 fixture 使用真实生成阶段，不能把缺失状态当作可取消任务。
 #[gpui::test]
 async fn close_and_encoding_dialog_actions_stay_visible_at_two_x_scale(cx: &mut TestAppContext) {
     init_editor_test_app(cx);
@@ -487,6 +488,9 @@ async fn close_and_encoding_dialog_actions_stay_visible_at_two_x_scale(cx: &mut 
     editor.update(visual_cx, |editor, cx| {
         editor.info_dialog = None;
         editor.export_in_progress = true;
+        editor.export_progress = Some(std::sync::Arc::new(
+            crate::editor::export::ExportProgress::default(),
+        ));
         cx.notify();
     });
     redraw(visual_cx);

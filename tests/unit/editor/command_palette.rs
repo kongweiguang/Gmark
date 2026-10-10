@@ -8,6 +8,163 @@ use super::{
     localized_action_label,
 };
 
+/// 窗口壳与叶子编辑器分离时仍需恢复真实输入焦点，否则第二次键盘操作会丢失。
+#[gpui::test]
+async fn palette_restores_leaf_focus_and_reopens_from_keyboard(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        crate::i18n::I18nManager::init_with_language_id(cx, "en-US");
+        crate::theme::ThemeManager::init(cx);
+        crate::components::init(cx);
+    });
+    let markdown = concat!(
+        "<!-- @author kongweiguang -->\r\n\r\n# test 中文\r\n\r\n",
+        "| format | result |\r\n| --- | --- |\r\n| PDF | clear |\r\n\r\n",
+        "```mermaid\r\nflowchart LR\r\n A --> B\r\n```\r\n\r\nlast 🚀\r\n"
+    )
+    .to_owned();
+    let original = markdown.replace("\r\n", "\n");
+    let (root, visual) =
+        cx.add_window_view(move |_window, cx| super::Editor::from_markdown(cx, markdown, None));
+    root.update(visual, |root, cx| {
+        root.split_pane_toward(crate::editor::panes::PaneSplitDirection::Right, cx);
+    });
+    visual.update(|window, cx| window.draw(cx).clear());
+    visual.run_until_parked();
+    let leaf = root.read_with(visual, |root, cx| {
+        root.focused_pane_entities(cx).0.expect("Markdown pane")
+    });
+    let source_before = leaf.read_with(visual, |leaf, _| leaf.source_document.serialized_bytes());
+    let focus = leaf.update_in(visual, |leaf, window, cx| {
+        let block = leaf
+            .document
+            .root_blocks()
+            .iter()
+            .find(|block| block.read(cx).display_text().contains("test 中文"))
+            .cloned()
+            .expect("visible heading input");
+        leaf.focus_block(block.entity_id());
+        let focus = block.read(cx).focus_handle.clone();
+        focus.focus(window);
+        focus
+    });
+    visual.update(|window, cx| window.draw(cx).clear());
+    visual.simulate_keystrokes("ctrl-shift-a");
+    visual.run_until_parked();
+    assert!(root.read_with(visual, |root, _| root.command_palette.is_some()));
+    visual.update(|window, cx| window.draw(cx).clear());
+    visual.simulate_keystrokes("ctrl-shift-a");
+    visual.run_until_parked();
+    visual.update(|window, cx| {
+        window.draw(cx).clear();
+        assert!(
+            focus.is_focused(window),
+            "repeated shortcut must restore input"
+        );
+    });
+    assert!(root.read_with(visual, |root, _| root.command_palette.is_none()));
+    visual.simulate_keystrokes("ctrl-shift-a");
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear());
+    visual.simulate_keystrokes("escape");
+    visual.run_until_parked();
+    visual.update(|window, cx| {
+        window.draw(cx).clear();
+        assert!(
+            focus.is_focused(window),
+            "palette must restore the leaf input"
+        );
+    });
+    visual.simulate_keystrokes("ctrl-shift-a");
+    visual.run_until_parked();
+    assert!(root.read_with(visual, |root, _| root.command_palette.is_some()));
+    visual.update(|window, cx| window.draw(cx).clear());
+    visual.simulate_keystrokes("escape");
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear());
+    visual.simulate_keystrokes("ctrl-a");
+    assert!(leaf.read_with(visual, |leaf, cx| {
+        !leaf
+            .capture_source_selection_snapshot(cx)
+            .range()
+            .is_empty()
+    }));
+    visual.simulate_keystrokes("ctrl-shift-a");
+    visual.update(|window, cx| window.draw(cx).clear());
+    visual.simulate_input("Export Selection");
+    visual.executor().advance_clock(super::FILTER_DEBOUNCE);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear());
+    visual.simulate_keystrokes("enter");
+    visual.run_until_parked();
+    assert!(
+        visual.did_prompt_for_new_path(),
+        "selected pane Markdown must reach Save As"
+    );
+    let path = std::env::temp_dir().join(format!("gmark-selection-{}.md", uuid::Uuid::new_v4()));
+    visual.simulate_new_path_selection(|_| Some(path.clone()));
+    visual.run_until_parked();
+    assert_eq!(
+        std::fs::read(&path).expect("exported Markdown"),
+        original.as_bytes()
+    );
+    assert_eq!(
+        leaf.read_with(visual, |leaf, cx| leaf.serialized_document_text(cx)),
+        original
+    );
+    assert_eq!(
+        leaf.read_with(visual, |leaf, _| leaf.source_document.serialized_bytes()),
+        source_before
+    );
+    std::fs::remove_file(path).expect("remove owned export");
+}
+
+/// 搜索字段复用正文 Block，验收真实键绑定以防 Enter/方向键落入正文编辑动作。
+#[gpui::test]
+async fn palette_keyboard_navigates_and_executes_without_editing_query(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(|cx| {
+        crate::i18n::I18nManager::init_with_language_id(cx, "en-US");
+        crate::theme::ThemeManager::init(cx);
+        crate::components::init(cx);
+    });
+    let (editor, visual) = cx
+        .add_window_view(|_window, cx| super::Editor::from_markdown(cx, "# test".to_owned(), None));
+    visual.update(|window, cx| {
+        editor.update(cx, |editor, cx| {
+            editor.on_command_palette_action(&crate::components::CommandPalette, window, cx);
+        });
+    });
+    visual.executor().advance_clock(super::FILTER_DEBOUNCE);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear());
+    visual.simulate_keystrokes("down");
+    assert_eq!(
+        editor.read_with(visual, |editor, _| {
+            editor.command_palette.as_ref().map(|state| state.selected)
+        }),
+        Some(1)
+    );
+    visual.simulate_keystrokes("up");
+    visual.update(|window, cx| {
+        editor.update(cx, |editor, cx| {
+            if let Some(state) = editor.command_palette.as_ref() {
+                state.input.update(cx, |input, cx| {
+                    input.replace_text_in_visible_range(0..0, "Focus Mode", None, false, cx);
+                });
+            }
+        });
+        window.draw(cx).clear();
+    });
+    visual.executor().advance_clock(super::FILTER_DEBOUNCE);
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear());
+    visual.simulate_keystrokes("enter");
+    visual.run_until_parked();
+    assert!(editor.read_with(visual, |editor, _| editor.command_palette.is_none()));
+    assert!(editor.read_with(visual, |editor, _| editor.focus_mode));
+}
+
 #[test]
 fn editor_actions_map_to_the_shared_editing_command_registry() {
     assert_eq!(
@@ -290,6 +447,7 @@ fn command_filter_prefers_prefix_then_contains_then_subsequence() {
     assert_eq!(filter_command_labels(&labels, "tws"), vec![0]);
 }
 
+/// 用真实文字 bounds 校验搜索起点，避免正文留白或装饰槽再次推右输入；兼顾窄窗结果布局。
 #[gpui::test]
 async fn palette_indexes_real_editor_actions_and_renders_results(cx: &mut gpui::TestAppContext) {
     cx.update(|cx| {
@@ -340,7 +498,16 @@ async fn palette_indexes_real_editor_actions_and_renders_results(cx: &mut gpui::
         visual.update(|window, _cx| assert_eq!(window.scale_factor(), 2.0));
         let dialog = visual.debug_bounds("command-palette-dialog").unwrap();
         let input = visual.debug_bounds("command-palette-input").unwrap();
-        let search_icon = visual.debug_bounds("command-palette-search-icon").unwrap();
+        let input_text = editor.read_with(visual, |editor, cx| {
+            editor
+                .command_palette
+                .as_ref()
+                .expect("palette remains open")
+                .input
+                .read(cx)
+                .last_bounds
+                .expect("search text should render")
+        });
         let close = visual.debug_bounds("command-palette-close").unwrap();
         let row = visual.debug_bounds("command-palette-result-0").unwrap();
         let icon = visual
@@ -360,7 +527,11 @@ async fn palette_indexes_real_editor_actions_and_renders_results(cx: &mut gpui::
         assert!(dialog.top() >= gpui::px(0.0));
         assert!(dialog.bottom() <= viewport.height);
         assert_eq!(input.size.height, gpui::px(40.0));
-        assert_eq!(search_icon.size, gpui::size(gpui::px(16.0), gpui::px(16.0)));
+        let search_inset = input_text.left() - input.left();
+        assert!(
+            search_inset >= gpui::px(10.0) && search_inset <= gpui::px(12.0),
+            "search text must use the field's own inset, got {search_inset:?}"
+        );
         assert_eq!(close.size, gpui::size(gpui::px(28.0), gpui::px(28.0)));
         assert_eq!(row.size.height, gpui::px(50.0));
         assert_eq!(icon.size, gpui::size(gpui::px(18.0), gpui::px(18.0)));

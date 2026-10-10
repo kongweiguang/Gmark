@@ -204,7 +204,7 @@ impl Editor {
         self.set_status_tooltip_hover(StatusTooltip::Mode(mode), hovered, cx);
     }
 
-    /// Long Source rows need an asynchronous grapheme prefix; the status bar omits stale columns rather than inventing one.
+    /// 长行列号只展示已确认的字素计数；窗口底栏同时读取任务所属叶子的提示，保持正文布局稳定。
     pub(super) fn render_status_bar(
         &mut self,
         theme: &Theme,
@@ -285,7 +285,8 @@ impl Editor {
             );
         }
 
-        if let Some(notice) = self.pane_notice.clone() {
+        if let Some(notice) = self.current_pane_notice(cx) {
+            let tooltip = notice.clone();
             left_items.push(
                 div()
                     .id("status-bar-pane-notice")
@@ -300,6 +301,7 @@ impl Editor {
                     .truncate()
                     .text_size(px(d.status_bar_text_size))
                     .text_color(c.workbench.text_secondary)
+                    .tooltip(move |_window, cx| crate::ui::ui_tooltip(tooltip.clone(), cx))
                     .child(
                         svg()
                             .path(CONFLICT_ICON)

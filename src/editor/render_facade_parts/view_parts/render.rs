@@ -139,6 +139,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::on_export_html))
             .on_action(cx.listener(Self::on_export_image))
             .on_action(cx.listener(Self::on_export_pdf))
+            .on_action(cx.listener(Self::on_export_selection_action))
             .on_action(cx.listener(Self::on_show_document_info))
             .on_action(cx.listener(Self::on_show_document_outline))
             .on_action(cx.listener(Self::on_show_structure_view))
@@ -570,8 +571,10 @@ impl Render for Editor {
         } else {
             base
         };
-        let base = if self.export_in_progress {
-            base.child(self.render_export_progress(&theme, status_bar_height, cx))
+        let base = if let Some(progress) =
+            self.render_current_export_progress(&theme, status_bar_height, cx)
+        {
+            base.child(progress)
         } else {
             base
         };

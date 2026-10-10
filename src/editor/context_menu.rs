@@ -563,6 +563,7 @@ impl Editor {
         changed
     }
 
+    /// 统一清理互斥叠层；调用方可能尚未持有窗口，保留既有延迟焦点并交给后续输入接管。
     pub(super) fn dismiss_contextual_overlays(&mut self, cx: &mut Context<Self>) {
         let had_contextual_editing = self.dismiss_active_contextual_editing_popovers(cx);
         let had_menu = self.context_menu.take().is_some();
@@ -573,7 +574,7 @@ impl Editor {
         let had_diagram_overlay = self.close_diagram_overlay_after_unmount(cx);
         let had_link_completion = self.workspace_link_completion.take().is_some();
         let had_workspace_dialog = self.dismiss_workspace_operation_dialog();
-        let had_command_palette = self.dismiss_command_palette();
+        let had_command_palette = self.dismiss_command_palette(None);
         let had_tab_context_menu = self.dismiss_tab_context_menu();
         let had_tab_creation_or_split_menu = self.tabs.dismiss_new_or_split_menu();
         let had_status_overflow = self.status_bar.format_overflow_open;

@@ -329,7 +329,8 @@ impl Editor {
         )
     }
 
-    pub(super) fn render_export_progress(
+    /// 只有资源复制展示真实计数；浏览器生成保持不确定进度，提交阶段移除取消入口。
+    pub(in crate::editor) fn render_export_progress(
         &self,
         theme: &Theme,
         bottom_offset: f32,
@@ -340,6 +341,10 @@ impl Editor {
         let t = &theme.typography;
         let strings = cx.global::<I18nManager>().strings();
         let cancel_requested = self.export_cancel_requested;
+        let committing = self
+            .export_progress
+            .as_ref()
+            .is_none_or(|progress| progress.is_committing());
         let progress_text = self
             .export_progress
             .as_ref()
@@ -351,19 +356,23 @@ impl Editor {
                     .total
                     .load(std::sync::atomic::Ordering::Acquire)
                     .max(1);
-                SharedString::from(format!(
-                    "{} ({}/{})",
-                    if cancel_requested {
-                        strings.export_cancelling.as_str()
-                    } else {
-                        strings.export_in_progress.as_str()
-                    },
-                    completed.min(total),
-                    total
-                ))
+                let label = if committing {
+                    &strings.export_saving
+                } else if cancel_requested {
+                    &strings.export_cancelling
+                } else {
+                    &strings.export_in_progress
+                };
+                if total > 1 && !committing && !cancel_requested {
+                    SharedString::from(format!("{label} ({}/{total})", completed.min(total)))
+                } else {
+                    SharedString::from(label.clone())
+                }
             })
             .unwrap_or_else(|| {
-                if cancel_requested {
+                if committing {
+                    strings.export_saving.clone().into()
+                } else if cancel_requested {
                     strings.export_cancelling.clone().into()
                 } else {
                     strings.export_in_progress.clone().into()
@@ -440,7 +449,7 @@ impl Editor {
                     .debug_selector(|| "export-progress-label".to_owned())
                     .child(progress_text),
             )
-            .child(cancel_button)
+            .children((!committing).then_some(cancel_button))
             .into_any_element()
     }
 

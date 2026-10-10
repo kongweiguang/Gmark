@@ -6,14 +6,14 @@ use gmark_i18n::{
 };
 use std::sync::Arc;
 
-/// Locks catalog cardinality and editing shortcut translations across locales.
+/// 固定完整语言键集合及关键文案；新增导出阶段与恢复提示时，中英文必须同步扩展。
 #[test]
 fn builtins_preserve_the_complete_ui_key_set() {
     let english = I18nCatalog::new_with_language_id(BUILTIN_LANGUAGE_EN_US_ID).strings_clone();
     let chinese = I18nCatalog::new_with_language_id(BUILTIN_LANGUAGE_ZH_CN_ID).strings_clone();
 
-    assert_eq!(english.scalars().len(), 437);
-    assert_eq!(chinese.scalars().len(), 437);
+    assert_eq!(english.scalars().len(), 450);
+    assert_eq!(chinese.scalars().len(), 450);
     assert_eq!(
         english.scalars().keys().collect::<Vec<_>>(),
         chinese.scalars().keys().collect::<Vec<_>>()
@@ -43,6 +43,10 @@ fn builtins_preserve_the_complete_ui_key_set() {
 
     assert_eq!(english.get("menu_file"), Some("File"));
     assert_eq!(chinese.get("menu_file"), Some("文件"));
+    assert_eq!(english.get("export_saving"), Some("Saving…"));
+    assert_eq!(chinese.get("export_saving"), Some("正在保存…"));
+    assert_eq!(english.get("export_cancelled"), Some("Export cancelled"));
+    assert_eq!(chinese.get("export_cancelled"), Some("导出已取消"));
     assert_eq!(english.get("new_document_csv"), Some("CSV Document"));
     assert_eq!(chinese.get("new_document_csv"), Some("CSV 文档"));
     assert_eq!(

@@ -12,6 +12,21 @@ use gmark_export::{
 use gmark_markdown::parse_markdown;
 use uuid::Uuid;
 
+/// 导出语言元数据必须跟随正文文字，避免中文文件被读屏当作英文朗读。
+#[test]
+fn html_export_labels_chinese_content_language() {
+    let html = render_html(
+        "# 中文导出\n\n可分享的文件。",
+        &ExportTheme::default(),
+        "Doc",
+    );
+    assert!(html.contains("<html lang=\"zh\">"));
+    for (text, language) in [("# 日本語の文書", "ja"), ("# 한글 文書", "ko")] {
+        let html = render_html(text, &ExportTheme::default(), "Doc");
+        assert!(html.contains(&format!("<html lang=\"{language}\">")));
+    }
+}
+
 #[test]
 fn html_export_projects_toc_math_mermaid_and_safe_html() {
     let html = render_html(

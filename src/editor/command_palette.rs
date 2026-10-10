@@ -8,9 +8,11 @@ use gpui::*;
 
 #[path = "command_palette_metadata.rs"]
 mod metadata;
+#[path = "command_palette/render.rs"]
+mod render;
 
 use self::metadata::localized_action_description;
-use super::{Block, BlockRecord, Editor, render::menu_icon_slot};
+use super::{Block, BlockRecord, Editor};
 use crate::app_menu::menu_action_icon;
 use crate::components::{
     AddLanguageConfig, BlockEvent, BoldSelection, CheckForUpdates, CodeSelection,
@@ -25,13 +27,9 @@ use crate::components::{
 };
 use crate::i18n::I18nStrings;
 use crate::preferences::localized_shortcut_command_label;
-use crate::theme::{Theme, workbench::SurfaceKind};
-use crate::ui::visual_preferences::VisualPreferencesManager;
 
 const FILTER_DEBOUNCE: Duration = Duration::from_millis(20);
 const MAX_RESULTS: usize = 100;
-const SEARCH_ICON: &str = "icon/ui/search.svg";
-const CLOSE_ICON: &str = "icon/ui/close.svg";
 
 fn editing_command_for_action(action: &dyn Action) -> Option<EditingCommandId> {
     if action.as_any().is::<BoldSelection>() {
@@ -96,7 +94,8 @@ struct PaletteCommand {
 
 pub(super) struct CommandPaletteState {
     pub(super) input: Entity<Block>,
-    restore_focus: Option<EntityId>,
+    restore_focus: Option<FocusHandle>,
+    restore_entity: Option<EntityId>,
     commands: Vec<PaletteCommand>,
     filtered: Vec<usize>,
     selected: usize,
@@ -105,7 +104,8 @@ pub(super) struct CommandPaletteState {
 }
 
 impl Editor {
-    /// Queues palette focus until the active editor input has a confirmed IME terminal state.
+    /// 等待 IME 终态后保存窗口真实焦点；叶子输入不属于窗口壳，不能仅用壳的 EntityId 恢复。
+    /// 搜索宿主统一提供留白，紧凑输入不再叠加正文内边距。
     pub(crate) fn on_command_palette_action(
         &mut self,
         _: &crate::components::CommandPalette,
@@ -114,6 +114,10 @@ impl Editor {
     ) {
         if self.defer_action_for_ime(&crate::components::CommandPalette, window, cx) {
             cx.stop_propagation();
+            return;
+        }
+        if self.command_palette.is_some() {
+            self.request_command_palette_close(window, cx);
             return;
         }
         self.close_menu_bar(cx);
@@ -145,15 +149,25 @@ impl Editor {
         commands.sort_by_key(|command| command.label.to_lowercase());
         let input = cx.new(|cx| {
             let mut block = Block::with_record(cx, BlockRecord::paragraph(String::new()));
-            block.set_source_raw_mode();
+            block.set_compact_source_host();
             block
         });
         cx.subscribe(&input, Self::on_command_palette_input_event)
             .detach();
+        let restore_focus = window.focused(cx).or_else(|| {
+            let leaf = self.focused_pane_entities(cx).0;
+            let editor = leaf.as_ref().map(|leaf| leaf.read(cx)).unwrap_or(self);
+            editor
+                .active_entity_id
+                .or_else(|| editor.first_focusable_entity_id(cx))
+                .and_then(|id| editor.focusable_entity_by_id(id))
+                .map(|block| block.read(cx).focus_handle.clone())
+        });
         input.read(cx).focus_handle.focus(window);
         self.command_palette = Some(CommandPaletteState {
             input,
-            restore_focus: self.active_entity_id,
+            restore_focus,
+            restore_entity: self.active_entity_id,
             commands,
             filtered: Vec::new(),
             selected: 0,
@@ -235,18 +249,38 @@ impl Editor {
         }));
     }
 
-    pub(super) fn dismiss_command_palette(&mut self) -> bool {
+    /// 有窗口时立即恢复输入，确保随后分派的命令走原窗格；无窗口的叠层清理保留延迟焦点。
+    pub(super) fn dismiss_command_palette(&mut self, window: Option<&mut Window>) -> bool {
         let Some(state) = self.command_palette.take() else {
             return false;
         };
-        self.pending_focus = state.restore_focus;
+        if let Some(window) = window {
+            if let Some(focus) = state.restore_focus {
+                self.pending_focus = None;
+                focus.focus(window);
+            } else {
+                self.pending_focus = state.restore_entity;
+            }
+        } else {
+            self.pending_focus = state.restore_entity;
+        }
         true
     }
 
-    /// Leaves navigation, Enter, and Escape to the palette input's IME while candidates are active.
+    /// 输入法候选态时不拦截方向、确认和取消按键，避免将候选选择误作面板导航。
     pub(super) fn handle_command_palette_key(
         &mut self,
         event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.handle_command_palette_navigation(event.keystroke.key.as_str(), window, cx)
+    }
+
+    /// GPUI 优先分派已绑定的编辑动作，动作捕获和原始按键共用同一入口；候选输入仍交给 IME。
+    fn handle_command_palette_navigation(
+        &mut self,
+        key: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -256,7 +290,7 @@ impl Editor {
         let Some(state) = self.command_palette.as_mut() else {
             return false;
         };
-        match event.keystroke.key.as_str() {
+        match key {
             "up" => state.selected = state.selected.saturating_sub(1),
             "down" => {
                 state.selected = (state.selected + 1).min(state.filtered.len().saturating_sub(1));
@@ -267,275 +301,18 @@ impl Editor {
                     .get(state.selected)
                     .and_then(|index| state.commands.get(*index))
                     .map(|command| command.action.boxed_clone());
-                let restore_focus = state.restore_focus;
-                self.command_palette = None;
-                self.pending_focus = restore_focus;
+                self.dismiss_command_palette(Some(window));
                 if let Some(action) = action {
                     window.dispatch_action(action, cx);
                 }
             }
             "escape" => {
-                let restore_focus = state.restore_focus;
-                self.command_palette = None;
-                self.pending_focus = restore_focus;
+                self.dismiss_command_palette(Some(window));
             }
             _ => return false,
         }
         cx.notify();
         true
-    }
-
-    /// Keeps the search field mounted when outside clicks request dismissal during composition.
-    pub(super) fn render_command_palette_overlay(
-        &self,
-        theme: &Theme,
-        strings: &I18nStrings,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let state = self.command_palette.as_ref()?;
-        let c = &theme.colors;
-        let visual_preferences = cx
-            .try_global::<VisualPreferencesManager>()
-            .map(VisualPreferencesManager::current)
-            .unwrap_or_default();
-        let palette = &c.workbench;
-        let overlay_material = palette.material(SurfaceKind::GlassStrong, visual_preferences);
-        let input_material = palette.material(SurfaceKind::Solid, visual_preferences);
-        let d = &theme.dimensions;
-        let t = &theme.typography;
-        let editor = cx.entity().downgrade();
-        let dismiss_editor = editor.clone();
-        let close_editor = editor.clone();
-        let close_tooltip: SharedString = strings.ui_close.clone().into();
-        let empty_message = if state.input.read(cx).display_text().trim().is_empty() {
-            strings.command_palette_prompt.clone()
-        } else {
-            strings.command_palette_no_results.clone()
-        };
-        Some(
-            div()
-                .id("command-palette-overlay")
-                .absolute()
-                .top_0()
-                .left_0()
-                .right_0()
-                .bottom_0()
-                .occlude()
-                .flex()
-                .justify_center()
-                .items_start()
-                .pt(px(82.0))
-                .bg(palette.overlay_scrim)
-                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                    let _ = dismiss_editor.update(cx, |editor, cx| {
-                        editor.request_command_palette_close(window, cx);
-                    });
-                })
-                .child(
-                    div()
-                        .id("command-palette-dialog")
-                        .debug_selector(|| "command-palette-dialog".to_owned())
-                        .w(px(560.0))
-                        .max_w(relative(0.92))
-                        .max_h(relative(0.74))
-                        .flex()
-                        .flex_col()
-                        .overflow_hidden()
-                        .bg(overlay_material.background)
-                        .border(px(d.dialog_border_width))
-                        .border_color(overlay_material.border)
-                        .rounded(px(d.dialog_radius.clamp(22.0, 28.0)))
-                        .shadow_lg()
-                        .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
-                            cx.stop_propagation();
-                        })
-                        .child(
-                            div()
-                                .h(px(38.0))
-                                .px(px(14.0))
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap(px(12.0))
-                                .child(
-                                    div()
-                                        .min_w(px(0.0))
-                                        .overflow_hidden()
-                                        .truncate()
-                                        .text_size(px(t.dialog_title_size))
-                                        .font_weight(t.dialog_title_weight.to_font_weight())
-                                        .text_color(palette.text_primary)
-                                        .child(strings.command_palette_title.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .id("command-palette-close")
-                                        .debug_selector(|| "command-palette-close".to_owned())
-                                        .size(px(28.0))
-                                        .flex_shrink_0()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded(px(5.0))
-                                        .cursor_pointer()
-                                        .hover(|this| this.bg(palette.control_hover))
-                                        .tooltip(move |_window, cx| {
-                                            crate::ui::ui_tooltip(close_tooltip.clone(), cx)
-                                        })
-                                        .child(svg().path(CLOSE_ICON).size(px(15.0)))
-                                        .on_click(move |_event, window, cx| {
-                                            let _ = close_editor.update(cx, |editor, cx| {
-                                                editor.request_command_palette_close(window, cx);
-                                            });
-                                        }),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .id("command-palette-input")
-                                .debug_selector(|| "command-palette-input".to_owned())
-                                .mx(px(12.0))
-                                .mb(px(10.0))
-                                .min_h(px(40.0))
-                                .px(px(10.0))
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .rounded(px(6.0))
-                                .border(px(d.dialog_border_width))
-                                .border_color(input_material.border)
-                                .bg(input_material.background)
-                                .child(
-                                    div()
-                                        .id("command-palette-search-icon")
-                                        .debug_selector(|| "command-palette-search-icon".to_owned())
-                                        .size(px(16.0))
-                                        .flex_shrink_0()
-                                        .text_color(palette.text_secondary)
-                                        .child(svg().path(SEARCH_ICON).size(px(16.0))),
-                                )
-                                .child(div().flex_1().min_w(px(0.0)).child(state.input.clone())),
-                        )
-                        .child(
-                            div()
-                                .id("command-palette-results")
-                                .debug_selector(|| "command-palette-results".to_owned())
-                                .flex_1()
-                                .min_h(px(52.0))
-                                .overflow_y_scroll()
-                                .px(px(8.0))
-                                .pb(px(8.0))
-                                .children(state.filtered.is_empty().then(|| {
-                                    div()
-                                        .px(px(10.0))
-                                        .py(px(14.0))
-                                        .text_size(px(t.dialog_body_size))
-                                        .text_color(palette.text_secondary)
-                                        .child(empty_message)
-                                }))
-                                .children(state.filtered.iter().enumerate().filter_map(
-                                    |(row, index)| {
-                                        let command = state.commands.get(*index)?;
-                                        let action = command.action.boxed_clone();
-                                        let editor = editor.clone();
-                                        Some(
-                                            div()
-                                                .id(("command-palette-result", row))
-                                                .debug_selector(move || {
-                                                    format!("command-palette-result-{row}")
-                                                })
-                                                .min_h(px(50.0))
-                                                .w_full()
-                                                .px(px(10.0))
-                                                .flex()
-                                                .items_center()
-                                                .gap(px(8.0))
-                                                .rounded(px(5.0))
-                                                .bg(if row == state.selected {
-                                                    palette.selection
-                                                } else {
-                                                    hsla(0.0, 0.0, 0.0, 0.0)
-                                                })
-                                                .hover(|this| {
-                                                    this.bg(palette.control_hover)
-                                                })
-                                                .cursor_pointer()
-                                                .child(
-                                                    menu_icon_slot(
-                                                        Some(command.icon),
-                                                        palette.icon,
-                                                    )
-                                                        .debug_selector(move || {
-                                                            format!(
-                                                                "command-palette-result-icon-{row}"
-                                                            )
-                                                        }),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .min_w(px(0.0))
-                                                        .flex_grow()
-                                                        .overflow_hidden()
-                                                        .flex()
-                                                        .flex_col()
-                                                        .gap(px(2.0))
-                                                        .child(
-                                                            div()
-                                                                .truncate()
-                                                                .debug_selector(move || {
-                                                                    format!(
-                                                                        "command-palette-result-label-{row}"
-                                                                    )
-                                                                })
-                                                                .text_size(px(t.dialog_body_size))
-                                                                .text_color(palette.text_primary)
-                                                                .child(command.label.clone()),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .truncate()
-                                                                .debug_selector(move || {
-                                                                    format!(
-                                                                        "command-palette-result-description-{row}"
-                                                                    )
-                                                                })
-                                                                .text_size(px(
-                                                                    t.dialog_body_size * 0.82,
-                                                                ))
-                                                                .text_color(palette.text_secondary)
-                                                                .child(command.description.clone()),
-                                                        ),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .flex_shrink_0()
-                                                        .max_w(px(160.0))
-                                                        .overflow_hidden()
-                                                        .truncate()
-                                                        .text_right()
-                                                        .debug_selector(move || {
-                                                            format!(
-                                                                "command-palette-result-shortcut-{row}"
-                                                            )
-                                                        })
-                                                        .text_size(px(t.dialog_body_size * 0.86))
-                                                        .text_color(palette.text_secondary)
-                                                        .child(command.shortcut.clone()),
-                                                )
-                                                .on_click(move |_event, window, cx| {
-                                                    let action = action.boxed_clone();
-                                                    let _ = editor.update(cx, |editor, _cx| {
-                                                        editor.dismiss_command_palette();
-                                                    });
-                                                    window.dispatch_action(action, cx);
-                                                }),
-                                        )
-                                    },
-                                )),
-                        ),
-                )
-                .into_any_element(),
-        )
     }
 }
 

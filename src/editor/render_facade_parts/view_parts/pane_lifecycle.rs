@@ -122,7 +122,7 @@ impl Editor {
         }
     }
 
-    /// 仅在文档身份改变时创建子窗格；两类正文都按活动窗格同步标题与输入归属。
+    /// 仅在文档身份改变时创建子窗格；导出反馈由窗口观察，正文与输入继续归所属叶子。
     pub(super) fn sync_pane_canvas_entities(&mut self, cx: &mut Context<Self>) {
         let Some(workspace_entity) = self.pane_workspace.clone() else {
             return;
@@ -217,6 +217,9 @@ impl Editor {
                 };
                 if let Some(host) = canvas.document_host(cx) {
                     Self::observe_document_host_accessibility(&host, cx);
+                }
+                if let Some(editor) = canvas.markdown_editor(cx) {
+                    Self::observe_pane_export_feedback(&editor, cx);
                 }
                 self.pane_canvas_entities
                     .borrow_mut()
