@@ -171,9 +171,12 @@ const HIGHLIGHT_NAMES: &[&str] = &[
 ];
 
 #[cfg(feature = "code-highlight-core")]
+type LazyHighlightConfig = LazyLock<Option<HighlightConfiguration>>;
+
+#[cfg(feature = "code-highlight-core")]
 struct HighlightRegistry {
-    configs: HashMap<SourceLanguage, HighlightConfiguration>,
-    inline_config: Option<HighlightConfiguration>,
+    configs: HashMap<SourceLanguage, LazyHighlightConfig>,
+    inline_config: LazyHighlightConfig,
 }
 
 #[cfg(feature = "code-highlight-core")]
@@ -181,17 +184,13 @@ static CODE_HIGHLIGHT_REGISTRY: LazyLock<HighlightRegistry> = LazyLock::new(High
 
 #[cfg(feature = "code-highlight-core")]
 impl HighlightRegistry {
+    /// 首次遇到围栏只登记构造器，避免界面线程同时为所有语言编译查询。
     fn new() -> Self {
-        let inline_config = {
-            #[cfg(feature = "code-highlight-official")]
-            {
-                crate::highlight_configs::build_markdown_inline_config()
-            }
-            #[cfg(not(feature = "code-highlight-official"))]
-            {
-                None
-            }
-        };
+        #[cfg(feature = "code-highlight-official")]
+        let inline_config: LazyHighlightConfig =
+            LazyLock::new(crate::highlight_configs::build_markdown_inline_config);
+        #[cfg(not(feature = "code-highlight-official"))]
+        let inline_config: LazyHighlightConfig = LazyLock::new(|| None);
         let configs = {
             #[cfg(any(
                 feature = "code-highlight-official",
@@ -201,154 +200,154 @@ impl HighlightRegistry {
             {
                 let mut configs = HashMap::new();
                 #[cfg(feature = "code-highlight-official")]
-                maybe_insert_config(
+                register_config(
                     &mut configs,
                     SourceLanguage::Rust,
-                    crate::highlight_configs::build_rust_config(),
+                    crate::highlight_configs::build_rust_config,
                 );
                 #[cfg(feature = "code-highlight-official")]
-                maybe_insert_config(
+                register_config(
                     &mut configs,
                     SourceLanguage::JavaScript,
-                    crate::highlight_configs::build_javascript_config(),
+                    crate::highlight_configs::build_javascript_config,
                 );
                 #[cfg(feature = "code-highlight-official")]
-                maybe_insert_config(
+                register_config(
                     &mut configs,
                     SourceLanguage::JavaScriptJsx,
-                    crate::highlight_configs::build_jsx_config(),
+                    crate::highlight_configs::build_jsx_config,
                 );
                 #[cfg(feature = "code-highlight-official")]
-                maybe_insert_config(
+                register_config(
                     &mut configs,
                     SourceLanguage::TypeScript,
-                    crate::highlight_configs::build_typescript_config(),
+                    crate::highlight_configs::build_typescript_config,
                 );
                 #[cfg(feature = "code-highlight-official")]
-                maybe_insert_config(
+                register_config(
                     &mut configs,
                     SourceLanguage::TypeScriptTsx,
-                    crate::highlight_configs::build_tsx_config(),
+                    crate::highlight_configs::build_tsx_config,
                 );
                 #[cfg(feature = "code-highlight-official")]
-                maybe_insert_config(
+                register_config(
                     &mut configs,
                     SourceLanguage::Json,
-                    crate::highlight_configs::build_json_config(),
+                    crate::highlight_configs::build_json_config,
                 );
                 #[cfg(feature = "code-highlight-official")]
-                maybe_insert_config(
+                register_config(
                     &mut configs,
                     SourceLanguage::Markdown,
-                    crate::highlight_configs::build_markdown_config(),
+                    crate::highlight_configs::build_markdown_config,
                 );
                 #[cfg(feature = "code-highlight-official")]
-                maybe_insert_config(
+                register_config(
                     &mut configs,
                     SourceLanguage::Bash,
-                    crate::highlight_configs::build_bash_config(),
+                    crate::highlight_configs::build_bash_config,
                 );
                 #[cfg(feature = "code-highlight-official")]
-                maybe_insert_config(
+                register_config(
                     &mut configs,
                     SourceLanguage::C,
-                    crate::highlight_configs::build_c_config(),
+                    crate::highlight_configs::build_c_config,
                 );
                 #[cfg(feature = "code-highlight-official")]
-                maybe_insert_config(
+                register_config(
                     &mut configs,
                     SourceLanguage::Cpp,
-                    crate::highlight_configs::build_cpp_config(),
+                    crate::highlight_configs::build_cpp_config,
                 );
                 #[cfg(feature = "code-highlight-official")]
-                maybe_insert_config(
+                register_config(
                     &mut configs,
                     SourceLanguage::CSharp,
-                    crate::highlight_configs::build_csharp_config(),
+                    crate::highlight_configs::build_csharp_config,
                 );
                 #[cfg(feature = "code-highlight-official")]
-                maybe_insert_config(
+                register_config(
                     &mut configs,
                     SourceLanguage::Css,
-                    crate::highlight_configs::build_css_config(),
+                    crate::highlight_configs::build_css_config,
                 );
                 #[cfg(feature = "code-highlight-official")]
-                maybe_insert_config(
+                register_config(
                     &mut configs,
                     SourceLanguage::Go,
-                    crate::highlight_configs::build_go_config(),
+                    crate::highlight_configs::build_go_config,
                 );
                 #[cfg(feature = "code-highlight-official")]
-                maybe_insert_config(
+                register_config(
                     &mut configs,
                     SourceLanguage::Html,
-                    crate::highlight_configs::build_html_config(),
+                    crate::highlight_configs::build_html_config,
                 );
                 #[cfg(feature = "code-highlight-official")]
-                maybe_insert_config(
+                register_config(
                     &mut configs,
                     SourceLanguage::Java,
-                    crate::highlight_configs::build_java_config(),
+                    crate::highlight_configs::build_java_config,
                 );
                 #[cfg(feature = "code-highlight-official")]
-                maybe_insert_config(
+                register_config(
                     &mut configs,
                     SourceLanguage::Php,
-                    crate::highlight_configs::build_php_config(),
+                    crate::highlight_configs::build_php_config,
                 );
                 #[cfg(feature = "code-highlight-official")]
-                maybe_insert_config(
+                register_config(
                     &mut configs,
                     SourceLanguage::Python,
-                    crate::highlight_configs::build_python_config(),
+                    crate::highlight_configs::build_python_config,
                 );
                 #[cfg(feature = "code-highlight-official")]
-                maybe_insert_config(
+                register_config(
                     &mut configs,
                     SourceLanguage::Ruby,
-                    crate::highlight_configs::build_ruby_config(),
+                    crate::highlight_configs::build_ruby_config,
                 );
                 #[cfg(feature = "code-highlight-config")]
-                maybe_insert_config(
+                register_config(
                     &mut configs,
                     SourceLanguage::Yaml,
-                    crate::highlight_configs::build_yaml_config(),
+                    crate::highlight_configs::build_yaml_config,
                 );
                 #[cfg(feature = "code-highlight-config")]
-                maybe_insert_config(
+                register_config(
                     &mut configs,
                     SourceLanguage::Toml,
-                    crate::highlight_configs::build_toml_config(),
+                    crate::highlight_configs::build_toml_config,
                 );
                 #[cfg(feature = "code-highlight-extra")]
-                maybe_insert_config(
+                register_config(
                     &mut configs,
                     SourceLanguage::Sql,
-                    crate::highlight_configs::build_sql_config(),
+                    crate::highlight_configs::build_sql_config,
                 );
                 #[cfg(feature = "code-highlight-extra")]
-                maybe_insert_config(
+                register_config(
                     &mut configs,
                     SourceLanguage::Lua,
-                    crate::highlight_configs::build_lua_config(),
+                    crate::highlight_configs::build_lua_config,
                 );
                 #[cfg(feature = "code-highlight-extra")]
-                maybe_insert_config(
+                register_config(
                     &mut configs,
                     SourceLanguage::Swift,
-                    crate::highlight_configs::build_swift_config(),
+                    crate::highlight_configs::build_swift_config,
                 );
                 #[cfg(feature = "code-highlight-extra")]
-                maybe_insert_config(
+                register_config(
                     &mut configs,
                     SourceLanguage::PowerShell,
-                    crate::highlight_configs::build_powershell_config(),
+                    crate::highlight_configs::build_powershell_config,
                 );
                 #[cfg(feature = "code-highlight-extra")]
-                maybe_insert_config(
+                register_config(
                     &mut configs,
                     SourceLanguage::Containerfile,
-                    crate::highlight_configs::build_containerfile_config(),
+                    crate::highlight_configs::build_containerfile_config,
                 );
                 configs
             }
@@ -368,8 +367,9 @@ impl HighlightRegistry {
         }
     }
 
+    /// 同一语言在并发调用下只编译一次，失败也缓存，纯文本不触发任何语法构建。
     fn config_for(&self, language: SourceLanguage) -> Option<&HighlightConfiguration> {
-        self.configs.get(&language)
+        LazyLock::force(self.configs.get(&language)?).as_ref()
     }
 
     fn config_for_injection(&self, language_name: &str) -> Option<&HighlightConfiguration> {
@@ -385,14 +385,13 @@ impl HighlightRegistry {
     feature = "code-highlight-config",
     feature = "code-highlight-extra"
 ))]
-fn maybe_insert_config(
-    configs: &mut HashMap<SourceLanguage, HighlightConfiguration>,
+/// 登记轻量函数指针，保留嵌入语言与独立调用共用同一份查询缓存的契约。
+fn register_config(
+    configs: &mut HashMap<SourceLanguage, LazyHighlightConfig>,
     language: SourceLanguage,
-    config: Option<HighlightConfiguration>,
+    build: fn() -> Option<HighlightConfiguration>,
 ) {
-    if let Some(config) = config {
-        configs.insert(language, config);
-    }
+    configs.insert(language, LazyLock::new(build));
 }
 
 #[cfg(any(

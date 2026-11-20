@@ -48,6 +48,20 @@ fn unknown_fences_fall_back_to_plain_text_and_json_keeps_lexical_spans() {
     );
 }
 
+/// 纯文本和 Mermaid 围栏由各自的显示路径处理，按需加载语法时也不能误走代码着色。
+#[test]
+fn registered_non_code_fences_keep_plain_text_spans() {
+    for (info, language) in [
+        ("text", SourceLanguage::PlainText),
+        ("mmd", SourceLanguage::Mermaid),
+    ] {
+        let result = highlight_fenced_code(Some(info), "fn example() { 42 }");
+        assert_eq!(result.language, language);
+        assert_eq!(result.engine, HighlightEngine::PlainTextFallback);
+        assert!(result.spans.is_empty());
+    }
+}
+
 #[cfg(feature = "code-highlight-official")]
 #[test]
 fn official_grammar_bundle_produces_semantic_rust_spans() {
