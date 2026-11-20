@@ -508,10 +508,8 @@ impl Element for BlockTextElement {
         let selection_color = wb.selection;
         let text_align = input.text_align();
         let resident_source = input.is_source_raw_mode() && input.show_source_line_numbers();
-        let source_paint_only_syntax = resident_source
-            && shared_source_paint_syntax(display_text.len())
-            && !input.has_ime_composition()
-            && input.marked_range.is_none();
+        let source_paint_only_syntax =
+            resident_source && shared_source_paint_syntax(display_text.len());
         let caret_bounds = (focused || editor_selection_range.is_some())
             .then(|| {
                 if resident_source {
@@ -770,24 +768,28 @@ impl Element for BlockTextElement {
         let decorated_lines = prepaint
             .source_paint_only_syntax
             .then(|| {
-                self.input
-                    .read(cx)
-                    .code_highlight_result()
-                    .map(|highlight| {
-                        prepaint
-                            .visible_lines
-                            .iter()
-                            .map(|visible| {
-                                decorate_source_line(
-                                    &lines[visible.index],
-                                    visible.byte_start,
-                                    highlight,
-                                    prepaint.source_text_color,
-                                    &theme.colors,
-                                )
-                            })
-                            .collect::<SmallVec<[_; 4]>>()
-                    })
+                let input = self.input.read(cx);
+                let marked_range = input
+                    .ime_marked_range(&super::BlockImeCompositionOwner::BlockText)
+                    .or_else(|| input.marked_range.clone());
+                input.code_highlight_result().map(|highlight| {
+                    prepaint
+                        .visible_lines
+                        .iter()
+                        .map(|visible| {
+                            decorate_source_line(
+                                &lines[visible.index],
+                                visible.byte_start,
+                                highlight,
+                                input,
+                                prepaint.source_text_color,
+                                &theme.colors,
+                                marked_range.as_ref(),
+                                px(theme.dimensions.underline_thickness),
+                            )
+                        })
+                        .collect::<SmallVec<[_; 4]>>()
+                })
             })
             .flatten();
         for (index, visible) in prepaint.visible_lines.iter().enumerate() {

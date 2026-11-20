@@ -12,6 +12,94 @@ use gpui::{
     size,
 };
 
+/// 候选跨语法 token 时，颜色与下划线必须按虚拟文本字节边界同时保留。
+#[test]
+fn source_line_ime_decorations_keep_colors_and_marked_range() {
+    let base = Hsla::from(rgba(0xffffffff));
+    let keyword = Hsla::from(rgba(0xff0000ff));
+    let string = Hsla::from(rgba(0x00ff00ff));
+    let runs = super::source_line_decorations(
+        10..20,
+        &[(10..15, keyword), (17..20, string)],
+        base,
+        Some(&(13..18)),
+        px(1.0),
+    );
+    let actual = runs
+        .iter()
+        .map(|run| (run.len, run.color, run.underline.is_some()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual,
+        vec![
+            (3, keyword, false),
+            (2, keyword, true),
+            (2, base, true),
+            (1, string, true),
+            (2, string, false),
+        ]
+    );
+}
+
+/// 多字节候选替换源码后，后续硬行仍按虚拟字节坐标查找已有语法颜色。
+#[cfg(target_os = "windows")]
+#[gpui::test]
+async fn source_line_ime_decorations_follow_multibyte_replacement(cx: &mut TestAppContext) {
+    use crate::components::markdown::code_highlight::{
+        CodeHighlightClass, CodeHighlightResult, CodeHighlightSpan, CodeLanguageKey,
+    };
+    use gpui::EntityInputHandler;
+
+    let cx = cx.add_empty_window();
+    let lines = shaped_lines("漢字\nbb\ncc", px(500.0), cx);
+    let block = cx.new(|cx| Block::with_record(cx, BlockRecord::paragraph("aa\nbb\ncc")));
+    let highlight = CodeHighlightResult {
+        language: CodeLanguageKey::Markdown,
+        spans: vec![
+            CodeHighlightSpan {
+                range: 3..5,
+                class: CodeHighlightClass::Keyword,
+            },
+            CodeHighlightSpan {
+                range: 6..8,
+                class: CodeHighlightClass::String,
+            },
+        ],
+    };
+    cx.update(|window, cx| {
+        crate::theme::ThemeManager::init(cx);
+        let theme = cx.global::<crate::theme::ThemeManager>().current_arc();
+        block.update(cx, |block, block_cx| {
+            block.selected_range = 0..2;
+            <Block as EntityInputHandler>::composition_started(block, window, block_cx);
+            <Block as EntityInputHandler>::replace_and_mark_text_in_range(
+                block,
+                None,
+                "漢字",
+                Some(2..2),
+                window,
+                block_cx,
+            );
+            let marked = block.ime_marked_range(&super::BlockImeCompositionOwner::BlockText);
+            let decorate = |line: usize, start: usize| {
+                super::decorate_source_line(
+                    &lines[line],
+                    start,
+                    &highlight,
+                    block,
+                    Hsla::from(rgba(0xffffffff)),
+                    &theme.colors,
+                    marked.as_ref(),
+                    px(1.0),
+                )
+            };
+            assert!(decorate(1, 3).is_none());
+            assert!(decorate(1, 7).is_some());
+            assert!(decorate(2, 10).is_some());
+        });
+    });
+}
+
 fn shaped_lines(
     text: &str,
     width: gpui::Pixels,

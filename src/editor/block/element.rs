@@ -19,50 +19,91 @@ const SOURCE_LINE_NUMBER_MIN_DIGITS: usize = 2;
 const SOURCE_LINE_NUMBER_GAP: f32 = 12.0;
 const SOURCE_LINE_NUMBER_DIGIT_WIDTH_RATIO: f32 = 0.62;
 
-/// 语法颜色独立于等宽源码的字形，按可见硬行切出已排序 token，后台高亮完成时不必重排全文。
-fn decorate_source_line(
-    line: &WrappedLine,
-    byte_start: usize,
-    highlight: &super::CodeHighlightResult,
+/// 仅构造当前可见硬行的绘制片段，避免高亮更新导致全文重新排版。
+fn source_line_decorations(
+    line_range: Range<usize>,
+    spans: &[(Range<usize>, Hsla)],
     base: Hsla,
-    colors: &ThemeColors,
-) -> Option<WrappedLine> {
-    let end = byte_start + line.text.len();
-    let first = highlight
-        .spans
-        .partition_point(|span| span.range.end <= byte_start);
+    marked_range: Option<&Range<usize>>,
+    underline_thickness: Pixels,
+) -> SmallVec<[DecorationRun; 8]> {
     let mut runs = SmallVec::<[DecorationRun; 8]>::new();
-    let mut start = byte_start;
-    let mut push = |len: usize, color| {
-        if len > 0 {
+    let mut start = line_range.start;
+    let mut push = |range: Range<usize>, color| {
+        let mut boundaries = [range.start, range.end, range.end, range.end];
+        if let Some(marked) = marked_range {
+            boundaries[1] = marked.start.clamp(range.start, range.end);
+            boundaries[2] = marked.end.clamp(range.start, range.end);
+            boundaries.sort_unstable();
+        }
+        for pair in boundaries.windows(2).filter(|pair| pair[0] < pair[1]) {
+            let is_marked =
+                marked_range.is_some_and(|marked| pair[0] < marked.end && marked.start < pair[1]);
             runs.push(DecorationRun {
-                len: len as u32,
+                len: (pair[1] - pair[0]) as u32,
                 color,
                 background_color: None,
-                underline: None,
+                underline: is_marked.then_some(UnderlineStyle {
+                    color: Some(color),
+                    thickness: underline_thickness,
+                    wavy: false,
+                }),
                 strikethrough: None,
             });
         }
     };
-    for span in &highlight.spans[first..] {
-        if span.range.start >= end {
-            break;
-        }
-        let span_start = start.max(span.range.start);
-        let span_end = end.min(span.range.end);
+    for (span, color) in spans {
+        let span_start = start.max(span.start);
+        let span_end = line_range.end.min(span.end);
         if span_end > span_start {
-            push(span_start - start, base);
-            push(
-                span_end - span_start,
-                code_highlight_color(colors, span.class),
-            );
+            push(start..span_start, base);
+            push(span_start..span_end, *color);
             start = span_end;
         }
     }
-    if start == byte_start {
+    push(start..line_range.end, base);
+    runs
+}
+
+/// 语法颜色与候选下划线仅覆盖可见硬行；候选替换后的偏移沿用输入法的源码映射。
+fn decorate_source_line(
+    line: &WrappedLine,
+    byte_start: usize,
+    highlight: &super::CodeHighlightResult,
+    input: &Block,
+    base: Hsla,
+    colors: &ThemeColors,
+    marked_range: Option<&Range<usize>>,
+    underline_thickness: Pixels,
+) -> Option<WrappedLine> {
+    let end = byte_start + line.text.len();
+    let first = highlight.spans.partition_point(|span| {
+        input
+            .ime_visible_range(&BlockImeCompositionOwner::BlockText, span.range.clone())
+            .end
+            <= byte_start
+    });
+    let mut spans = SmallVec::<[(Range<usize>, Hsla); 8]>::new();
+    for span in &highlight.spans[first..] {
+        let range =
+            input.ime_visible_range(&BlockImeCompositionOwner::BlockText, span.range.clone());
+        if range.start >= end {
+            break;
+        }
+        if range.end > byte_start && !range.is_empty() {
+            spans.push((range, code_highlight_color(colors, span.class)));
+        }
+    }
+    if spans.is_empty() {
         return None;
     }
-    push(end - start, base);
+    let runs = source_line_decorations(
+        byte_start..end,
+        &spans,
+        base,
+        marked_range,
+        underline_thickness,
+    );
     Some(line.with_decoration_runs(runs))
 }
 
