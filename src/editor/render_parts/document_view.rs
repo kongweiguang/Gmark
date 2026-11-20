@@ -23,6 +23,7 @@ fn markdown_callout_colors(
 
 impl Editor {
     /// 按实际编辑区尺寸同步浮层与行高缓存，避免旧字体度量影响虚拟窗口定位。
+    /// 滚动滑块只依赖纵向溢出，使静置的编辑区也能直接定位长文档。
     pub(super) fn render_document_content(
         &mut self,
         window: &mut Window,
@@ -102,10 +103,6 @@ impl Editor {
         let thumb_height = scrollbar_geometry.thumb_height;
         let thumb_top = scrollbar_geometry.thumb_top;
 
-        let show_custom_scrollbar = has_overflow
-            && (self.scrollbar_drag.is_some()
-                || self.scrollbar_hovered
-                || Instant::now() <= self.scrollbar_visible_until);
         let scrollbar_visual_width =
             if self.scrollbar_drag.is_some() || self.scrollbar_thumb_hovered {
                 EDITOR_SCROLLBAR_HOVER_WIDTH
@@ -591,7 +588,6 @@ impl Editor {
             .overflow_y_scroll()
             .scrollbar_width(px(0.0))
             .track_scroll(&self.scroll_handle)
-            .on_hover(cx.listener(Self::on_editor_hover))
             .capture_any_mouse_down(cx.listener(Self::on_editor_capture_mouse_down))
             .on_mouse_down(
                 MouseButton::Right,
@@ -687,7 +683,7 @@ impl Editor {
             .relative()
             .child(scroll_content);
 
-        let content_area = if show_custom_scrollbar {
+        let content_area = if has_overflow {
             let scrollbar_editor = editor.clone();
             let track_origin_y = f32::from(viewport_bounds.origin.y);
             content_area.child(
@@ -726,7 +722,7 @@ impl Editor {
                             .right_0()
                             .w(px(scrollbar_visual_width))
                             .rounded(px(999.0))
-                            .bg(theme.colors.workbench.control_surface),
+                            .bg(theme.colors.scrollbar_thumb),
                     )
                     .child(
                         canvas(

@@ -150,12 +150,11 @@ impl Editor {
         }
     }
 
+    /// 分屏右侧的临时交互归属即将卸载的表面，不能带入下次分屏。
     pub(super) fn exit_split_view(&mut self, target: ViewMode, cx: &mut Context<Self>) {
         self.split_resize_session = None;
         self.split_preview_scrollbar_drag = None;
         self.split_preview_scrollbar_hovered = false;
-        self.split_preview_scrollbar_fade_task = None;
-        self.split_preview_scrollbar_visible_until = Instant::now();
         self.split_projection_task = None;
         self.split_projection_scheduled_revision = None;
         match target {

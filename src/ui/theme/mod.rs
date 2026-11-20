@@ -184,7 +184,7 @@ pub struct ThemeColors {
     pub image_placeholder_text: Hsla,
     /// Caption text colour shown below rendered images.
     pub image_caption_text: Hsla,
-    /// Scrollbar thumb colour (auto-fading overlay).
+    /// Scrollbar thumb colour for an overlay on the editor background.
     pub scrollbar_thumb: Hsla,
     /// Text-editing cursor (caret) colour.
     pub cursor: Hsla,

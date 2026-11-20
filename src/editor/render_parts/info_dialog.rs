@@ -230,7 +230,7 @@ impl Editor {
         self.on_workspace_resize_mouse_up(event, window, cx);
     }
 
-    /// Split 使用自身实际列宽识别行高缓存；投影或宽度变化后从未知测量前沿恢复深滚。
+    /// Split 使用自身实际列宽识别行高缓存，并按实际溢出显示滑块，与左侧交互一致。
     pub(super) fn render_split_preview_pane(
         &mut self,
         theme: &Theme,
@@ -268,10 +268,7 @@ impl Editor {
         let current_scroll_y = (-f32::from(scroll_handle.offset().y)).clamp(0.0, max_scroll_y);
         let scrollbar_geometry =
             Self::scrollbar_geometry(viewport_height, max_scroll_y, current_scroll_y);
-        let show_scrollbar = max_scroll_y > 0.5
-            && (self.split_preview_scrollbar_drag.is_some()
-                || self.split_preview_scrollbar_hovered
-                || Instant::now() <= self.split_preview_scrollbar_visible_until);
+        let show_scrollbar = max_scroll_y > 0.5;
         let spacing_for = |index: usize| {
             visible[index]
                 .entity

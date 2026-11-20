@@ -364,17 +364,12 @@ pub struct Editor {
     /// cannot clobber a single shared flag and tear the menu down.
     menu_submenu_bridge_hovered: bool,
     menu_close_task: Option<Task<()>>,
-    scrollbar_hovered: bool,
-    /// 仅表示指针位于 scrollbar hitbox；编辑画布 hover 只控制淡入淡出，不得放大 thumb。
+    /// 只在滑块命中区悬停时加宽滑块，避免整个画布悬停触发视觉变化。
     scrollbar_thumb_hovered: bool,
-    scrollbar_visible_until: Instant,
-    scrollbar_fade_task: Option<Task<()>>,
     /// 鼠标滚轮的行级输入在短时间内插值；触控板像素输入始终绕过该状态。
     smooth_scroll_animation: Option<SmoothScrollAnimation>,
     smooth_scroll_task: Option<Task<()>>,
     split_preview_scrollbar_hovered: bool,
-    split_preview_scrollbar_visible_until: Instant,
-    split_preview_scrollbar_fade_task: Option<Task<()>>,
     /// Forces a repaint shortly after a pending scroll-into-view that could
     /// not be satisfied yet (the target block has no measured bounds), so the
     /// scroll lands on the next frame instead of waiting for the cursor blink.

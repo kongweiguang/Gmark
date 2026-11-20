@@ -3,6 +3,7 @@
 use super::*;
 
 impl Editor {
+    /// 只更新滑块外观，保留固定命中区，避免进入悬停时鼠标目标位移。
     pub(crate) fn on_scrollbar_thumb_hover(
         &mut self,
         hovered: &bool,
@@ -10,11 +11,7 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         self.scrollbar_thumb_hovered = *hovered;
-        if *hovered {
-            self.bump_scrollbar_visibility(cx);
-        } else {
-            cx.notify();
-        }
+        cx.notify();
     }
 
     pub(crate) fn on_menu_bar_hover(
@@ -194,6 +191,7 @@ impl Editor {
         true
     }
 
+    /// 主表面保留滚动驱动权，让 Split 的右侧跟随源码位置。
     pub(crate) fn on_editor_scroll_wheel(
         &mut self,
         event: &ScrollWheelEvent,
@@ -204,11 +202,9 @@ impl Editor {
         if let Some(state) = self.split_preview.as_mut() {
             state.scroll_driver = Some(SplitScrollDriver::Source);
         }
-        if self.extend_scrollbar_visibility(cx) {
-            cx.notify();
-        }
     }
 
+    /// 右侧发起滚动时显式转移驱动权，避免源码同步覆盖用户输入。
     pub(crate) fn on_split_preview_scroll_wheel(
         &mut self,
         event: &ScrollWheelEvent,
@@ -218,50 +214,10 @@ impl Editor {
         self.handle_scroll_wheel(SplitScrollDriver::Preview, event, window, cx);
         if let Some(state) = self.split_preview.as_mut() {
             state.scroll_driver = Some(SplitScrollDriver::Preview);
-            if self.extend_split_preview_scrollbar_visibility(cx) {
-                cx.notify();
-            }
         }
     }
 
-    fn extend_split_preview_scrollbar_visibility(&mut self, cx: &mut Context<Self>) -> bool {
-        let duration = Duration::from_millis(900);
-        let now = Instant::now();
-        let became_visible = now > self.split_preview_scrollbar_visible_until;
-        self.split_preview_scrollbar_visible_until = now + duration;
-
-        if self.split_preview_scrollbar_fade_task.is_none() {
-            self.split_preview_scrollbar_fade_task = Some(cx.spawn(
-                async move |this: WeakEntity<Self>, cx: &mut AsyncApp| loop {
-                    let remaining = match this.update(cx, |this, _cx| {
-                        this.split_preview_scrollbar_visible_until
-                            .checked_duration_since(Instant::now())
-                    }) {
-                        Ok(Some(remaining)) if !remaining.is_zero() => remaining,
-                        Ok(_) => {
-                            let _ = this.update(cx, |this, cx| {
-                                this.split_preview_scrollbar_fade_task = None;
-                                cx.notify();
-                            });
-                            break;
-                        }
-                        Err(_) => break,
-                    };
-                    cx.background_executor()
-                        .timer(remaining + Duration::from_millis(50))
-                        .await;
-                },
-            ));
-        }
-
-        became_visible
-    }
-
-    pub(crate) fn bump_split_preview_scrollbar_visibility(&mut self, cx: &mut Context<Self>) {
-        self.extend_split_preview_scrollbar_visibility(cx);
-        cx.notify();
-    }
-
+    /// 右侧悬停只依赖滑块命中区，保持两侧的加宽反馈一致。
     pub(crate) fn on_split_preview_scrollbar_hover(
         &mut self,
         hovered: &bool,
@@ -269,11 +225,7 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         self.split_preview_scrollbar_hovered = *hovered;
-        if *hovered {
-            self.bump_split_preview_scrollbar_visibility(cx);
-        } else {
-            cx.notify();
-        }
+        cx.notify();
     }
 
     /// 翻页归属实际文本焦点；候选终态先于插入点和视口移动。
@@ -365,10 +317,10 @@ impl Editor {
         // would otherwise re-center the active block on the next frame.
         self.pending_scroll_active_block_into_view = false;
         self.pending_scroll_recheck_after_layout = false;
-        self.extend_scrollbar_visibility(cx);
         cx.notify();
     }
 
+    /// 冻结拖动起点的轨道与内容尺寸，避免虚拟布局重新测量时滑块跳动。
     pub(crate) fn start_scrollbar_drag(
         &mut self,
         pointer_offset_y: f32,
@@ -386,10 +338,10 @@ impl Editor {
         });
         self.pending_scroll_active_block_into_view = false;
         self.pending_scroll_recheck_after_layout = false;
-        self.extend_scrollbar_visibility(cx);
         cx.notify();
     }
 
+    /// 按拖动开始时的几何映射指针位置，保持长文滚动比例稳定。
     pub(crate) fn update_scrollbar_drag(
         &mut self,
         pointer_y_in_track: f32,
@@ -412,17 +364,17 @@ impl Editor {
         let mut offset = self.scroll_handle.offset();
         offset.y = -px(scroll_y);
         self.scroll_handle.set_offset(offset);
-        self.extend_scrollbar_visibility(cx);
         cx.notify();
     }
 
+    /// 仅在结束实际拖动时重绘，避免普通鼠标释放造成额外刷新。
     pub(crate) fn end_scrollbar_drag(&mut self, cx: &mut Context<Self>) {
         if self.scrollbar_drag.take().is_some() {
-            self.extend_scrollbar_visibility(cx);
             cx.notify();
         }
     }
 
+    /// 冻结右侧的轨道几何，同时把同步驱动权交给被拖动的预览。
     pub(crate) fn start_split_preview_scrollbar_drag(
         &mut self,
         pointer_offset_y: f32,
@@ -441,9 +393,10 @@ impl Editor {
         if let Some(state) = self.split_preview.as_mut() {
             state.scroll_driver = Some(SplitScrollDriver::Preview);
         }
-        self.bump_split_preview_scrollbar_visibility(cx);
+        cx.notify();
     }
 
+    /// 右侧按自己的内容高度映射拖动位置，由既有同步流程更新左侧。
     pub(crate) fn update_split_preview_scrollbar_drag(
         &mut self,
         pointer_y_in_track: f32,
@@ -467,12 +420,13 @@ impl Editor {
             state.scroll_handle.set_offset(offset);
             state.scroll_driver = Some(SplitScrollDriver::Preview);
         }
-        self.bump_split_preview_scrollbar_visibility(cx);
+        cx.notify();
     }
 
+    /// 右侧结束拖动仅释放临时交互状态，避免改动正文或选择。
     pub(crate) fn end_split_preview_scrollbar_drag(&mut self, cx: &mut Context<Self>) {
         if self.split_preview_scrollbar_drag.take().is_some() {
-            self.bump_split_preview_scrollbar_visibility(cx);
+            cx.notify();
         }
     }
 

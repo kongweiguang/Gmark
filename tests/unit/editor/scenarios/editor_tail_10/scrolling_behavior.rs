@@ -289,6 +289,39 @@ async fn clicking_bottom_padding_of_short_document_focuses_document_end(cx: &mut
     });
 }
 
+/// 覆盖无鼠标交互时的真实渲染，防止切换模式后必须先滚动才能找到滑块。
+#[gpui::test]
+async fn markdown_scrollbars_are_visible_without_hover_in_all_modes(cx: &mut TestAppContext) {
+    init_editor_test_app(cx);
+    let markdown = "# Heading\n\nParagraph with enough text to scroll.\n\n".repeat(120);
+    let (editor, visual) =
+        cx.add_window_view(move |_window, cx| Editor::from_markdown(cx, markdown, None));
+    visual.simulate_resize(size(px(720.0), px(520.0)));
+
+    for mode in [
+        ViewMode::Rendered,
+        ViewMode::Source,
+        ViewMode::Preview,
+        ViewMode::Split,
+    ] {
+        editor.update(visual, |editor, cx| editor.set_view_mode(mode, cx));
+        redraw(visual);
+        redraw(visual);
+        assert!(
+            visual.debug_bounds("editor-scrollbar-thumb").is_some(),
+            "missing main scrollbar in {mode:?}"
+        );
+        assert_eq!(
+            visual
+                .debug_bounds("split-preview-scrollbar-thumb")
+                .is_some(),
+            mode == ViewMode::Split,
+            "only Split should expose a second scrollbar"
+        );
+    }
+}
+
+/// 在真实悬停和拖动期间验证命中区稳定，避免滑块样式影响布局或编辑事务。
 #[gpui::test]
 async fn editor_scrollbar_separates_stable_hitbox_from_hover_thumb(cx: &mut TestAppContext) {
     init_editor_test_app(cx);
@@ -299,11 +332,7 @@ async fn editor_scrollbar_separates_stable_hitbox_from_hover_thumb(cx: &mut Test
     let (editor, visual) =
         cx.add_window_view(move |_window, cx| Editor::from_markdown(cx, markdown, None));
     visual.simulate_resize(size(px(720.0), px(520.0)));
-    editor.update(visual, |editor, cx| {
-        editor.scrollbar_hovered = true;
-        editor.scrollbar_visible_until = Instant::now() + Duration::from_secs(1);
-        cx.notify();
-    });
+    redraw(visual);
     redraw(visual);
 
     let source = editor.read_with(visual, |editor, _cx| editor.source_document.text());

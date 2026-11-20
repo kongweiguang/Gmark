@@ -236,6 +236,7 @@ async fn split_preview_uses_same_reading_top_padding_without_mutating_document(
     visual.update(|window, _cx| assert_eq!(window.scale_factor(), 2.0));
 }
 
+/// 验证右侧拖动仍驱动同步滚动，且不改变正文或历史。
 #[gpui::test]
 async fn split_preview_scrollbar_is_stable_draggable_and_non_destructive(cx: &mut TestAppContext) {
     init_editor_test_app(cx);
@@ -247,9 +248,7 @@ async fn split_preview_scrollbar_is_stable_draggable_and_non_destructive(cx: &mu
         cx.add_window_view(move |_window, cx| Editor::from_markdown(cx, markdown, None));
     visual.simulate_resize(size(px(720.0), px(520.0)));
     editor.update(visual, |editor, cx| {
-        editor.set_view_mode(ViewMode::Split, cx);
-        editor.split_preview_scrollbar_visible_until = Instant::now() + Duration::from_secs(1);
-        cx.notify();
+        editor.set_view_mode(ViewMode::Split, cx)
     });
     redraw(visual);
     redraw(visual);
@@ -307,10 +306,7 @@ async fn split_preview_scrollbar_is_stable_draggable_and_non_destructive(cx: &mu
     visual.run_until_parked();
 
     visual.simulate_resize(size(px(1180.0), px(780.0)));
-    editor.update(visual, |editor, cx| {
-        editor.split_preview_scrollbar_visible_until = Instant::now() + Duration::from_secs(1);
-        cx.notify();
-    });
+    redraw(visual);
     redraw(visual);
     let pane = visual.debug_bounds("split-preview-pane").unwrap();
     let hitbox = visual
@@ -326,7 +322,6 @@ async fn split_preview_scrollbar_is_stable_draggable_and_non_destructive(cx: &mu
     editor.update(visual, |editor, _cx| {
         assert!(editor.split_preview_scrollbar_drag.is_none());
         assert!(!editor.split_preview_scrollbar_hovered);
-        assert!(editor.split_preview_scrollbar_fade_task.is_none());
         assert_eq!(editor.source_document.text(), source);
         assert_eq!(editor.source_document.revision(), revision);
         assert_eq!(editor.document_dirty, dirty);
