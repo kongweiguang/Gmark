@@ -2,6 +2,11 @@
 
 use super::*;
 
+/// 大型常驻源码在绘制阶段叠加语法颜色，后台结果无需改变已有布局。
+fn shared_source_paint_syntax(bytes: usize) -> bool {
+    bytes >= 1024 * 1024
+}
+
 /// Custom low-level [`Element`] that renders a block's inline-formatted
 /// text with selection highlights and a blinking cursor.
 ///
@@ -51,7 +56,11 @@ pub struct PrepaintState {
     text_bounds: Bounds<Pixels>,
     source_horizontal_offset: Pixels,
     source_layout_cache_key: Option<SourceLayoutCacheKey>,
+    source_layout_cache_size: Option<Size<Pixels>>,
+    source_layout_measurements: Vec<SourceLayoutMeasurement>,
     source_layout_cache_hit: bool,
+    source_paint_only_syntax: bool,
+    source_text_color: Hsla,
     source_line_numbers: Vec<(Pixels, ShapedLine)>,
     visible_lines: SmallVec<[VisibleHardLine; 4]>,
     source_gutter_separator: Option<PaintQuad>,
@@ -66,6 +75,8 @@ pub struct PrepaintState {
 pub struct BlockTextRequestLayoutState {
     lines: Rc<RefCell<Option<Arc<Vec<WrappedLine>>>>>,
     source_layout_cache_key: Rc<RefCell<Option<SourceLayoutCacheKey>>>,
+    source_layout_cache_size: Rc<RefCell<Option<Size<Pixels>>>>,
+    source_layout_measurements: Rc<RefCell<Vec<SourceLayoutMeasurement>>>,
     source_layout_cache_hit: Rc<Cell<bool>>,
 }
 
@@ -149,11 +160,34 @@ impl Element for BlockTextElement {
             input.show_source_line_numbers() || input.kind().is_code_block();
         let compact_source_host = input.compact_source_host();
         let source_layout_identity = input.source_layout_identity.clone();
+        let large_resident_source = input.is_source_raw_mode()
+            && input.show_source_line_numbers()
+            && shared_source_paint_syntax(shared_text.len());
+        let cache_source = !is_placeholder
+            && input.is_source_raw_mode()
+            && (input.show_source_line_numbers() || source_layout_identity.is_some())
+            && (!input.has_ime_composition() || large_resident_source);
         let cached_source_layout_key = input.source_layout_cache_key.clone();
-        let cached_source_layout = source_layout_identity
+        let shared_text = if large_resident_source && input.has_ime_composition() {
+            cached_source_layout_key
+                .as_ref()
+                .filter(|key| key.text.as_ref() == shared_text.as_ref())
+                .map_or(shared_text, |key| key.text.clone())
+        } else {
+            shared_text
+        };
+        let cached_source_layout = cache_source.then(|| input.last_layout.clone()).flatten();
+        let cached_source_layout_size = input.source_layout_cache_size;
+        let previous_measurements = input.source_layout_measurements.clone();
+        let source_layout_measurements = Rc::new(RefCell::new(previous_measurements.clone()));
+        let measurements = Rc::clone(&source_layout_measurements);
+        let multi_measure = input.show_source_line_numbers() && cache_source;
+        let source_syntax_generation = input.source_syntax_generation;
+        let source_line_count = cached_source_layout_key
             .as_ref()
-            .and_then(|_| input.last_layout.clone());
-        let source_line_count = source_line_count(shared_text.as_ref());
+            .filter(|key| std::ptr::eq(key.text.as_ref(), shared_text.as_ref()))
+            .and_then(|_| cached_source_layout.as_ref().map(|lines| lines.len()))
+            .unwrap_or_else(|| source_line_count(shared_text.as_ref()));
         let style = window.text_style();
 
         let (display_text, text_color): (SharedString, Hsla) = if is_placeholder {
@@ -177,30 +211,8 @@ impl Element for BlockTextElement {
             strikethrough: None,
         };
 
-        let runs: Vec<TextRun> = if !is_placeholder {
-            if input.kind().is_code_block() || input.code_highlight_result().is_some() {
-                build_code_text_runs(
-                    input,
-                    &display_text,
-                    &run,
-                    px(theme.dimensions.underline_thickness),
-                    &theme.colors,
-                )
-            } else {
-                build_text_runs(
-                    input,
-                    &display_text,
-                    &run,
-                    px(theme.dimensions.underline_thickness),
-                    theme.colors.text_link,
-                    theme.colors.code_bg,
-                    wb.danger,
-                    show_inline_code_backgrounds,
-                )
-            }
-        } else {
-            vec![run]
-        };
+        let input_entity = self.input.clone();
+        let danger = wb.danger;
 
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line_height = window.line_height();
@@ -210,6 +222,7 @@ impl Element for BlockTextElement {
         let marked_range = input
             .ime_marked_range(&super::BlockImeCompositionOwner::BlockText)
             .or_else(|| input.marked_range.clone());
+        let paint_only_syntax = large_resident_source;
         let source_line_number_gutter_width = show_source_line_numbers
             .then(|| source_line_number_gutter_width(source_line_count, font_size))
             .unwrap_or(px(0.0));
@@ -218,6 +231,8 @@ impl Element for BlockTextElement {
         let shared_lines_clone = shared_lines.clone();
         let shared_source_layout_cache_key = Rc::new(RefCell::new(None));
         let shared_source_layout_cache_key_clone = shared_source_layout_cache_key.clone();
+        let shared_source_layout_cache_size = Rc::new(RefCell::new(None));
+        let shared_source_layout_cache_size_clone = shared_source_layout_cache_size.clone();
         let shared_source_layout_cache_hit = Rc::new(Cell::new(false));
         let shared_source_layout_cache_hit_clone = shared_source_layout_cache_hit.clone();
 
@@ -228,7 +243,7 @@ impl Element for BlockTextElement {
 
         let layout_id = window.request_measured_layout(
             layout_style,
-            move |known_dimensions, available_space, window, _cx| {
+            move |known_dimensions, available_space, window, cx| {
                 let wrap_width = known_dimensions.width.or(match available_space.width {
                     AvailableSpace::Definite(x) => Some(x),
                     AvailableSpace::MinContent => Some(px(1.0)),
@@ -240,51 +255,134 @@ impl Element for BlockTextElement {
                         .unwrap_or(px(1.0))
                 });
 
-                let source_layout_cache_key =
-                    source_layout_identity
-                        .clone()
-                        .map(|identity| SourceLayoutCacheKey {
-                            identity,
-                            text: display_text.clone(),
-                            marked_range: marked_range.clone(),
-                            theme_identity,
-                            font: source_font.clone(),
-                            font_size_bits: f32::from(font_size).to_bits(),
-                            line_height_bits: f32::from(line_height).to_bits(),
-                            scale_bits,
-                            wrap_width_bits: text_wrap_width
-                                .map(|width| f32::from(width).to_bits()),
-                            soft_wrap: text_wrap_width.is_some(),
-                        });
+                let source_layout_cache_key = cache_source.then(|| SourceLayoutCacheKey {
+                    identity: source_layout_identity.clone(),
+                    text: display_text.clone(),
+                    syntax_generation: if paint_only_syntax {
+                        0
+                    } else {
+                        source_syntax_generation
+                    },
+                    marked_range: marked_range.clone(),
+                    theme_identity,
+                    text_color,
+                    font: source_font.clone(),
+                    font_size_bits: f32::from(font_size).to_bits(),
+                    line_height_bits: f32::from(line_height).to_bits(),
+                    scale_bits,
+                    wrap_width_bits: text_wrap_width.map(|width| f32::from(width).to_bits()),
+                    soft_wrap: text_wrap_width.is_some(),
+                });
 
-                if source_layout_cache_key.is_some()
-                    && source_layout_cache_key == cached_source_layout_key
-                    && let Some(lines) = cached_source_layout.clone()
-                {
-                    let total_size =
-                        measured_text_size(&lines, line_height, source_line_number_gutter_width);
+                let cached = source_layout_cache_key.as_ref().and_then(|key| {
+                    if multi_measure {
+                        let mut entries = measurements.borrow_mut();
+                        entries.retain(|entry| entry.key.same_text_style(key));
+                        let found = entries.iter().position(|entry| entry.key == *key)?;
+                        let entry = entries.remove(found);
+                        let result = (Arc::clone(&entry.lines), entry.size);
+                        entries.push(entry);
+                        Some(result)
+                    } else if Some(key) == cached_source_layout_key.as_ref() {
+                        Some((cached_source_layout.clone()?, cached_source_layout_size?))
+                    } else {
+                        None
+                    }
+                });
+                if let Some((lines, total_size)) = cached {
                     *shared_lines_clone.borrow_mut() = Some(lines);
                     *shared_source_layout_cache_key_clone.borrow_mut() = source_layout_cache_key;
+                    *shared_source_layout_cache_size_clone.borrow_mut() = Some(total_size);
                     shared_source_layout_cache_hit_clone.set(true);
                     return total_size;
                 }
 
-                match window.text_system().shape_text(
-                    display_text.clone(),
-                    font_size,
-                    &runs,
-                    text_wrap_width,
-                    None,
-                ) {
+                let _trace = (display_text.len() >= 1024 * 1024)
+                    .then(|| crate::perf::span("resident_source_layout_cache_miss"));
+                let input = input_entity.read(cx);
+                let runs = if paint_only_syntax && marked_range.is_none() {
+                    vec![run.clone()]
+                } else if !is_placeholder {
+                    if !paint_only_syntax
+                        && (input.kind().is_code_block() || input.code_highlight_result().is_some())
+                    {
+                        build_code_text_runs(
+                            input,
+                            &display_text,
+                            &run,
+                            px(theme.dimensions.underline_thickness),
+                            &theme.colors,
+                        )
+                    } else {
+                        build_text_runs(
+                            input,
+                            &display_text,
+                            &run,
+                            px(theme.dimensions.underline_thickness),
+                            theme.colors.text_link,
+                            theme.colors.code_bg,
+                            danger,
+                            show_inline_code_backgrounds,
+                        )
+                    }
+                } else {
+                    vec![run.clone()]
+                };
+                let previous = source_layout_cache_key.as_ref().and_then(|key| {
+                    (paint_only_syntax && marked_range.is_none())
+                        .then(|| {
+                            previous_measurements.iter().find(|entry| {
+                                entry.key.wrap_width_bits == key.wrap_width_bits
+                                    && entry.key.same_style(key)
+                            })
+                        })
+                        .flatten()
+                });
+                let shaped = if let Some(previous) = previous {
+                    reshape_plain_source(
+                        window.text_system(),
+                        &previous.lines,
+                        &display_text,
+                        source_line_count,
+                        &run,
+                        font_size,
+                        text_wrap_width,
+                    )
+                } else {
+                    window
+                        .text_system()
+                        .shape_text(
+                            display_text.clone(),
+                            font_size,
+                            &runs,
+                            text_wrap_width,
+                            None,
+                        )
+                        .map(|lines| lines.into_vec())
+                };
+                match shaped {
                     Ok(lines) => {
                         let total_size = measured_text_size(
                             &lines,
                             line_height,
                             source_line_number_gutter_width,
                         );
-                        *shared_lines_clone.borrow_mut() = Some(Arc::new(lines.into_vec()));
+                        let lines = Arc::new(lines);
+                        if multi_measure && let Some(key) = source_layout_cache_key.clone() {
+                            let mut entries = measurements.borrow_mut();
+                            if entries.len() >= 4 {
+                                entries.remove(0);
+                            }
+                            entries.push(SourceLayoutMeasurement {
+                                key,
+                                size: total_size,
+                                lines: Arc::clone(&lines),
+                            });
+                        }
+                        *shared_lines_clone.borrow_mut() = Some(lines);
                         *shared_source_layout_cache_key_clone.borrow_mut() =
                             source_layout_cache_key;
+                        *shared_source_layout_cache_size_clone.borrow_mut() = Some(total_size);
                         total_size
                     }
                     Err(_) => Size::default(),
@@ -297,6 +395,8 @@ impl Element for BlockTextElement {
             BlockTextRequestLayoutState {
                 lines: shared_lines,
                 source_layout_cache_key: shared_source_layout_cache_key,
+                source_layout_cache_size: shared_source_layout_cache_size,
+                source_layout_measurements,
                 source_layout_cache_hit: shared_source_layout_cache_hit,
             },
         )
@@ -407,6 +507,40 @@ impl Element for BlockTextElement {
         let cursor_width = theme.dimensions.cursor_width;
         let selection_color = wb.selection;
         let text_align = input.text_align();
+        let resident_source = input.is_source_raw_mode() && input.show_source_line_numbers();
+        let source_paint_only_syntax = resident_source
+            && shared_source_paint_syntax(display_text.len())
+            && !input.has_ime_composition()
+            && input.marked_range.is_none();
+        let caret_bounds = (focused || editor_selection_range.is_some())
+            .then(|| {
+                if resident_source {
+                    visible_cursor_bounds(
+                        &lines,
+                        &visible_lines,
+                        text_bounds,
+                        line_height,
+                        cursor,
+                        text_align,
+                        px(cursor_width),
+                    )
+                } else if !is_placeholder
+                    && (selected_range.is_empty() || input.is_source_raw_mode())
+                {
+                    cursor_bounds_for_offset(
+                        &lines,
+                        text_bounds,
+                        line_height,
+                        display_text.as_ref(),
+                        cursor,
+                        text_align,
+                        px(cursor_width),
+                    )
+                } else {
+                    None
+                }
+            })
+            .flatten();
 
         let (selection_quads, cursor_quad) =
             if (focused || editor_selection_range.is_some()) && !lines.is_empty() {
@@ -431,29 +565,33 @@ impl Element for BlockTextElement {
                     // No selection: just draw the cursor
                     (
                         vec![],
-                        cursor_bounds_for_offset(
+                        caret_bounds.map(|bounds| fill(bounds, cursor_color)),
+                    )
+                } else {
+                    let segments = if resident_source {
+                        visible_selection_bounds(
+                            &lines,
+                            &visible_lines,
+                            text_bounds,
+                            line_height,
+                            selected_range,
+                            text_align,
+                            clip.top().max(px(0.0))..clip.bottom().min(viewport_bottom),
+                        )
+                    } else {
+                        range_segment_bounds(
                             &lines,
                             text_bounds,
                             line_height,
                             display_text.as_ref(),
-                            cursor,
+                            selected_range,
                             text_align,
-                            px(cursor_width),
                         )
-                        .map(|bounds| fill(bounds, cursor_color)),
-                    )
-                } else {
-                    let quads = range_segment_bounds(
-                        &lines,
-                        text_bounds,
-                        line_height,
-                        display_text.as_ref(),
-                        selected_range,
-                        text_align,
-                    )
-                    .into_iter()
-                    .map(|bounds| fill(bounds, selection_color))
-                    .collect();
+                    };
+                    let quads = segments
+                        .into_iter()
+                        .map(|bounds| fill(bounds, selection_color))
+                        .collect();
                     (quads, None)
                 }
             } else {
@@ -463,16 +601,7 @@ impl Element for BlockTextElement {
         let active_source_line =
             (focused && input.is_source_raw_mode() && !is_placeholder && !lines.is_empty())
                 .then(|| {
-                    cursor_bounds_for_offset(
-                        &lines,
-                        text_bounds,
-                        line_height,
-                        display_text.as_ref(),
-                        cursor,
-                        text_align,
-                        px(cursor_width),
-                    )
-                    .map(|caret| {
+                    caret_bounds.map(|caret| {
                         fill(
                             Bounds::new(
                                 point(bounds.left(), caret.top()),
@@ -529,7 +658,13 @@ impl Element for BlockTextElement {
             text_bounds,
             source_horizontal_offset,
             source_layout_cache_key: request_layout.source_layout_cache_key.borrow().clone(),
+            source_layout_cache_size: *request_layout.source_layout_cache_size.borrow(),
+            source_layout_measurements: std::mem::take(
+                &mut *request_layout.source_layout_measurements.borrow_mut(),
+            ),
             source_layout_cache_hit: request_layout.source_layout_cache_hit.get(),
+            source_paint_only_syntax,
+            source_text_color: style.color,
             source_line_numbers,
             visible_lines,
             source_gutter_separator,
@@ -631,8 +766,36 @@ impl Element for BlockTextElement {
                 .ok();
         }
 
-        for visible in &prepaint.visible_lines {
+        let theme = cx.global::<ThemeManager>().current_arc();
+        let decorated_lines = prepaint
+            .source_paint_only_syntax
+            .then(|| {
+                self.input
+                    .read(cx)
+                    .code_highlight_result()
+                    .map(|highlight| {
+                        prepaint
+                            .visible_lines
+                            .iter()
+                            .map(|visible| {
+                                decorate_source_line(
+                                    &lines[visible.index],
+                                    visible.byte_start,
+                                    highlight,
+                                    prepaint.source_text_color,
+                                    &theme.colors,
+                                )
+                            })
+                            .collect::<SmallVec<[_; 4]>>()
+                    })
+            })
+            .flatten();
+        for (index, visible) in prepaint.visible_lines.iter().enumerate() {
             let line = &lines[visible.index];
+            let line = decorated_lines
+                .as_ref()
+                .and_then(|decorations| decorations[index].as_ref())
+                .unwrap_or(line);
             let origin_x = aligned_line_left(line, text_bounds, text_align);
             line.paint(
                 point(origin_x, visible.top),
@@ -661,6 +824,9 @@ impl Element for BlockTextElement {
         self.input.update(cx, |input, _cx| {
             input.last_layout = Some(lines);
             input.source_layout_cache_key = prepaint.source_layout_cache_key.clone();
+            input.source_layout_cache_size = prepaint.source_layout_cache_size;
+            input.source_layout_measurements =
+                std::mem::take(&mut prepaint.source_layout_measurements);
             if prepaint.source_layout_cache_key.is_some() {
                 if prepaint.source_layout_cache_hit {
                     input.source_layout_cache_hits =
@@ -675,6 +841,48 @@ impl Element for BlockTextElement {
             input.last_line_height = line_height;
         });
     }
+}
+
+/// 纯源码的硬行独立成形。编辑后保留未变的首尾行，避免单字输入重新塑形百万字。
+pub(super) fn reshape_plain_source(
+    text_system: &WindowTextSystem,
+    previous: &[WrappedLine],
+    text: &str,
+    line_count: usize,
+    run: &TextRun,
+    font_size: Pixels,
+    wrap_width: Option<Pixels>,
+) -> Result<Vec<WrappedLine>> {
+    let prefix = previous
+        .iter()
+        .zip(text.split('\n'))
+        .take_while(|(line, next)| line.text.as_ref() == *next)
+        .count();
+    let suffix = previous[prefix..]
+        .iter()
+        .rev()
+        .zip(text.rsplit('\n'))
+        .take(line_count.saturating_sub(prefix))
+        .take_while(|(line, next)| line.text.as_ref() == *next)
+        .count();
+    let mut result = Vec::with_capacity(line_count);
+    result.extend_from_slice(&previous[..prefix]);
+    if prefix + suffix < line_count {
+        let start = previous[..prefix]
+            .iter()
+            .map(|line| line.text.len() + 1)
+            .sum::<usize>();
+        let tail = previous[previous.len() - suffix..]
+            .iter()
+            .map(|line| line.text.len() + 1)
+            .sum::<usize>();
+        let changed: SharedString = text[start..text.len() - tail].to_owned().into();
+        let mut run = run.clone();
+        run.len = changed.len();
+        result.extend(text_system.shape_text(changed, font_size, &[run], wrap_width, None)?);
+    }
+    result.extend_from_slice(&previous[previous.len() - suffix..]);
+    Ok(result)
 }
 
 fn measured_text_size(

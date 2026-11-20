@@ -4,7 +4,29 @@
 use gmark_source_tools::build_source_syntax_contexts;
 use gmark_source_tools::{
     HighlightEngine, SourceLanguage, TokenClass, highlight_fenced_code, highlight_source,
+    highlight_source_cancellable,
 };
+
+/// 取消不能伪装成成功的空高亮；正常快照与原有同步接口语义一致。
+#[test]
+fn cancellable_highlight_preserves_result_and_rejects_cancelled_work() {
+    let source = "# 中文 heading\n\n`code`\n";
+    let flag = std::sync::atomic::AtomicUsize::new(0);
+    let normal = highlight_source(SourceLanguage::Markdown, source);
+    assert_eq!(
+        highlight_source_cancellable(SourceLanguage::Markdown, source, &flag),
+        Some(normal)
+    );
+    flag.store(1, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        highlight_source_cancellable(SourceLanguage::Markdown, source, &flag),
+        None
+    );
+    assert_eq!(
+        highlight_source_cancellable(SourceLanguage::Json, "{}", &flag),
+        None
+    );
+}
 
 #[test]
 fn unknown_fences_fall_back_to_plain_text_and_json_keeps_lexical_spans() {

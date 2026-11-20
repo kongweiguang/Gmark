@@ -176,8 +176,22 @@ impl Block {
         self.sync_code_highlight();
     }
 
+    /// 高亮可在正文不变时因语言或上下文改变，代次用于安全失效已有排版颜色。
     pub(super) fn sync_code_highlight(&mut self) {
+        self.source_highlight_cancel = None;
+        self.source_syntax_generation = self.source_syntax_generation.wrapping_add(1);
         let visible_text = self.render_cache.visible_text();
+        self.source_highlight_pending = false;
+        if self.is_source_raw_mode()
+            && self.show_source_line_numbers()
+            && self.source_syntax_context.is_none()
+            && self.source_syntax_language.is_some()
+            && visible_text.len() >= 1024 * 1024
+        {
+            self.code_highlight = None;
+            self.source_highlight_pending = true;
+            return;
+        }
         self.code_highlight = match &self.record.kind {
             BlockKind::CodeBlock { language } => {
                 highlight_code_block(language.as_deref().map(|value| &**value), visible_text)
@@ -190,6 +204,52 @@ impl Block {
                     .or_else(|| highlight_code_block(language, visible_text))
             }
         };
+    }
+
+    /// 大型常驻源码的高亮移到后台，同一实体一次只分析一个快照；后续编辑合并为最新代次。
+    pub(crate) fn schedule_source_highlight(&mut self, cx: &mut Context<Self>) {
+        if !self.source_highlight_pending || self.source_highlight_running {
+            return;
+        }
+        let Some(language) = self.source_syntax_language.clone() else {
+            self.source_highlight_pending = false;
+            return;
+        };
+        let text = self.shared_display_text();
+        let generation = self.source_syntax_generation;
+        let cancellation = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        self.source_highlight_cancel = Some(super::source_layout::HighlightCancellation(
+            Arc::clone(&cancellation),
+        ));
+        self.source_highlight_pending = false;
+        self.source_highlight_running = true;
+        self.source_highlight_task = Some(cx.spawn(
+            async move |this: WeakEntity<Block>, cx: &mut AsyncApp| {
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        highlight_code_block_cancellable(
+                            Some(language.as_ref()),
+                            text.as_ref(),
+                            &cancellation,
+                        )
+                    })
+                    .await;
+                let _ = this.update(cx, |block, cx| {
+                    block.source_highlight_running = false;
+                    block.source_highlight_task = None;
+                    block.source_highlight_cancel = None;
+                    if block.source_syntax_generation == generation {
+                        block.code_highlight = result;
+                        block.source_syntax_generation =
+                            block.source_syntax_generation.wrapping_add(1);
+                        cx.notify();
+                    } else {
+                        block.schedule_source_highlight(cx);
+                    }
+                });
+            },
+        ));
     }
 
     pub(crate) fn code_language_text(&self) -> &str {

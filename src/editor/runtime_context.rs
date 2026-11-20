@@ -366,12 +366,21 @@ impl Editor {
     }
 
     /// 普通文本输入只同步当前块；定义或脚注变化才重建文档级注册表并广播。
+    /// 常驻源码的语义运行时由预览投影负责，输入时只同步块的版本。
     pub(super) fn sync_runtime_context_after_block_edit(
         &mut self,
         block: &Entity<Block>,
         cx: &mut Context<Self>,
     ) {
         let _trace = crate::perf::span("block_runtime_sync");
+        if block.read_with(cx, |block, _cx| {
+            block.is_source_raw_mode() && block.show_source_line_numbers()
+        }) {
+            block.update(cx, |block, _cx| {
+                block.set_document_revision(self.source_document.revision());
+            });
+            return;
+        }
         let (block_id, kind, markdown) = block.read_with(cx, |block, _cx| {
             (block.record.id, block.kind(), block.record.title_markdown())
         });

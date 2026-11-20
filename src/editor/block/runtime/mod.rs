@@ -22,7 +22,9 @@ mod resource;
 mod source_layout;
 mod table;
 
-pub(crate) use source_layout::{SourceLayoutCacheKey, SourceLayoutIdentity};
+pub(crate) use source_layout::{
+    SourceLayoutCacheKey, SourceLayoutIdentity, SourceLayoutMeasurement,
+};
 
 use self::projection::{
     ExpandedInlineProjection, ExpandedInlineSegment, ExpandedInlineSegmentKind, ExpandedLinkRun,
@@ -35,7 +37,8 @@ use super::{
     EditingCommandId, FootnoteRegistry, SlashMenuState, UndoCaptureKind,
 };
 use super::{
-    CodeHighlightResult, SourceSyntaxContext, highlight_code_block, project_highlight_result,
+    CodeHighlightResult, SourceSyntaxContext, highlight_code_block,
+    highlight_code_block_cancellable, project_highlight_result,
 };
 use super::{
     ImageReferenceDefinitions, ImageResolvedSource, ImageSyntax, LinkReferenceDefinitions,
@@ -226,6 +229,13 @@ pub struct Block {
     pub last_layout: Option<Arc<Vec<WrappedLine>>>,
     pub(crate) source_layout_identity: Option<SourceLayoutIdentity>,
     pub(crate) source_layout_cache_key: Option<SourceLayoutCacheKey>,
+    pub(crate) source_layout_cache_size: Option<Size<Pixels>>,
+    pub(crate) source_layout_measurements: Vec<SourceLayoutMeasurement>,
+    pub(crate) source_syntax_generation: u64,
+    pub(crate) source_highlight_pending: bool,
+    pub(crate) source_highlight_running: bool,
+    pub(crate) source_highlight_task: Option<Task<()>>,
+    source_highlight_cancel: Option<source_layout::HighlightCancellation>,
     /// 行窗口仍可能宽于屏幕；只平移排版，不改源码锚点或已读取范围。
     pub(crate) source_horizontal_offset: Pixels,
     pub(crate) source_layout_cache_hits: u64,
@@ -599,11 +609,13 @@ impl Block {
         self.set_source_document_mode_with_language(Some("markdown"));
     }
 
+    /// Source 的单实体承载完整原文，不参与 Live 资源和图片的语义推断。
     pub(crate) fn set_source_document_mode_with_language(
         &mut self,
         language: Option<&'static str>,
     ) {
         self.set_source_raw_mode();
+        self.record.mark_source_document();
         self.show_source_line_numbers = true;
         self.set_source_syntax_language(language);
     }

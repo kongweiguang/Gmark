@@ -177,7 +177,11 @@ impl Block {
         self.image_runtime.as_ref()
     }
 
+    /// Source 整体正文不是单个图片块，避免每次输入序列化整篇文档。
     pub(super) fn can_present_as_image(&self) -> bool {
+        if self.is_source_raw_mode() && self.show_source_line_numbers() {
+            return false;
+        }
         self.is_table_cell()
             || matches!(
                 self.kind(),

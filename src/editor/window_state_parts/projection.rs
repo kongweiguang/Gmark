@@ -8,7 +8,10 @@ impl Editor {
     // Reason: Keep source projection construction beside its transition callers so the window
     // state module remains focused on commands and user-facing mode coordination.
     pub(in crate::editor) fn source_view_document(&self, cx: &mut Context<Self>) -> DocumentTree {
-        let block = Self::new_block(cx, BlockRecord::paragraph(self.source_document.text()));
+        let block = Self::new_block(
+            cx,
+            BlockRecord::source_document(self.source_document.text()),
+        );
         let language = if self.is_svg_document() {
             Some("html")
         } else {
@@ -129,6 +132,7 @@ impl Editor {
     // Reason: Keep Split-mode setup and teardown together so each transition preserves the
     // existing projection cache and virtual-surface lifecycle exactly as before.
     pub(super) fn enter_split_view(&mut self, cx: &mut Context<Self>) {
+        let _trace = crate::perf::span("enter_split_view_sync");
         self.projection_cache_task = None;
         self.projection_cache_scheduled_revision = None;
         self.split_projection_task = None;

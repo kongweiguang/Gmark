@@ -10,7 +10,7 @@ use smallvec::SmallVec;
 
 use super::{
     Block, BlockImeCompositionOwner, InlineFootnoteHit, InlineLinkHit, SourceLayoutCacheKey,
-    code_highlight_color,
+    SourceLayoutMeasurement, code_highlight_color,
 };
 use crate::components::HtmlCssColor;
 use crate::theme::{ThemeColors, ThemeManager};
@@ -18,6 +18,53 @@ use crate::theme::{ThemeColors, ThemeManager};
 const SOURCE_LINE_NUMBER_MIN_DIGITS: usize = 2;
 const SOURCE_LINE_NUMBER_GAP: f32 = 12.0;
 const SOURCE_LINE_NUMBER_DIGIT_WIDTH_RATIO: f32 = 0.62;
+
+/// 语法颜色独立于等宽源码的字形，按可见硬行切出已排序 token，后台高亮完成时不必重排全文。
+fn decorate_source_line(
+    line: &WrappedLine,
+    byte_start: usize,
+    highlight: &super::CodeHighlightResult,
+    base: Hsla,
+    colors: &ThemeColors,
+) -> Option<WrappedLine> {
+    let end = byte_start + line.text.len();
+    let first = highlight
+        .spans
+        .partition_point(|span| span.range.end <= byte_start);
+    let mut runs = SmallVec::<[DecorationRun; 8]>::new();
+    let mut start = byte_start;
+    let mut push = |len: usize, color| {
+        if len > 0 {
+            runs.push(DecorationRun {
+                len: len as u32,
+                color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
+        }
+    };
+    for span in &highlight.spans[first..] {
+        if span.range.start >= end {
+            break;
+        }
+        let span_start = start.max(span.range.start);
+        let span_end = end.min(span.range.end);
+        if span_end > span_start {
+            push(span_start - start, base);
+            push(
+                span_end - span_start,
+                code_highlight_color(colors, span.class),
+            );
+            start = span_end;
+        }
+    }
+    if start == byte_start {
+        return None;
+    }
+    push(end - start, base);
+    Some(line.with_decoration_runs(runs))
+}
 
 fn source_line_count(text: &str) -> usize {
     text.split('\n').count().max(1)
@@ -64,6 +111,7 @@ fn source_line_number_tops(lines: &[WrappedLine], line_height: Pixels) -> Vec<Pi
 struct VisibleHardLine {
     index: usize,
     top: Pixels,
+    byte_start: usize,
     number_visible: bool,
 }
 
@@ -80,6 +128,7 @@ fn visible_hard_lines(
         return visible;
     }
     let mut relative_top = px(0.0);
+    let mut byte_start = 0;
     for (index, line) in lines.iter().enumerate() {
         let top = origin + relative_top;
         let next_relative_top = relative_top + wrapped_line_height(line, line_height);
@@ -91,10 +140,12 @@ fn visible_hard_lines(
             visible.push(VisibleHardLine {
                 index,
                 top,
+                byte_start,
                 number_visible: top + line_height > clip_top,
             });
         }
         relative_top = next_relative_top;
+        byte_start += line.text.len() + 1;
     }
     visible
 }
@@ -505,11 +556,60 @@ pub(super) fn cursor_bounds_for_offset(
     let ranges = hard_line_ranges(text);
     let (line_idx, offset_in_line) = line_index_for_offset(&ranges, offset);
     let layout = lines.get(line_idx)?;
+    cursor_bounds_in_hard_line(
+        layout,
+        bounds,
+        line_height,
+        bounds.top() + wrapped_line_top(lines, line_height, line_idx),
+        offset_in_line,
+        align,
+        cursor_width,
+    )
+}
+
+/// 视口外的光标无须绘制，复用硬行的字节与纵坐标避免每次闪烁重扫全文。
+fn visible_cursor_bounds(
+    lines: &[WrappedLine],
+    visible: &[VisibleHardLine],
+    bounds: Bounds<Pixels>,
+    line_height: Pixels,
+    offset: usize,
+    align: TextAlign,
+    cursor_width: Pixels,
+) -> Option<Bounds<Pixels>> {
+    for row in visible {
+        let layout = lines.get(row.index)?;
+        if let Some(local) = offset.checked_sub(row.byte_start)
+            && local <= layout.text.len()
+        {
+            return cursor_bounds_in_hard_line(
+                layout,
+                bounds,
+                line_height,
+                row.top,
+                local,
+                align,
+                cursor_width,
+            );
+        }
+    }
+    None
+}
+
+/// 屏幕绘制与 IME 几何共用软换行边界和对齐规则。
+fn cursor_bounds_in_hard_line(
+    layout: &WrappedLine,
+    bounds: Bounds<Pixels>,
+    line_height: Pixels,
+    line_top: Pixels,
+    offset: usize,
+    align: TextAlign,
+    cursor_width: Pixels,
+) -> Option<Bounds<Pixels>> {
     let origin_x = aligned_line_left(layout, bounds, align);
-    let cursor_pos = position_for_offset(layout, offset_in_line, line_height, true)?;
-    let y_offset = bounds.top() + wrapped_line_top(lines, line_height, line_idx);
+    let cursor_pos = position_for_offset(layout, offset, line_height, true)?;
     Some(Bounds::new(
-        point(origin_x + cursor_pos.x, y_offset + cursor_pos.y),
+        point(origin_x + cursor_pos.x, line_top + cursor_pos.y),
         size(cursor_width, line_height),
     ))
 }
@@ -551,27 +651,31 @@ pub(super) fn range_bounds(
     Some(union)
 }
 
-fn range_segment_bounds_for_hard_line(
-    lines: &[WrappedLine],
+/// 复用调用方已有的行坐标，避免长选区为每行重新累计前面的行高。
+fn extend_range_segments_for_hard_line(
+    segments: &mut Vec<Bounds<Pixels>>,
+    line: &WrappedLine,
     bounds: Bounds<Pixels>,
     line_height: Pixels,
-    line_idx: usize,
-    start_offset: usize,
-    end_offset: usize,
+    line_top: Pixels,
+    range: Range<usize>,
     align: TextAlign,
-) -> Vec<Bounds<Pixels>> {
-    let Some(line) = lines.get(line_idx) else {
-        return Vec::new();
-    };
-    let line_top = bounds.top() + wrapped_line_top(lines, line_height, line_idx);
-    let offsets = wrapped_row_offsets(line);
-    let mut segments = Vec::new();
-
-    for row_idx in 0..offsets.len().saturating_sub(1) {
-        let row_start = offsets[row_idx];
-        let row_end = offsets[row_idx + 1];
-        let seg_start = start_offset.max(row_start).min(row_end);
-        let seg_end = end_offset.min(row_end).max(row_start);
+    visual_rows: Range<usize>,
+) {
+    if range.is_empty() {
+        return;
+    }
+    for row_idx in visual_rows {
+        let row_start = if row_idx == 0 {
+            0
+        } else if let Some(offset) = wrap_boundary_offset(line, row_idx - 1) {
+            offset
+        } else {
+            continue;
+        };
+        let row_end = wrap_boundary_offset(line, row_idx).unwrap_or_else(|| line.len());
+        let seg_start = range.start.max(row_start).min(row_end);
+        let seg_end = range.end.min(row_end).max(row_start);
         if seg_start >= seg_end {
             continue;
         }
@@ -586,10 +690,49 @@ fn range_segment_bounds_for_hard_line(
             point(origin_x + end_x, y + line_height),
         ));
     }
+}
 
+/// 描绘选区只需要当前视口，保留完整字节选区供编辑、复制与辅助功能读取。
+fn visible_selection_bounds(
+    lines: &[WrappedLine],
+    visible: &[VisibleHardLine],
+    bounds: Bounds<Pixels>,
+    line_height: Pixels,
+    range: Range<usize>,
+    align: TextAlign,
+    viewport: Range<Pixels>,
+) -> Vec<Bounds<Pixels>> {
+    if visible.is_empty() || range.is_empty() {
+        return Vec::new();
+    }
+
+    let mut segments = Vec::new();
+    for row in visible {
+        let Some(line) = lines.get(row.index) else {
+            break;
+        };
+        let start = range.start.max(row.byte_start);
+        let end = range.end.min(row.byte_start + line.text.len());
+        if start < end {
+            let start_row = ((viewport.start - row.top) / line_height).floor().max(0.0) as usize;
+            let end_row = (((viewport.end - row.top) / line_height).ceil().max(0.0) as usize)
+                .min(line.wrap_boundaries().len() + 1);
+            extend_range_segments_for_hard_line(
+                &mut segments,
+                line,
+                bounds,
+                line_height,
+                row.top,
+                start - row.byte_start..end - row.byte_start,
+                align,
+                start_row..end_row,
+            );
+        }
+    }
     segments
 }
 
+/// 输入法等调用方仍可取得完整几何，连续硬行共用累计行高以控制大选区开销。
 pub(super) fn range_segment_bounds(
     lines: &[WrappedLine],
     bounds: Bounds<Pixels>,
@@ -606,9 +749,15 @@ pub(super) fn range_segment_bounds(
     let (start_line, start_offset) = line_index_for_offset(&ranges, range.start);
     let (end_line, end_offset) = line_index_for_offset(&ranges, range.end);
     let mut segments = Vec::new();
+    let mut relative_top = wrapped_line_top(lines, line_height, start_line);
 
-    for line_idx in start_line..=end_line {
-        let hard_range = &ranges[line_idx];
+    for (line_idx, (line, hard_range)) in lines
+        .iter()
+        .zip(&ranges)
+        .enumerate()
+        .take(end_line + 1)
+        .skip(start_line)
+    {
         let line_start = if line_idx == start_line {
             start_offset
         } else {
@@ -619,15 +768,17 @@ pub(super) fn range_segment_bounds(
         } else {
             hard_range.len()
         };
-        segments.extend(range_segment_bounds_for_hard_line(
-            lines,
+        extend_range_segments_for_hard_line(
+            &mut segments,
+            line,
             bounds,
             line_height,
-            line_idx,
-            line_start,
-            line_end,
+            bounds.top() + relative_top,
+            line_start..line_end,
             align,
-        ));
+            0..line.wrap_boundaries().len() + 1,
+        );
+        relative_top += wrapped_line_height(line, line_height);
     }
 
     segments

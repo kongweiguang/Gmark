@@ -27,8 +27,11 @@ impl Block {
         Self::splice_ime_text(&base, composition).or(Some(base))
     }
 
-    /// Supplies temporary text to ordinary block layout without changing cached source.
+    /// 无候选时共享已缓存正文，避免大文档每次重绘都复制全文；候选期间仍使用临时投影。
     pub(crate) fn display_text_with_ime(&self) -> SharedString {
+        if !self.has_ime_composition() {
+            return self.shared_display_text();
+        }
         self.ime_visible_text(&BlockImeCompositionOwner::BlockText)
             .unwrap_or_else(|| self.display_text().to_owned())
             .into()

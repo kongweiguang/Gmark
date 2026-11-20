@@ -1,6 +1,7 @@
 // @author kongweiguang
 
 use crate::{ByteRange, SourceLanguage};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(feature = "code-highlight-core")]
 use std::collections::HashMap;
@@ -60,30 +61,62 @@ pub fn highlight_fenced_code(language_info: Option<&str>, source: &str) -> Highl
 
 /// 高亮已识别的源码。所有输入都返回结果，不能使用 grammar 时不会产生错误或副作用。
 pub fn highlight_source(language: SourceLanguage, source: &str) -> HighlightResult {
+    highlight_source_inner(language, source, None).unwrap_or(HighlightResult {
+        language,
+        spans: Vec::new(),
+        engine: HighlightEngine::PlainTextFallback,
+    })
+}
+
+/// 后台源码分析接受调用方取消信号，取消时不发布部分 token 或误报纯文本结果。
+pub fn highlight_source_cancellable(
+    language: SourceLanguage,
+    source: &str,
+    cancellation: &AtomicUsize,
+) -> Option<HighlightResult> {
+    highlight_source_inner(language, source, Some(cancellation))
+}
+
+/// 常规与可取消入口共用解析规则，避免后台处理改变着色语义。
+fn highlight_source_inner(
+    language: SourceLanguage,
+    source: &str,
+    cancellation: Option<&AtomicUsize>,
+) -> Option<HighlightResult> {
+    if cancellation.is_some_and(|flag| flag.load(Ordering::Relaxed) != 0) {
+        return None;
+    }
     if matches!(language, SourceLanguage::Json | SourceLanguage::JsonLines) {
-        return HighlightResult {
+        let spans = json_highlight_fallback(source);
+        if cancellation.is_some_and(|flag| flag.load(Ordering::Relaxed) != 0) {
+            return None;
+        }
+        return Some(HighlightResult {
             language,
-            spans: json_highlight_fallback(source),
+            spans,
             engine: HighlightEngine::JsonFallback,
-        };
+        });
     }
 
     #[cfg(feature = "code-highlight-core")]
     if let Some(config) = CODE_HIGHLIGHT_REGISTRY.config_for(language)
-        && let Some(spans) = tree_sitter_highlight(config, source)
+        && let Some(spans) = tree_sitter_highlight(config, source, cancellation)
     {
-        return HighlightResult {
+        return Some(HighlightResult {
             language,
             spans,
             engine: HighlightEngine::TreeSitter,
-        };
+        });
     }
 
-    HighlightResult {
+    if cancellation.is_some_and(|flag| flag.load(Ordering::Relaxed) != 0) {
+        return None;
+    }
+    Some(HighlightResult {
         language,
         spans: Vec::new(),
         engine: HighlightEngine::PlainTextFallback,
-    }
+    })
 }
 
 #[cfg(feature = "code-highlight-core")]
@@ -390,10 +423,11 @@ pub(crate) fn configure_highlights(
 fn tree_sitter_highlight(
     config: &HighlightConfiguration,
     source: &str,
+    cancellation: Option<&AtomicUsize>,
 ) -> Option<Vec<HighlightSpan>> {
     let mut highlighter = Highlighter::new();
     let events = highlighter
-        .highlight(config, source.as_bytes(), None, |language_name| {
+        .highlight(config, source.as_bytes(), cancellation, |language_name| {
             CODE_HIGHLIGHT_REGISTRY.config_for_injection(language_name)
         })
         .ok()?;

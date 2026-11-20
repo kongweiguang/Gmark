@@ -1,6 +1,6 @@
 // @author kongweiguang
 
-use super::text::code_language_cursor_bounds;
+use super::text::{code_language_cursor_bounds, reshape_plain_source};
 use super::{
     link_at_position, source_line_number_gutter_width, source_line_number_tops, source_text_bounds,
     visible_hard_lines, wrapped_line_height,
@@ -37,6 +37,51 @@ fn shaped_lines(
             .expect("text should shape")
             .into_vec()
     })
+}
+
+/// 比较整篇重新排版，确保编辑复用字形时不丢 Unicode、重复硬行及末尾空行。
+#[gpui::test]
+async fn incremental_source_layout_matches_full_shape_after_line_edits(cx: &mut TestAppContext) {
+    let cx = cx.add_empty_window();
+    let width = px(70.0);
+    for (before, after) in [
+        (
+            "首行\n重复\n重复\n尾行\n",
+            "首行\n重复\n插入字行\n重复\n尾行\n",
+        ),
+        ("首行\n重复\n重复\n尾行\n", "首行\n重复\n尾行\n"),
+        ("首行\n行尾\n", "首行行尾"),
+        ("首行", "首行\n"),
+        ("\n", ""),
+        ("尾行\n", "首行\n尾行\n"),
+    ] {
+        let previous = shaped_lines(before, width, cx);
+        let expected = shaped_lines(after, width, cx);
+        let actual = cx.update(|window, _app| {
+            reshape_plain_source(
+                window.text_system(),
+                &previous,
+                after,
+                expected.len(),
+                &TextRun {
+                    len: after.len(),
+                    font: font(".SystemUIFont"),
+                    color: Hsla::from(rgba(0xffffffff)),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                },
+                px(16.0),
+                Some(width),
+            )
+            .expect("changed lines should shape")
+        });
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(&expected) {
+            assert_eq!(actual.text, expected.text);
+            assert_eq!(actual.size(px(21.0)), expected.size(px(21.0)));
+        }
+    }
 }
 
 /// 裁剪跨越软换行时仍需保留完整硬行，但只给首个可见的硬行位置画行号。
@@ -103,6 +148,90 @@ async fn visible_hard_lines_match_cursor_geometry_at_large_offsets(cx: &mut Test
         .find(|line| line.index == index)
         .expect("target line must be visible");
     assert_eq!(line.top, expected);
+}
+
+/// 全选必须保留真实字节选区，但源码重绘只应生成视口相交硬行的几何。
+#[gpui::test]
+async fn select_all_paints_only_visible_source_lines(cx: &mut TestAppContext) {
+    let cx = cx.add_empty_window();
+    let source = "中文 line\n".repeat(10_000);
+    let lines = shaped_lines(&source, px(500.0), cx);
+    let line_height = px(20.0);
+    let bounds = Bounds::new(
+        point(px(0.0), px(-100_000.0)),
+        size(px(500.0), px(200_020.0)),
+    );
+    let visible = visible_hard_lines(&lines, line_height, bounds.top(), px(0.0), px(60.0));
+    let selection = super::visible_selection_bounds(
+        &lines,
+        &visible,
+        bounds,
+        line_height,
+        0..source.len(),
+        TextAlign::Left,
+        px(0.0)..px(60.0),
+    );
+    assert_eq!(selection.len(), 3);
+    assert_eq!(selection[0].top(), px(0.0));
+    assert_eq!(selection[2].bottom(), px(60.0));
+    let caret_offset = "中文 line\n".len() * 5_001 + "中文".len();
+    let caret = super::visible_cursor_bounds(
+        &lines,
+        &visible,
+        bounds,
+        line_height,
+        caret_offset,
+        TextAlign::Left,
+        px(1.0),
+    );
+    assert_eq!(
+        caret,
+        super::cursor_bounds_for_offset(
+            &lines,
+            bounds,
+            line_height,
+            &source,
+            caret_offset,
+            TextAlign::Left,
+            px(1.0),
+        ),
+    );
+    assert!(
+        super::visible_cursor_bounds(
+            &lines,
+            &visible,
+            bounds,
+            line_height,
+            0,
+            TextAlign::Left,
+            px(1.0),
+        )
+        .is_none()
+    );
+}
+
+/// 一行有大量软换行时，全选也只能为视口中的软换行行生成矩形。
+#[gpui::test]
+async fn source_selection_does_not_expand_offscreen_soft_wraps(cx: &mut TestAppContext) {
+    let cx = cx.add_empty_window();
+    let source = "中文 words ".repeat(200);
+    let lines = shaped_lines(&source, px(60.0), cx);
+    let line_height = px(20.0);
+    let bounds = Bounds::new(point(px(0.0), px(-100.0)), size(px(60.0), px(5_000.0)));
+    let visible = visible_hard_lines(&lines, line_height, bounds.top(), px(0.0), px(60.0));
+    assert_eq!(visible.len(), 1);
+    let selection = super::visible_selection_bounds(
+        &lines,
+        &visible,
+        bounds,
+        line_height,
+        0..source.len(),
+        TextAlign::Left,
+        px(0.0)..px(60.0),
+    );
+    assert_eq!(selection.len(), 3);
+    assert_eq!(selection[0].top(), px(0.0));
+    assert_eq!(selection[2].bottom(), px(60.0));
 }
 
 #[test]

@@ -54,7 +54,7 @@ impl Editor {
                     self.rebuild_primary_projection_from_source_reusing(cx)
                 }
                 super::ViewMode::Source | super::ViewMode::Split => {
-                    let block = Self::new_block(cx, BlockRecord::paragraph(source.clone()));
+                    let block = Self::new_block(cx, BlockRecord::source_document(source.clone()));
                     block.update(cx, |block, _cx| block.set_source_document_mode());
                     self.document.replace_roots(vec![block], cx);
                     self.table_cells.clear();

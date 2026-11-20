@@ -1,3 +1,5 @@
+// @author kongweiguang
+
 use crate::{
     App, Bounds, Half, Hsla, LineLayout, Pixels, Point, Result, SharedString, StrikethroughStyle,
     TextAlign, UnderlineStyle, Window, WrapBoundary, WrappedLineLayout, black, fill, point, px,
@@ -122,6 +124,16 @@ pub struct WrappedLine {
 }
 
 impl WrappedLine {
+    /// Recolors already-shaped text so syntax decoration can change without invalidating wrapping or hit testing.
+    /// Runs must describe the complete line in UTF-8 byte order.
+    pub fn with_decoration_runs(&self, runs: impl IntoIterator<Item = DecorationRun>) -> Self {
+        Self {
+            layout: self.layout.clone(),
+            text: self.text.clone(),
+            decoration_runs: runs.into_iter().collect(),
+        }
+    }
+
     /// The length of the underlying, unwrapped layout, in utf-8 bytes.
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {

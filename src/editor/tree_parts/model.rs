@@ -129,7 +129,14 @@ impl DocumentTree {
         None
     }
 
+    /// Source 和 Split 左侧直接读取原始正文，无需为整篇文档构造富文本 Markdown 序列化缓存。
     pub(in crate::editor) fn rebuild_root_markdown_cache(&mut self, cx: &App) {
+        if let [root] = self.roots.as_slice()
+            && root.read(cx).show_source_line_numbers()
+        {
+            self.root_markdown_cache.clear();
+            return;
+        }
         self.root_markdown_cache = self
             .roots
             .iter()

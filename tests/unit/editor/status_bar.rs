@@ -55,6 +55,33 @@ fn virtual_region_edit_updates_cached_graphemes_for_new_revision() {
     assert_eq!(state.cached_word_count(old_revision), None);
 }
 
+/// Source 全选复用准确总数，局部选择仍按所选文本的完整字素计数。
+#[gpui::test]
+async fn resident_source_selection_count_reuses_total_and_counts_unicode(cx: &mut TestAppContext) {
+    init_status_bar_test_app(cx);
+    let source = "中文👨‍👩‍👧‍👦e\u{301}".to_owned();
+    let expected = count_characters(&source);
+    let editor = cx.new(move |cx| crate::editor::Editor::from_markdown(cx, source, None));
+    editor.update(cx, |editor, cx| {
+        editor.set_view_mode(super::super::ViewMode::Source, cx);
+        let root = editor.document.first_root().cloned().expect("source root");
+        let length = root.read(cx).display_text().len();
+        root.update(cx, |block, _| block.selected_range = 0..length);
+        let revision = editor.source_document.revision();
+        assert_eq!(
+            editor.resident_source_selection_count(revision, cx),
+            Some(expected)
+        );
+        root.update(cx, |block, _| block.selected_range = 0.."中文".len());
+        assert_eq!(
+            editor.resident_source_selection_count(revision, cx),
+            Some(2)
+        );
+        root.update(cx, |block, _| block.selected_range = 0..0);
+        assert_eq!(editor.resident_source_selection_count(revision, cx), None);
+    });
+}
+
 #[test]
 fn line_endings_count_as_one_character() {
     assert_eq!(count_characters("a\nb"), 3);

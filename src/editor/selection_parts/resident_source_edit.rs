@@ -241,7 +241,8 @@ impl Editor {
         match self.view_mode {
             ViewMode::Rendered => self.rebuild_primary_projection_from_source(cx),
             ViewMode::Source | ViewMode::Split => {
-                let block = Self::new_block(cx, crate::components::BlockRecord::paragraph(source));
+                let block =
+                    Self::new_block(cx, crate::components::BlockRecord::source_document(source));
                 block.update(cx, |block, _cx| block.set_source_document_mode());
                 self.document.replace_roots(vec![block], cx);
                 self.table_cells.clear();

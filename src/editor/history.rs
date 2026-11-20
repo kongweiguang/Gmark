@@ -445,7 +445,7 @@ impl Editor {
                 self.rebuild_primary_projection_from_source_reusing(cx);
             }
             ViewMode::Source | ViewMode::Split => {
-                let block = Self::new_block(cx, BlockRecord::paragraph(source_text));
+                let block = Self::new_block(cx, BlockRecord::source_document(source_text));
                 block.update(cx, |block, _cx| block.set_source_document_mode());
                 self.document.replace_roots(vec![block], cx);
                 self.table_cells.clear();

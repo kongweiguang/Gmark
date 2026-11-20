@@ -501,7 +501,7 @@ impl Editor {
                 (ViewMode::Rendered | ViewMode::Preview, ViewMode::Source) => {
                     // 切换视图不能触发源码规范化；Source 视图直接读取 Rope 真值。
                     let markdown = self.source_document.text();
-                    let block = Self::new_block(cx, BlockRecord::paragraph(markdown));
+                    let block = Self::new_block(cx, BlockRecord::source_document(markdown));
                     let language = if self.is_svg_document() {
                         Some("html")
                     } else {

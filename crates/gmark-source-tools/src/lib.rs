@@ -19,7 +19,7 @@ pub use folding::{FoldKind, FoldRange, fold_ranges, fold_ranges_in_window};
 pub use formatting::{FormatResult, FormatterError, format_json, format_json_lines, format_source};
 pub use highlight::{
     HighlightEngine, HighlightResult, HighlightSpan, TokenClass, highlight_fenced_code,
-    highlight_source,
+    highlight_source, highlight_source_cancellable,
 };
 pub use incremental::IncrementalFoldParser;
 pub use language::{

@@ -1,5 +1,83 @@
 // @author kongweiguang
 
+/// Source 中的图片语法属于原始文本，编辑后不得触发 Live 图片卡片检测。
+#[gpui::test]
+async fn source_document_does_not_build_image_runtime(cx: &mut TestAppContext) {
+    let block = cx.new(|cx| {
+        let mut block = Block::with_record(cx, BlockRecord::source_document("![image](photo.png)"));
+        block.set_source_document_mode();
+        block.sync_render_cache();
+        block
+    });
+    block.read_with(cx, |block, _| {
+        assert!(!block.can_present_as_image());
+        assert!(block.image_runtime().is_none());
+        assert_eq!(block.display_text(), "![image](photo.png)");
+    });
+}
+
+/// 后台高亮只能发布所属代次，切换语言后迟到的结果不能覆盖新状态。
+#[gpui::test]
+async fn large_source_highlight_discards_stale_result(cx: &mut TestAppContext) {
+    let block = cx.new(|cx| {
+        let mut block = Block::with_record(cx, BlockRecord::paragraph("# a\n".repeat(262_144)));
+        block.set_source_document_mode();
+        block
+    });
+    block.update(cx, |block, cx| {
+        assert!(block.source_highlight_pending);
+        assert!(block.code_highlight_result().is_none());
+        block.schedule_source_highlight(cx);
+        assert!(block.source_highlight_running);
+        block.set_source_syntax_language(None);
+        assert!(!block.source_highlight_pending);
+    });
+    cx.run_until_parked();
+    block.read_with(cx, |block, _| {
+        assert!(!block.source_highlight_running);
+        assert!(block.code_highlight_result().is_none());
+    });
+}
+
+/// 常驻源码重绘必须复用布局，而语法变化必须重新生成颜色，避免长文档每次闪烁都重排。
+#[gpui::test]
+async fn resident_source_reuses_layout_until_syntax_changes(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        I18nManager::init(cx);
+        ThemeManager::init(cx);
+    });
+    let (block, visual_cx) = cx.add_window_view(|_window, cx| {
+        let mut block =
+            Block::with_record(cx, BlockRecord::paragraph("# Header\ntext\n".repeat(1000)));
+        block.set_source_document_mode();
+        block
+    });
+    visual_cx.update(|window, cx| window.draw(cx).clear());
+    let initial = block.read_with(visual_cx, |block, _| {
+        (
+            block.source_layout_cache_hits,
+            block.source_layout_cache_misses,
+        )
+    });
+    assert!(initial.1 > 0);
+    visual_cx.update(|window, cx| window.draw(cx).clear());
+    let reused = block.read_with(visual_cx, |block, _| {
+        (
+            block.source_layout_cache_hits,
+            block.source_layout_cache_misses,
+        )
+    });
+    assert!(reused.0 > initial.0);
+    assert_eq!(reused.1, initial.1);
+    block.update(visual_cx, |block, cx| {
+        block.set_source_syntax_language(None);
+        cx.notify();
+    });
+    visual_cx.update(|window, cx| window.draw(cx).clear());
+    let changed = block.read_with(visual_cx, |block, _| block.source_layout_cache_misses);
+    assert!(changed > reused.1);
+}
+
 #[gpui::test]
 async fn ime_selection_ignores_editor_external_selection(cx: &mut TestAppContext) {
     let cx = cx.add_empty_window();

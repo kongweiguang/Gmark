@@ -28,6 +28,7 @@ pub struct BlockRecord {
     /// 由源码空白区域物化出的编辑代理。它保留字节级往返和光标落点，但不属于
     /// Markdown 语义内容；预览和未激活的实时编辑不得把它当作普通空段落排版。
     source_blank: bool,
+    source_document: bool,
 }
 
 impl BlockRecord {
@@ -45,6 +46,7 @@ impl BlockRecord {
             ordered_list_start: None,
             resource: None,
             source_blank: false,
+            source_document: false,
         };
         record.sync_raw_fallback();
         if resource_capable_kind(&record.kind) {
@@ -60,6 +62,24 @@ impl BlockRecord {
 
     pub fn paragraph(text: impl Into<String>) -> Self {
         Self::with_plain_text(BlockKind::Paragraph, text)
+    }
+
+    /// 全文 Source 只是原始编辑投影，跳过只适用于单个语义段落的资源解析。
+    pub(crate) fn source_document(text: impl Into<String>) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            kind: BlockKind::Paragraph,
+            title: InlineTextTree::plain(text.into()),
+            table: None,
+            html: None,
+            parent: None,
+            content: Vec::new(),
+            raw_fallback: None,
+            ordered_list_start: None,
+            resource: None,
+            source_blank: false,
+            source_document: true,
+        }
     }
 
     pub(crate) fn source_blank() -> Self {
@@ -216,20 +236,28 @@ impl BlockRecord {
         record
     }
 
+    /// 原始源码投影不能在每次输入时运行只针对单段正文的资源识别。
     pub fn set_title(&mut self, title: InlineTextTree) {
         // Keep the domain attachment synchronized with the source tree. A
         // paste or a normal text edit can create a complete standalone resource
         // before the next projection rebuild; parsing it here keeps the card
         // visible without making the runtime tree a second source of truth.
-        let serialized = title.serialize_markdown();
-        self.resource = resource_capable_kind(&self.kind)
-            .then(|| ResourceRecord::parse(&serialized, None))
-            .flatten();
-        if !title.visible_text().is_empty() {
+        self.resource = if !self.source_document && resource_capable_kind(&self.kind) {
+            ResourceRecord::parse(&title.serialize_markdown(), None)
+        } else {
+            None
+        };
+        if self.source_blank && !title.visible_text().is_empty() {
             self.source_blank = false;
         }
         self.title = title;
         self.sync_raw_fallback();
+    }
+
+    /// 源码模式不会展示资源卡片；后续文本编辑沿用同一投影语义。
+    pub(crate) fn mark_source_document(&mut self) {
+        self.source_document = true;
+        self.resource = None;
     }
 
     /// Export the block title as Markdown: fragment style flags are

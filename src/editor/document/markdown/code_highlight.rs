@@ -5,10 +5,11 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::Path;
+use std::sync::atomic::AtomicUsize;
 
 use gmark_source_tools::{
     HighlightResult, SourceLanguage, build_source_syntax_contexts as build_domain_contexts,
-    detect_language, highlight_source, resolve_fence_language,
+    detect_language, highlight_source, highlight_source_cancellable, resolve_fence_language,
 };
 use gpui::Hsla;
 
@@ -49,6 +50,16 @@ pub(crate) fn highlight_code_block(
 ) -> Option<CodeHighlightResult> {
     let language = resolve_code_language_key(language)?;
     Some(project_highlight_result(highlight_source(language, source)))
+}
+
+/// 在源文件视图卸载或内容更新时终止后台语法分析，避免废弃任务继续占用 CPU。
+pub(crate) fn highlight_code_block_cancellable(
+    language: Option<&str>,
+    source: &str,
+    cancellation: &AtomicUsize,
+) -> Option<CodeHighlightResult> {
+    let language = resolve_code_language_key(language)?;
+    highlight_source_cancellable(language, source, cancellation).map(project_highlight_result)
 }
 
 pub(crate) fn build_source_syntax_contexts<'a>(

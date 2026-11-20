@@ -59,6 +59,7 @@ impl Render for Block {
         self.sync_inline_projection_for_focus(
             contextual_editing_focused && !showing_rendered_image,
         );
+        self.schedule_source_highlight(cx);
 
         if input_active && self.cursor_blink_task.is_none() {
             self.start_cursor_blink(cx);

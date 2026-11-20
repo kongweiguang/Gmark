@@ -1,5 +1,18 @@
 // @author kongweiguang
 
+/// 整份源码仅作为编辑投影，资源标记不得触发段落资源实体或改变原文。
+#[test]
+fn source_document_record_preserves_resource_markdown_as_plain_text() {
+    let source = "[spec](./spec.pdf \"gmark:resource\")";
+    let mut record = BlockRecord::source_document(source);
+    assert!(record.resource.is_none());
+    assert_eq!(record.title.visible_text(), source);
+    assert!(BlockRecord::paragraph(source).resource.is_some());
+    record.set_title(InlineTextTree::plain(source));
+    assert!(record.resource.is_none());
+    assert_eq!(record.title.visible_text(), source);
+}
+
 use super::*;
 
 #[test]

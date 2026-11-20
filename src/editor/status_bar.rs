@@ -4,11 +4,13 @@
 //! character count, and custom buttons.
 
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 
 use gmark_document::Revision;
 use gpui::*;
 use unicode_segmentation::UnicodeSegmentation;
 
+use super::selection_surface::SelectionSurface;
 use super::{Editor, ViewMode};
 use crate::i18n::I18nStrings;
 use crate::theme::Theme;
@@ -50,6 +52,23 @@ enum StatusTooltip {
     Mode(super::ViewMode),
 }
 
+/// 选区结果只属于同一不可变正文、revision 和字节范围，避免迟到统计污染新选择。
+#[derive(Clone)]
+struct SelectionCountKey {
+    revision: Revision,
+    range: Range<usize>,
+    text: SharedString,
+}
+
+impl PartialEq for SelectionCountKey {
+    /// 保留共享正文期间指针可安全识别快照，不在每帧逐字比较长文件。
+    fn eq(&self, other: &Self) -> bool {
+        self.revision == other.revision
+            && self.range == other.range
+            && std::ptr::eq(self.text.as_ref(), other.text.as_ref())
+    }
+}
+
 #[derive(Default)]
 pub(super) struct StatusBarState {
     pub sidebar_hovered: bool,
@@ -60,6 +79,9 @@ pub(super) struct StatusBarState {
     word_count: Option<(Revision, usize)>,
     word_count_scheduled_revision: Option<Revision>,
     word_count_task: Option<Task<()>>,
+    selection_count: Option<(SelectionCountKey, usize)>,
+    selection_count_scheduled: Option<SelectionCountKey>,
+    selection_count_task: Option<Task<()>>,
     pub(super) format_overflow_open: bool,
     tooltip_hovered: Option<StatusTooltip>,
     tooltip_visible: Option<StatusTooltip>,
@@ -575,10 +597,15 @@ impl Editor {
                 self.schedule_character_count(revision, cx);
                 self.status_bar.word_count.map(|(_, count)| count)
             };
-            let selection_count = self
-                .selected_markdown_text(cx)
-                .as_deref()
-                .map(count_characters);
+            let selection_count = if matches!(self.view_mode, ViewMode::Source | ViewMode::Split)
+                && self.active_selection_surface == SelectionSurface::Main
+            {
+                self.resident_source_selection_count(revision, cx)
+            } else {
+                self.selected_markdown_text(cx)
+                    .as_deref()
+                    .map(count_characters)
+            };
             if let Some(total_count) = total_count {
                 let character_count =
                     render_character_count(selection_count, total_count, theme, strings);
@@ -712,6 +739,100 @@ impl Editor {
         Some(bar)
     }
 
+    /// 常驻源码直接读取字节选区；长选区后台统计，全文选择复用当前 revision 的总数。
+    fn resident_source_selection_count(
+        &mut self,
+        revision: Revision,
+        cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        let Some(root) = self.document.first_root() else {
+            return None;
+        };
+        let block = root.read(cx);
+        if !block.is_source_raw_mode()
+            || !block.show_source_line_numbers()
+            || block.has_ime_composition()
+        {
+            return self
+                .selected_markdown_text(cx)
+                .as_deref()
+                .map(count_characters);
+        }
+        let range = block.selected_range.clone();
+        let text = block.shared_display_text();
+        if range.is_empty() || text.as_ref().get(range.clone()).is_none() {
+            self.status_bar.selection_count = None;
+            self.status_bar.selection_count_scheduled = None;
+            self.status_bar.selection_count_task = None;
+            return None;
+        }
+        if range.start == 0 && range.end == text.len() && text.len() == self.source_document.len() {
+            self.status_bar.selection_count = None;
+            self.status_bar.selection_count_scheduled = None;
+            self.status_bar.selection_count_task = None;
+            return self.status_bar.cached_word_count(revision);
+        }
+        let key = SelectionCountKey {
+            revision,
+            range,
+            text,
+        };
+        if let Some((cached_key, count)) = self.status_bar.selection_count.as_ref()
+            && *cached_key == key
+        {
+            return Some(*count);
+        }
+        if key.range.end - key.range.start < ASYNC_CHARACTER_COUNT_THRESHOLD {
+            self.status_bar.selection_count_scheduled = None;
+            self.status_bar.selection_count_task = None;
+            let count = key
+                .text
+                .as_ref()
+                .get(key.range.clone())
+                .map(count_characters)?;
+            self.status_bar.selection_count = Some((key, count));
+            return Some(count);
+        }
+        if self.status_bar.selection_count_scheduled.as_ref() != Some(&key) {
+            self.status_bar.selection_count_scheduled = Some(key.clone());
+            self.status_bar.selection_count_task =
+                Some(cx.spawn(async move |this: WeakEntity<Self>, cx| {
+                    cx.background_executor()
+                        .timer(CHARACTER_COUNT_IDLE_DELAY)
+                        .await;
+                    let work = key.clone();
+                    let count = cx
+                        .background_spawn(async move {
+                            work.text.as_ref().get(work.range).map(count_characters)
+                        })
+                        .await;
+                    let _ = this.update(cx, |editor, cx| {
+                        if editor.status_bar.selection_count_scheduled.as_ref() != Some(&key) {
+                            return;
+                        }
+                        let current = editor.document.first_root().is_some_and(|root| {
+                            let block = root.read(cx);
+                            let text = block.shared_display_text();
+                            block.selected_range == key.range
+                                && std::ptr::eq(text.as_ref(), key.text.as_ref())
+                        });
+                        editor.status_bar.selection_count_scheduled = None;
+                        editor.status_bar.selection_count_task = None;
+                        if editor.source_document.revision() == key.revision
+                            && current
+                            && editor.active_selection_surface == SelectionSurface::Main
+                            && matches!(editor.view_mode, ViewMode::Source | ViewMode::Split)
+                            && let Some(count) = count
+                        {
+                            editor.status_bar.selection_count = Some((key, count));
+                            cx.notify();
+                        }
+                    });
+                }));
+        }
+        None
+    }
+
     /// 长文档字符统计只在后台物化 Rope；发布前校验 revision，旧结果不得覆盖新输入。
     fn schedule_character_count(&mut self, revision: Revision, cx: &mut Context<Self>) {
         if self.status_bar.word_count_scheduled_revision == Some(revision) {
@@ -739,7 +860,7 @@ impl Editor {
             }));
     }
 
-    /// 窗口壳不持有活动文字选区，先查询当前窗格；局部坐标按 Source 逻辑行和完整字素计算。
+    /// 窗口壳先查询当前窗格；常驻源码直接借用正文，避免光标刷新时复制整个文件。
     pub(super) fn compute_source_cursor_position(&self, cx: &App) -> (usize, usize) {
         if let Some(editor) = self.focused_pane_entities(cx).0 {
             return editor.read(cx).compute_source_cursor_position(cx);
@@ -747,7 +868,17 @@ impl Editor {
         let snapshot = self.capture_source_selection_snapshot(cx);
         let cursor_offset =
             super::saturating_source_offset(snapshot.source_selection().head.byte_offset);
-        let text = self.document.raw_source_text(cx);
+        let resident = self.document.first_root().filter(|root| {
+            let block = root.read(cx);
+            block.is_source_raw_mode() && block.show_source_line_numbers()
+        });
+        let fallback;
+        let text = if let Some(root) = resident.as_ref() {
+            root.read(cx).display_text()
+        } else {
+            fallback = self.document.raw_source_text(cx);
+            fallback.as_str()
+        };
         let mut clamped = cursor_offset.min(text.len());
         while clamped > 0 && !text.is_char_boundary(clamped) {
             clamped -= 1;
