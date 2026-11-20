@@ -1,3 +1,5 @@
+// @author kongweiguang
+
 use std::{
     any::{TypeId, type_name},
     cell::{BorrowMutError, Ref, RefCell, RefMut},
@@ -6,7 +8,7 @@ use std::{
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     rc::{Rc, Weak},
-    sync::{Arc, atomic::Ordering::SeqCst},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -18,7 +20,6 @@ use futures::{
     future::{LocalBoxFuture, Shared},
 };
 use itertools::Itertools;
-use parking_lot::RwLock;
 use slotmap::SlotMap;
 
 pub use async_context::*;
@@ -631,7 +632,7 @@ impl App {
                 windows: SlotMap::with_key(),
                 window_update_stack: Vec::new(),
                 window_handles: FxHashMap::default(),
-                focus_handles: Arc::new(RwLock::new(SlotMap::with_key())),
+                focus_handles: Arc::new(FocusMap::default()),
                 keymap: Rc::new(RefCell::new(Keymap::default())),
                 keyboard_layout,
                 keyboard_mapper,
@@ -1275,27 +1276,19 @@ impl App {
         }
     }
 
-    /// Repeatedly called during `flush_effects` to handle a focused handle being dropped.
+    /// 每个 effect 前释放已归零焦点；先释放映射锁，避免窗口更新重入时死锁。
     fn release_dropped_focus_handles(&mut self) {
-        self.focus_handles
-            .clone()
-            .write()
-            .retain(|handle_id, focus| {
-                if focus.ref_count.load(SeqCst) == 0 {
-                    for window_handle in self.windows() {
-                        window_handle
-                            .update(self, |_, window, _| {
-                                if window.focus == Some(handle_id) {
-                                    window.blur();
-                                }
-                            })
-                            .unwrap();
-                    }
-                    false
-                } else {
-                    true
-                }
-            });
+        for handle_id in self.focus_handles.take_dropped() {
+            for window_handle in self.windows() {
+                window_handle
+                    .update(self, |_, window, _| {
+                        if window.focus == Some(handle_id) {
+                            window.blur();
+                        }
+                    })
+                    .unwrap();
+            }
+        }
     }
 
     fn apply_notify_effect(&mut self, emitter: EntityId) {

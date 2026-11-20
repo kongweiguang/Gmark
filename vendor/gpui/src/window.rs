@@ -28,7 +28,7 @@ use futures::FutureExt;
 use futures::channel::oneshot;
 use itertools::FoldWhile::{Continue, Done};
 use itertools::Itertools;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use raw_window_handle::{HandleError, HasDisplayHandle, HasWindowHandle};
 use refineable::Refineable;
 use slotmap::SlotMap;
@@ -226,7 +226,25 @@ impl ArenaClearNeeded {
     }
 }
 
-pub(crate) type FocusMap = RwLock<SlotMap<FocusId, FocusRef>>;
+#[derive(Default)]
+pub(crate) struct FocusMap {
+    slots: RwLock<SlotMap<FocusId, FocusRef>>,
+    dropped: Mutex<Vec<FocusId>>,
+}
+
+impl FocusMap {
+    /// 先取走队列并释放其锁，再写入槽位，避免与析构时的队列锁、槽位读锁反序。
+    pub(crate) fn take_dropped(&self) -> Vec<FocusId> {
+        let dropped = std::mem::take(&mut *self.dropped.lock());
+        if !dropped.is_empty() {
+            let mut slots = self.slots.write();
+            for id in &dropped {
+                slots.remove(*id);
+            }
+        }
+        dropped
+    }
+}
 pub(crate) struct FocusRef {
     pub(crate) ref_count: AtomicUsize,
     pub(crate) tab_index: isize,
@@ -281,7 +299,7 @@ impl std::fmt::Debug for FocusHandle {
 
 impl FocusHandle {
     pub(crate) fn new(handles: &Arc<FocusMap>) -> Self {
-        let id = handles.write().insert(FocusRef {
+        let id = handles.slots.write().insert(FocusRef {
             ref_count: AtomicUsize::new(1),
             tab_index: 0,
             tab_stop: false,
@@ -296,7 +314,7 @@ impl FocusHandle {
     }
 
     pub(crate) fn for_id(id: FocusId, handles: &Arc<FocusMap>) -> Option<Self> {
-        let lock = handles.read();
+        let lock = handles.slots.read();
         let focus = lock.get(id)?;
         if atomic_incr_if_not_zero(&focus.ref_count) == 0 {
             return None;
@@ -312,7 +330,7 @@ impl FocusHandle {
     /// Sets the tab index of the element associated with this handle.
     pub fn tab_index(mut self, index: isize) -> Self {
         self.tab_index = index;
-        if let Some(focus) = self.handles.write().get_mut(self.id) {
+        if let Some(focus) = self.handles.slots.write().get_mut(self.id) {
             focus.tab_index = index;
         }
         self
@@ -323,7 +341,7 @@ impl FocusHandle {
     /// When `false`, the element will not be included in the tab order.
     pub fn tab_stop(mut self, tab_stop: bool) -> Self {
         self.tab_stop = tab_stop;
-        if let Some(focus) = self.handles.write().get_mut(self.id) {
+        if let Some(focus) = self.handles.slots.write().get_mut(self.id) {
             focus.tab_stop = tab_stop;
         }
         self
@@ -391,13 +409,22 @@ impl PartialEq for FocusHandle {
 impl Eq for FocusHandle {}
 
 impl Drop for FocusHandle {
+    /// 归零和入队受同一队列锁保护，确保 effect 不会跨过已释放的焦点。
+    /// 析构只按队列锁、槽位读锁的顺序持锁；消费方不会同时持有两把锁。
     fn drop(&mut self) {
-        self.handles
+        let mut dropped = self.handles.dropped.lock();
+        let last = self
+            .handles
+            .slots
             .read()
             .get(self.id)
             .unwrap()
             .ref_count
-            .fetch_sub(1, SeqCst);
+            .fetch_sub(1, SeqCst)
+            == 1;
+        if last {
+            dropped.push(self.id);
+        }
     }
 }
 
