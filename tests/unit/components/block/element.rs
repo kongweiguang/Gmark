@@ -3,7 +3,7 @@
 use super::text::code_language_cursor_bounds;
 use super::{
     link_at_position, source_line_number_gutter_width, source_line_number_tops, source_text_bounds,
-    wrapped_line_height,
+    visible_hard_lines, wrapped_line_height,
 };
 use crate::components::{Block, BlockKind, BlockRecord, InlineTextTree, TableCellPosition};
 use gpui::{
@@ -37,6 +37,72 @@ fn shaped_lines(
             .expect("text should shape")
             .into_vec()
     })
+}
+
+/// 裁剪跨越软换行时仍需保留完整硬行，但只给首个可见的硬行位置画行号。
+#[gpui::test]
+async fn visible_hard_lines_keep_wrapped_text_but_hide_clipped_numbers(cx: &mut TestAppContext) {
+    let cx = cx.add_empty_window();
+    let lines = shaped_lines(
+        "long long long long long long long\nsecond\nthird",
+        px(50.0),
+        cx,
+    );
+    let line_height = px(20.0);
+    let first_height = wrapped_line_height(&lines[0], line_height);
+    assert!(first_height > line_height);
+    let visible = visible_hard_lines(
+        &lines,
+        line_height,
+        px(0.0),
+        line_height,
+        first_height + line_height,
+    );
+    assert_eq!(
+        visible.iter().map(|line| line.index).collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    assert!(!visible[0].number_visible);
+    assert!(visible[1].number_visible);
+    assert_eq!(visible[1].top, first_height);
+}
+
+/// 多行文档只产生视口中的绘制任务；行号仍从全文的硬行序号计算。
+#[gpui::test]
+async fn visible_hard_lines_limit_work_and_keep_document_line_numbers(cx: &mut TestAppContext) {
+    let cx = cx.add_empty_window();
+    let source = "line\n".repeat(10_000);
+    let lines = shaped_lines(&source, px(500.0), cx);
+    let visible = visible_hard_lines(&lines, px(20.0), px(0.0), px(100_000.0), px(100_060.0));
+    assert_eq!(
+        visible.iter().map(|line| line.index).collect::<Vec<_>>(),
+        vec![5_000, 5_001, 5_002]
+    );
+    assert!(visible.iter().all(|line| line.number_visible));
+    assert!(visible_hard_lines(&lines, px(20.0), px(0.0), px(300_000.0), px(300_020.0)).is_empty());
+    assert!(visible_hard_lines(&lines, px(20.0), px(0.0), px(20.0), px(20.0)).is_empty());
+}
+
+/// 深滚动时绘制使用与光标相同的相对坐标累加顺序，防止浮点舍入让文字偏离插入点。
+#[gpui::test]
+async fn visible_hard_lines_match_cursor_geometry_at_large_offsets(cx: &mut TestAppContext) {
+    let cx = cx.add_empty_window();
+    let sample = shaped_lines("line", px(500.0), cx);
+    let lines = vec![sample[0].clone(); 200_000];
+    let line_height = px(20.3);
+    let index = 190_000;
+    let mut relative = px(0.0);
+    for line in &lines[..index] {
+        relative += wrapped_line_height(line, line_height);
+    }
+    let origin = -relative + px(50.0);
+    let expected = origin + relative;
+    let visible = visible_hard_lines(&lines, line_height, origin, expected, expected + px(1.0));
+    let line = visible
+        .iter()
+        .find(|line| line.index == index)
+        .expect("target line must be visible");
+    assert_eq!(line.top, expected);
 }
 
 #[test]
@@ -134,6 +200,7 @@ async fn link_hit_matches_only_rendered_link_text(cx: &mut TestAppContext) {
 }
 
 /// Begin a drag from an unfocused source block on the first press and select its exact text range.
+/// 布局共享后仍需保留精确的鼠标命中与选区坐标。
 #[gpui::test]
 async fn source_document_mouse_drag_selects_exact_text_range(cx: &mut TestAppContext) {
     let cx = cx.add_empty_window();
@@ -152,7 +219,7 @@ async fn source_document_mouse_drag_selects_exact_text_range(cx: &mut TestAppCon
         .position_for_index(6, px(20.0))
         .expect("source selection end");
     block.update(cx, |block, _cx| {
-        block.last_layout = Some(lines);
+        block.last_layout = Some(std::sync::Arc::new(lines));
         block.last_bounds = Some(bounds);
         block.last_line_height = px(20.0);
     });
@@ -199,6 +266,7 @@ async fn source_document_mouse_drag_selects_exact_text_range(cx: &mut TestAppCon
 }
 
 /// Double-clicking rendered link text selects its word; only Ctrl+click follows the link.
+/// 链接命中复用共享布局，不能改变编辑与跟随链接的手势区分。
 #[gpui::test]
 async fn secondary_click_follows_link_while_plain_click_edits(cx: &mut TestAppContext) {
     let cx = cx.add_empty_window();
@@ -233,7 +301,7 @@ async fn secondary_click_follows_link_while_plain_click_edits(cx: &mut TestAppCo
     });
 
     block.update(cx, |block, _cx| {
-        block.last_layout = Some(lines.clone());
+        block.last_layout = Some(std::sync::Arc::new(lines.clone()));
         block.last_bounds = Some(bounds);
         block.last_line_height = px(20.0);
         block.selected_range = 0..0;

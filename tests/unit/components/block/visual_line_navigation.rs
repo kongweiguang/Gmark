@@ -37,6 +37,7 @@ fn shape_line(
 }
 
 /// Confirms collapsed and extended Home/End stay on the active soft-wrapped row and retain anchor direction.
+/// 布局改为共享所有权后，软换行导航仍须使用同一份几何数据。
 #[gpui::test]
 async fn home_end_and_shift_variants_use_the_current_visual_row(cx: &mut TestAppContext) {
     let visual = cx.add_empty_window();
@@ -49,7 +50,7 @@ async fn home_end_and_shift_variants_use_the_current_visual_row(cx: &mut TestApp
     let block = visual.new(|cx| Block::with_record(cx, BlockRecord::paragraph(text)));
 
     let (row_start, caret, row_end) = block.update(visual, |block, _cx| {
-        block.last_layout = Some(layout);
+        block.last_layout = Some(std::sync::Arc::new(layout));
         let wrap_start = (1..text.len())
             .find(|offset| {
                 block.selected_range = *offset..*offset;

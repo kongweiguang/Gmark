@@ -6,6 +6,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::*;
+use smallvec::SmallVec;
 
 use super::{
     Block, BlockImeCompositionOwner, InlineFootnoteHit, InlineLinkHit, SourceLayoutCacheKey,
@@ -48,6 +49,8 @@ fn source_text_bounds(bounds: Bounds<Pixels>, gutter_width: Pixels) -> Bounds<Pi
     )
 }
 
+#[cfg(test)]
+/// 为换行回归提供完整硬行坐标，生产绘制只处理裁剪内的行。
 fn source_line_number_tops(lines: &[WrappedLine], line_height: Pixels) -> Vec<Pixels> {
     let mut tops = Vec::with_capacity(lines.len());
     let mut y = Pixels::default();
@@ -56,6 +59,44 @@ fn source_line_number_tops(lines: &[WrappedLine], line_height: Pixels) -> Vec<Pi
         y += wrapped_line_height(line, line_height);
     }
     tops
+}
+
+struct VisibleHardLine {
+    index: usize,
+    top: Pixels,
+    number_visible: bool,
+}
+
+/// 按真实裁剪范围保留相交硬行；软换行续行露出时不重复显示行号。
+fn visible_hard_lines(
+    lines: &[WrappedLine],
+    line_height: Pixels,
+    origin: Pixels,
+    clip_top: Pixels,
+    clip_bottom: Pixels,
+) -> SmallVec<[VisibleHardLine; 4]> {
+    let mut visible = SmallVec::new();
+    if clip_top >= clip_bottom {
+        return visible;
+    }
+    let mut relative_top = px(0.0);
+    for (index, line) in lines.iter().enumerate() {
+        let top = origin + relative_top;
+        let next_relative_top = relative_top + wrapped_line_height(line, line_height);
+        let bottom = origin + next_relative_top;
+        if top >= clip_bottom {
+            break;
+        }
+        if bottom > clip_top {
+            visible.push(VisibleHardLine {
+                index,
+                top,
+                number_visible: top + line_height > clip_top,
+            });
+        }
+        relative_top = next_relative_top;
+    }
+    visible
 }
 
 /// Builds inline styling with candidate ranges resolved in the same virtual text coordinates as layout.

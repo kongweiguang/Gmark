@@ -223,7 +223,7 @@ pub struct Block {
     /// Source keeps Host command focus while this mounted row owns native text input.
     pub(crate) source_host_input_focus_handle: Option<FocusHandle>,
     pub(crate) spelling_diagnostics: Arc<[crate::spellcheck::SpellingDiagnostic]>,
-    pub last_layout: Option<Vec<WrappedLine>>,
+    pub last_layout: Option<Arc<Vec<WrappedLine>>>,
     pub(crate) source_layout_identity: Option<SourceLayoutIdentity>,
     pub(crate) source_layout_cache_key: Option<SourceLayoutCacheKey>,
     /// 行窗口仍可能宽于屏幕；只平移排版，不改源码锚点或已读取范围。

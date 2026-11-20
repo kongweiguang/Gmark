@@ -47,12 +47,13 @@ impl BlockTextElement {
 
 /// Prepared text layout and paint geometry for one `BlockTextElement` frame.
 pub struct PrepaintState {
-    lines: Vec<WrappedLine>,
+    lines: Arc<Vec<WrappedLine>>,
     text_bounds: Bounds<Pixels>,
     source_horizontal_offset: Pixels,
     source_layout_cache_key: Option<SourceLayoutCacheKey>,
     source_layout_cache_hit: bool,
-    source_line_numbers: Vec<ShapedLine>,
+    source_line_numbers: Vec<(Pixels, ShapedLine)>,
+    visible_lines: SmallVec<[VisibleHardLine; 4]>,
     source_gutter_separator: Option<PaintQuad>,
     active_source_line: Option<PaintQuad>,
     cursor: Option<PaintQuad>,
@@ -63,7 +64,7 @@ pub struct PrepaintState {
 }
 
 pub struct BlockTextRequestLayoutState {
-    lines: Rc<RefCell<Option<Vec<WrappedLine>>>>,
+    lines: Rc<RefCell<Option<Arc<Vec<WrappedLine>>>>>,
     source_layout_cache_key: Rc<RefCell<Option<SourceLayoutCacheKey>>>,
     source_layout_cache_hit: Rc<Cell<bool>>,
 }
@@ -130,6 +131,7 @@ impl Element for BlockTextElement {
     }
 
     /// Shapes the owning block's virtual IME text so paint and native range queries share offsets.
+    /// 布局在绘制和输入命中间共享，避免长文档每帧复制整份逐行布局。
     fn request_layout(
         &mut self,
         _id: Option<&GlobalElementId>,
@@ -148,7 +150,9 @@ impl Element for BlockTextElement {
         let compact_source_host = input.compact_source_host();
         let source_layout_identity = input.source_layout_identity.clone();
         let cached_source_layout_key = input.source_layout_cache_key.clone();
-        let cached_source_layout = input.last_layout.clone();
+        let cached_source_layout = source_layout_identity
+            .as_ref()
+            .and_then(|_| input.last_layout.clone());
         let source_line_count = source_line_count(shared_text.as_ref());
         let style = window.text_style();
 
@@ -278,7 +282,7 @@ impl Element for BlockTextElement {
                             line_height,
                             source_line_number_gutter_width,
                         );
-                        *shared_lines_clone.borrow_mut() = Some(lines.into_vec());
+                        *shared_lines_clone.borrow_mut() = Some(Arc::new(lines.into_vec()));
                         *shared_source_layout_cache_key_clone.borrow_mut() =
                             source_layout_cache_key;
                         total_size
@@ -345,16 +349,27 @@ impl Element for BlockTextElement {
         let text_bounds = source_text_bounds(bounds, source_line_number_gutter_width);
         let (text_bounds, source_horizontal_offset) =
             source_text_viewport_bounds(input, &lines, text_bounds, cursor, line_height, window);
+        let clip = window.content_mask().bounds;
+        let viewport_bottom = window.viewport_size().height;
+        let visible_lines = visible_hard_lines(
+            &lines,
+            line_height,
+            text_bounds.top(),
+            clip.top().max(px(0.0)),
+            clip.bottom().min(viewport_bottom),
+        );
         let source_line_numbers = if show_source_line_numbers {
             let run_color = if input.kind().is_code_block() {
                 theme.colors.code_syntax_comment
             } else {
                 wb.text_tertiary
             };
-            (1..=lines.len().max(1))
-                .map(|line_number| {
-                    let label = line_number.to_string();
-                    window.text_system().shape_line(
+            visible_lines
+                .iter()
+                .filter(|line| line.number_visible)
+                .map(|line| {
+                    let label = (line.index + 1).to_string();
+                    let shaped = window.text_system().shape_line(
                         SharedString::from(label.clone()),
                         font_size,
                         &[TextRun {
@@ -366,7 +381,8 @@ impl Element for BlockTextElement {
                             strikethrough: None,
                         }],
                         None,
-                    )
+                    );
+                    (line.top, shaped)
                 })
                 .collect()
         } else {
@@ -515,6 +531,7 @@ impl Element for BlockTextElement {
             source_layout_cache_key: request_layout.source_layout_cache_key.borrow().clone(),
             source_layout_cache_hit: request_layout.source_layout_cache_hit.get(),
             source_line_numbers,
+            visible_lines,
             source_gutter_separator,
             active_source_line,
             cursor: cursor_quad,
@@ -530,7 +547,7 @@ impl Element for BlockTextElement {
         &mut self,
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
+        _bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
         prepaint: &mut Self::PrepaintState,
         window: &mut Window,
@@ -594,19 +611,18 @@ impl Element for BlockTextElement {
         }
 
         let line_height = prepaint.line_height;
-        let lines = std::mem::take(&mut prepaint.lines);
+        let lines = Arc::clone(&prepaint.lines);
         let text_align = self.input.read(cx).text_align();
         let text_bounds = prepaint.text_bounds;
-        let line_number_tops = source_line_number_tops(&lines, line_height);
         let line_number_gap = px(SOURCE_LINE_NUMBER_GAP);
         let line_numbers = std::mem::take(&mut prepaint.source_line_numbers);
-        for (line_number, y_offset) in line_numbers.iter().zip(line_number_tops.iter()) {
+        for (top, line_number) in &line_numbers {
             let line_number_width = line_number.x_for_index(line_number.len());
             line_number
                 .paint(
                     point(
                         text_bounds.left() - line_number_gap - line_number_width,
-                        bounds.origin.y + *y_offset,
+                        *top,
                     ),
                     line_height,
                     window,
@@ -615,11 +631,11 @@ impl Element for BlockTextElement {
                 .ok();
         }
 
-        let mut y_offset = Pixels::default();
-        for line in &lines {
+        for visible in &prepaint.visible_lines {
+            let line = &lines[visible.index];
             let origin_x = aligned_line_left(line, text_bounds, text_align);
             line.paint(
-                point(origin_x, text_bounds.origin.y + y_offset),
+                point(origin_x, visible.top),
                 line_height,
                 TextAlign::Left,
                 None,
@@ -627,7 +643,6 @@ impl Element for BlockTextElement {
                 cx,
             )
             .ok();
-            y_offset += wrapped_line_height(line, line_height);
         }
 
         for trace in crate::perf::take_input_to_gpui_paint(self.input.entity_id(), input_snapshot)

@@ -406,6 +406,7 @@ impl WindowTextSystem {
     /// Shape a multi line string of text, at the given font_size, for painting to the screen.
     /// Subsets of the text can be styled independently with the `runs` parameter.
     /// If `wrap_width` is provided, the line breaks will be adjusted to fit within the given width.
+    /// 多行文本通常每行只有一种装饰；仅内联一种可避免长文档按行预留大量空空间，复杂样式仍可扩容。
     pub fn shape_text(
         &self,
         text: SharedString,
@@ -426,7 +427,7 @@ impl WindowTextSystem {
             font_runs.clear();
             let line_end = line_start + line_text.len();
 
-            let mut decoration_runs = SmallVec::<[DecorationRun; 32]>::new();
+            let mut decoration_runs = SmallVec::<[DecorationRun; 1]>::new();
             let mut run_start = line_start;
             while run_start < line_end {
                 let Some(run) = runs.peek_mut() else {
