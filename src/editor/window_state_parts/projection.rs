@@ -203,6 +203,7 @@ impl Editor {
         self.install_split_preview_projection(prepared, cx);
     }
 
+    /// 新投影继承滚动位置但丢弃旧帧拖动任务，避免旧文档锚点写入新投影。
     pub(super) fn install_split_preview_projection(
         &mut self,
         prepared: Arc<PreparedSplitProjection>,
@@ -252,6 +253,7 @@ impl Editor {
                 source_ranges: HashMap::new(),
                 scroll_handle,
                 scroll_driver,
+                pending_drag_scroll: None,
                 row_stride_cache: HashMap::new(),
                 previous_visible_ids: Vec::new(),
                 previous_render_window: None,
@@ -313,6 +315,7 @@ impl Editor {
             source_ranges,
             scroll_handle,
             scroll_driver,
+            pending_drag_scroll: None,
             row_stride_cache,
             previous_visible_ids,
             previous_render_window,

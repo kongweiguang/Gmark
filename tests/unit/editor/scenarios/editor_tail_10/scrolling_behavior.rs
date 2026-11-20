@@ -359,6 +359,153 @@ async fn split_scrollbar_thumbs_allow_wheel_scrolling(cx: &mut TestAppContext) {
     }
 }
 
+/// 单帧快速拖动不经过新布局，双栏仍须同步移动并避免旧滚轮驱动把视口拉回顶部。
+fn assert_split_scrollbar_fast_drag(cx: &mut TestAppContext, preview_driver: bool) {
+    init_editor_test_app(cx);
+    let markdown = (0..800)
+        .map(|index| format!("# Section {index}\n\nParagraph {index} with enough text to scroll."))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let (editor, visual) =
+        cx.add_window_view(move |_window, cx| Editor::from_markdown(cx, markdown, None));
+    visual.simulate_resize(size(px(720.0), px(520.0)));
+    editor.update(visual, |editor, cx| {
+        editor.set_view_mode(ViewMode::Split, cx)
+    });
+    redraw(visual);
+    redraw(visual);
+
+    let (source, revision, dirty, source_max, preview_max) =
+        editor.read_with(visual, |editor, _| {
+            (
+                editor.source_document.text(),
+                editor.source_document.revision(),
+                editor.document_dirty,
+                f32::from(editor.scroll_handle.max_offset().height),
+                f32::from(
+                    editor
+                        .split_preview
+                        .as_ref()
+                        .unwrap()
+                        .scroll_handle
+                        .max_offset()
+                        .height,
+                ),
+            )
+        });
+    assert!(source_max > 0.0 && preview_max > 0.0);
+    editor.update(visual, |editor, _| {
+        editor.split_preview.as_mut().unwrap().scroll_driver = Some(if preview_driver {
+            super::SplitScrollDriver::Source
+        } else {
+            super::SplitScrollDriver::Preview
+        });
+    });
+    let selector = if preview_driver {
+        "split-preview-scrollbar-thumb"
+    } else {
+        "editor-scrollbar-thumb"
+    };
+    let thumb = visual.debug_bounds(selector).unwrap();
+    let start = thumb.center();
+    let end = point(start.x, start.y + px(150.0));
+    visual.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+    visual.simulate_mouse_move(end, MouseButton::Left, Modifiers::default());
+    visual.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+    redraw(visual);
+    redraw(visual);
+    editor.read_with(visual, |editor, cx| {
+        let source_ratio = -f32::from(editor.scroll_handle.offset().y) / source_max;
+        let preview_ratio = -f32::from(
+            editor
+                .split_preview
+                .as_ref()
+                .unwrap()
+                .scroll_handle
+                .offset()
+                .y,
+        ) / preview_max;
+        assert!(
+            source_ratio > 0.1,
+            "source returned near top: {source_ratio}"
+        );
+        assert!(
+            preview_ratio > 0.1,
+            "preview returned near top: {preview_ratio}"
+        );
+        let source_offset = editor
+            .document
+            .first_root()
+            .unwrap()
+            .read(cx)
+            .text_offset_for_window_y(editor.scroll_handle.bounds().top())
+            .unwrap();
+        let preview = editor.split_preview.as_ref().unwrap();
+        let (render_start, render_end) = preview.previous_render_window.unwrap();
+        let preview_range = preview
+            .document
+            .visible_blocks()
+            .iter()
+            .skip(render_start)
+            .take(render_end - render_start)
+            .filter_map(|visible| {
+                let bounds = visible.entity.read(cx).last_bounds?;
+                let distance =
+                    Editor::split_drag_viewport_distance(bounds, preview.scroll_handle.bounds())?;
+                let range = preview.source_ranges.get(&visible.entity.entity_id())?;
+                Some((distance, range))
+            })
+            .min_by(|left, right| left.0.total_cmp(&right.0))
+            .unwrap()
+            .1;
+        let distance = if source_offset < preview_range.start {
+            preview_range.start - source_offset
+        } else {
+            source_offset.saturating_sub(preview_range.end)
+        };
+        assert!(
+            distance < 120,
+            "source offset {source_offset}, preview range {preview_range:?}"
+        );
+        assert_eq!(editor.source_document.text(), source);
+        assert_eq!(editor.source_document.revision(), revision);
+        assert_eq!(editor.document_dirty, dirty);
+    });
+}
+
+/// 长块覆盖视口顶边时，后续更靠近顶边的标题不能抢走源码锚点。
+#[test]
+fn split_drag_anchor_prefers_block_covering_viewport_top() {
+    let viewport = gpui::Bounds::new(point(px(0.0), px(100.0)), size(px(200.0), px(300.0)));
+    let covering = gpui::Bounds::new(point(px(0.0), px(-300.0)), size(px(200.0), px(420.0)));
+    let next = gpui::Bounds::new(point(px(0.0), px(121.0)), size(px(200.0), px(30.0)));
+    assert_eq!(
+        Editor::split_drag_viewport_distance(covering, viewport),
+        Some(0.0)
+    );
+    assert_eq!(
+        Editor::split_drag_viewport_distance(next, viewport),
+        Some(21.0)
+    );
+    let outside = gpui::Bounds::new(point(px(0.0), px(400.0)), size(px(200.0), px(20.0)));
+    assert_eq!(
+        Editor::split_drag_viewport_distance(outside, viewport),
+        None
+    );
+}
+
+/// 左侧快速拖动时右侧必须跟随，并保持文档状态不变。
+#[gpui::test]
+async fn split_fast_drag_source_keeps_both_panes_scrolled(cx: &mut TestAppContext) {
+    assert_split_scrollbar_fast_drag(cx, false);
+}
+
+/// 右侧快速拖动时左侧必须跟随，并保持文档状态不变。
+#[gpui::test]
+async fn split_fast_drag_preview_keeps_both_panes_scrolled(cx: &mut TestAppContext) {
+    assert_split_scrollbar_fast_drag(cx, true);
+}
+
 /// 在真实悬停和拖动期间验证命中区稳定，避免滑块样式影响布局或编辑事务。
 #[gpui::test]
 async fn editor_scrollbar_separates_stable_hitbox_from_hover_thumb(cx: &mut TestAppContext) {

@@ -1,6 +1,7 @@
 // @author kongweiguang
 
 use super::*;
+use crate::editor::PendingSplitDragScroll;
 
 impl Editor {
     /// 只更新滑块外观，保留固定命中区，避免进入悬停时鼠标目标位移。
@@ -200,6 +201,7 @@ impl Editor {
     ) {
         self.handle_scroll_wheel(SplitScrollDriver::Source, event, window, cx);
         if let Some(state) = self.split_preview.as_mut() {
+            state.pending_drag_scroll = None;
             state.scroll_driver = Some(SplitScrollDriver::Source);
         }
     }
@@ -213,6 +215,7 @@ impl Editor {
     ) {
         self.handle_scroll_wheel(SplitScrollDriver::Preview, event, window, cx);
         if let Some(state) = self.split_preview.as_mut() {
+            state.pending_drag_scroll = None;
             state.scroll_driver = Some(SplitScrollDriver::Preview);
         }
     }
@@ -338,6 +341,10 @@ impl Editor {
         });
         self.pending_scroll_active_block_into_view = false;
         self.pending_scroll_recheck_after_layout = false;
+        if let Some(state) = self.split_preview.as_mut() {
+            state.scroll_driver = None;
+            state.pending_drag_scroll = None;
+        }
         cx.notify();
     }
 
@@ -364,6 +371,11 @@ impl Editor {
         let mut offset = self.scroll_handle.offset();
         offset.y = -px(scroll_y);
         self.scroll_handle.set_offset(offset);
+        if let Some(state) = self.split_preview.as_mut() {
+            state.scroll_driver = None;
+            state.pending_drag_scroll =
+                Some(PendingSplitDragScroll::Paint(SplitScrollDriver::Source));
+        }
         cx.notify();
     }
 
@@ -374,7 +386,7 @@ impl Editor {
         }
     }
 
-    /// 冻结右侧的轨道几何，同时把同步驱动权交给被拖动的预览。
+    /// 冻结右侧轨道几何并清除过期滚轮驱动，避免旧布局在拖动时覆盖新位置。
     pub(crate) fn start_split_preview_scrollbar_drag(
         &mut self,
         pointer_offset_y: f32,
@@ -391,12 +403,15 @@ impl Editor {
             max_scroll_y,
         });
         if let Some(state) = self.split_preview.as_mut() {
-            state.scroll_driver = Some(SplitScrollDriver::Preview);
+            state.scroll_driver = None;
+            state.pending_drag_scroll = None;
         }
+        self.pending_scroll_active_block_into_view = false;
+        self.pending_scroll_recheck_after_layout = false;
         cx.notify();
     }
 
-    /// 右侧按自己的内容高度映射拖动位置，由既有同步流程更新左侧。
+    /// 右侧按冻结轨道映射拖动位置，等待本帧真实布局后同步源码锚点。
     pub(crate) fn update_split_preview_scrollbar_drag(
         &mut self,
         pointer_y_in_track: f32,
@@ -418,7 +433,9 @@ impl Editor {
             let mut offset = state.scroll_handle.offset();
             offset.y = -px(scroll_y);
             state.scroll_handle.set_offset(offset);
-            state.scroll_driver = Some(SplitScrollDriver::Preview);
+            state.scroll_driver = None;
+            state.pending_drag_scroll =
+                Some(PendingSplitDragScroll::Paint(SplitScrollDriver::Preview));
         }
         cx.notify();
     }

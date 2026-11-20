@@ -1,8 +1,40 @@
 // @author kongweiguang
 
 use super::*;
+use crate::editor::PendingSplitDragScroll;
 
 impl Editor {
+    /// 绘制完成后只处理本帧挂载的实体，避免旧块几何参与拖动锚点计算。
+    fn split_drag_sync_canvas(
+        &self,
+        painted_entities: Vec<Entity<Block>>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let pending = match self.split_preview.as_ref()?.pending_drag_scroll? {
+            pending @ (PendingSplitDragScroll::Paint(_)
+            | PendingSplitDragScroll::AlignSource(_)) => pending,
+            PendingSplitDragScroll::SourceAnchor(_) => return None,
+        };
+        let editor = cx.entity().downgrade();
+        Some(
+            canvas(
+                |_, _, _| (),
+                move |_, _, window, cx| {
+                    let editor = editor.clone();
+                    let painted_entities = painted_entities.clone();
+                    window.defer(cx, move |_, cx| {
+                        let _ = editor.update(cx, |editor, cx| {
+                            editor.sync_split_drag_after_paint(pending, &painted_entities, cx);
+                        });
+                    });
+                },
+            )
+            .absolute()
+            .size_full()
+            .into_any_element(),
+        )
+    }
+
     pub(super) fn info_dialog_title<'a>(
         &self,
         strings: &'a I18nStrings,
@@ -242,6 +274,27 @@ impl Editor {
             let strings = cx.global::<I18nManager>().strings_arc();
             return Some(self.render_svg_document_preview(theme, &strings, true, cx));
         }
+        if let Some(state) = self.split_preview.as_mut() {
+            if let (Some(PendingSplitDragScroll::SourceAnchor(source_offset)), Some(surface)) =
+                (state.pending_drag_scroll, state.virtual_surface.as_ref())
+            {
+                if let Some(target) = surface.y_for_source_offset(source_offset) {
+                    let viewport = f32::from(state.scroll_handle.bounds().size.height).max(1.0);
+                    let top = editor_top_padding(
+                        super::ViewMode::Split,
+                        false,
+                        viewport,
+                        &theme.dimensions,
+                    );
+                    let mut offset = state.scroll_handle.offset();
+                    offset.y =
+                        -px(target + top).min(state.scroll_handle.max_offset().height.max(px(0.0)));
+                    state.scroll_handle.set_offset(offset);
+                }
+                state.pending_drag_scroll =
+                    Some(PendingSplitDragScroll::AlignSource(source_offset));
+            }
+        }
         self.sync_split_virtual_surface_mounts(cx);
         let (visible, scroll_handle, virtual_spacers) = {
             let state = self.split_preview.as_ref()?;
@@ -265,7 +318,7 @@ impl Editor {
         let bottom_padding = editor_bottom_padding(viewport_height, d);
         let centered_width = crate::ui::centered_column_width(pane_width, d);
         let max_scroll_y = f32::from(scroll_handle.max_offset().height.max(px(0.0)));
-        let current_scroll_y = (-f32::from(scroll_handle.offset().y)).clamp(0.0, max_scroll_y);
+        let mut current_scroll_y = (-f32::from(scroll_handle.offset().y)).clamp(0.0, max_scroll_y);
         let scrollbar_geometry =
             Self::scrollbar_geometry(viewport_height, max_scroll_y, current_scroll_y);
         let show_scrollbar = max_scroll_y > 0.5;
@@ -468,6 +521,24 @@ impl Editor {
             } else {
                 pane
             };
+            let painted_entities = if matches!(
+                self.split_preview
+                    .as_ref()
+                    .and_then(|state| state.pending_drag_scroll),
+                Some(
+                    PendingSplitDragScroll::Paint(crate::editor::SplitScrollDriver::Preview)
+                        | PendingSplitDragScroll::AlignSource(_)
+                )
+            ) {
+                visible.iter().map(|block| block.entity.clone()).collect()
+            } else {
+                Vec::new()
+            };
+            let pane = if let Some(canvas) = self.split_drag_sync_canvas(painted_entities, cx) {
+                pane.child(canvas)
+            } else {
+                pane
+            };
             return Some(pane.into_any_element());
         }
 
@@ -503,6 +574,43 @@ impl Editor {
             .iter()
             .map(|id| state.row_stride_cache.get(id).copied().unwrap_or(estimate))
             .collect();
+        if let Some(PendingSplitDragScroll::SourceAnchor(source_offset)) = state.pending_drag_scroll
+        {
+            let target_row = row_starts
+                .iter()
+                .enumerate()
+                .filter_map(|(row, &start)| {
+                    let end = row_starts.get(row + 1).copied().unwrap_or(visible.len());
+                    visible[start..end]
+                        .iter()
+                        .filter_map(|block| {
+                            let range = state.source_ranges.get(&block.entity.entity_id())?;
+                            let distance = if source_offset < range.start {
+                                range.start - source_offset
+                            } else {
+                                source_offset.saturating_sub(range.end)
+                            };
+                            Some((distance, range.len(), row))
+                        })
+                        .min()
+                })
+                .min()
+                .map(|(_, _, row)| row);
+            if let Some(row) = target_row {
+                let target = top_padding
+                    + strides[..row]
+                        .iter()
+                        .map(|stride| stride.max(0.0))
+                        .sum::<f32>();
+                let mut offset = scroll_handle.offset();
+                offset.y = -px(target.min(max_scroll_y));
+                scroll_handle.set_offset(offset);
+                current_scroll_y = target.min(max_scroll_y);
+            }
+            state.pending_drag_scroll = Some(PendingSplitDragScroll::AlignSource(source_offset));
+        }
+        let scrollbar_geometry =
+            Self::scrollbar_geometry(viewport_height, max_scroll_y, current_scroll_y);
         let measurement_frontier = row_ids
             .iter()
             .position(|id| !state.row_stride_cache.contains_key(id))
@@ -524,6 +632,28 @@ impl Editor {
             restoring_deep_offset,
         );
         state.previous_render_window = Some((render_window.run_start, render_window.run_end));
+        let painted_start = row_starts
+            .get(render_window.run_start)
+            .copied()
+            .unwrap_or(visible.len());
+        let painted_end = row_starts
+            .get(render_window.run_end)
+            .copied()
+            .unwrap_or(visible.len());
+        let painted_entities = if matches!(
+            state.pending_drag_scroll,
+            Some(
+                PendingSplitDragScroll::Paint(crate::editor::SplitScrollDriver::Preview)
+                    | PendingSplitDragScroll::AlignSource(_)
+            )
+        ) {
+            visible[painted_start..painted_end]
+                .iter()
+                .map(|block| block.entity.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         let top_height = render_window.top_h;
         let mut mounted = Vec::with_capacity(
@@ -625,6 +755,11 @@ impl Editor {
                 f32::from(scroll_handle.bounds().origin.y),
                 cx,
             ))
+        } else {
+            pane
+        };
+        let pane = if let Some(canvas) = self.split_drag_sync_canvas(painted_entities, cx) {
+            pane.child(canvas)
         } else {
             pane
         };

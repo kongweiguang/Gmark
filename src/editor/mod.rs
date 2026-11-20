@@ -458,6 +458,7 @@ struct SplitPreviewState {
     source_ranges: HashMap<EntityId, std::ops::Range<usize>>,
     scroll_handle: ScrollHandle,
     scroll_driver: Option<SplitScrollDriver>,
+    pending_drag_scroll: Option<PendingSplitDragScroll>,
     row_stride_cache: HashMap<EntityId, f32>,
     previous_visible_ids: Vec<EntityId>,
     previous_render_window: Option<(usize, usize)>,
@@ -468,6 +469,14 @@ struct SplitPreviewState {
 enum SplitScrollDriver {
     Source,
     Preview,
+}
+
+/// 仅让当前投影消费一次拖动结果；源码锚点等待下一次预览行布局。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingSplitDragScroll {
+    Paint(SplitScrollDriver),
+    SourceAnchor(usize),
+    AlignSource(usize),
 }
 
 /// 单个权威动画同时服务源码与 Split 预览，连续滚轮只更新目标而不排队。
