@@ -321,6 +321,44 @@ async fn markdown_scrollbars_are_visible_without_hover_in_all_modes(cx: &mut Tes
     }
 }
 
+/// 滑块覆盖滚动区，必须接收拖拽并把滚轮交给覆盖范围内的对应窗格。
+#[gpui::test]
+async fn split_scrollbar_thumbs_allow_wheel_scrolling(cx: &mut TestAppContext) {
+    init_editor_test_app(cx);
+    let markdown = "# Heading\n\nParagraph with enough text to scroll.\n\n".repeat(120);
+    let (editor, visual) =
+        cx.add_window_view(move |_window, cx| Editor::from_markdown(cx, markdown, None));
+    visual.simulate_resize(size(px(720.0), px(520.0)));
+    editor.update(visual, |editor, cx| editor.set_view_mode(ViewMode::Split, cx));
+    redraw(visual);
+    redraw(visual);
+
+    for (selector, preview) in [
+        ("editor-scrollbar-thumb", false),
+        ("split-preview-scrollbar-thumb", true),
+    ] {
+        let offset = |visual: &mut gpui::VisualTestContext| {
+            editor.read_with(visual, |editor, _| {
+                if preview {
+                    editor.split_preview.as_ref().unwrap().scroll_handle.offset().y
+                } else {
+                    editor.scroll_handle.offset().y
+                }
+            })
+        };
+        let start = offset(visual);
+        let thumb = visual.debug_bounds(selector).unwrap();
+        visual.simulate_event(gpui::ScrollWheelEvent {
+            position: thumb.center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(-180.0))),
+            modifiers: Modifiers::default(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        redraw(visual);
+        assert!(offset(visual) < start, "wheel did not scroll over {selector}");
+    }
+}
+
 /// 在真实悬停和拖动期间验证命中区稳定，避免滑块样式影响布局或编辑事务。
 #[gpui::test]
 async fn editor_scrollbar_separates_stable_hitbox_from_hover_thumb(cx: &mut TestAppContext) {

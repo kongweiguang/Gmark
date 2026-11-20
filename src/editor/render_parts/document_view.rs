@@ -23,7 +23,7 @@ fn markdown_callout_colors(
 
 impl Editor {
     /// 按实际编辑区尺寸同步浮层与行高缓存，避免旧字体度量影响虚拟窗口定位。
-    /// 滚动滑块只依赖纵向溢出，使静置的编辑区也能直接定位长文档。
+    /// 滑块常驻以便定位长文档，并把滚轮留给下层编辑区，避免覆盖出滚动死区。
     pub(super) fn render_document_content(
         &mut self,
         window: &mut Window,
@@ -691,7 +691,7 @@ impl Editor {
                     .id("editor-scrollbar-hitbox")
                     .debug_selector(|| "editor-scrollbar-hitbox".to_owned())
                     .absolute()
-                    .occlude()
+                    .block_mouse_except_scroll()
                     .top(px(thumb_top))
                     .right(px(d.scrollbar_right))
                     .w(px(EDITOR_SCROLLBAR_HIT_WIDTH))

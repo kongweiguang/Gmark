@@ -631,6 +631,7 @@ impl Editor {
         Some(pane.into_any_element())
     }
 
+    /// 滑块独立接管拖拽，滚轮继续交由下层预览处理，以保留分屏同步的驱动权。
     pub(super) fn render_split_preview_scrollbar(
         &self,
         theme: &Theme,
@@ -652,7 +653,7 @@ impl Editor {
             .id("split-preview-scrollbar-hitbox")
             .debug_selector(|| "split-preview-scrollbar-hitbox".to_owned())
             .absolute()
-            .occlude()
+            .block_mouse_except_scroll()
             .top(px(geometry.thumb_top))
             .right(px(theme.dimensions.scrollbar_right))
             .w(px(EDITOR_SCROLLBAR_HIT_WIDTH))
