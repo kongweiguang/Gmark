@@ -127,10 +127,16 @@ impl PaneWorkspaceController {
         self
     }
 
-    /// Notifies the owning editor after a ratio change has been committed; the
-    /// callback remains UI-thread-only and cannot retain document/runtime state.
+    /// Notifies the owning editor after a ratio change has been committed.
+    ///
+    /// The notification is deferred because the persistence callback snapshots
+    /// this same workspace entity.  Running it synchronously would read the
+    /// entity while the divider handler still holds its update, which panics
+    /// before the new ratio can be saved.  Deferring keeps the callback
+    /// UI-thread-only while letting GPUI finish the current effect cycle.
     pub(super) fn notify_workspace_changed(&self, cx: &mut App) {
-        (self.workspace_changed)(cx);
+        let callback = self.workspace_changed.clone();
+        cx.defer(move |cx| callback(cx));
     }
 
     /// Construct a no-op controller for isolated view tests and previews.

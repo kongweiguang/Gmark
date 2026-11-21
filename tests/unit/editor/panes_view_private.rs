@@ -1,7 +1,9 @@
 // @author kongweiguang
 
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use gmark_document_core::{
     DocumentFormat, DocumentProfile, DocumentRevision, LoadingPolicy, SourceAffinity, SourceEdit,
@@ -17,9 +19,10 @@ use uuid::Uuid;
 
 use super::*;
 use crate::editor::panes::{
-    PaneId, PaneNode, PaneReadOnlyKind, PaneState, PaneViewStateSnapshot, PaneWorkspace, SplitAxis,
-    TabId, TabView,
+    PaneId, PaneNode, PaneReadOnlyKind, PaneState, PaneViewStateSnapshot, PaneWorkspace,
+    PaneWorkspaceController, SplitAxis, TabId, TabView,
 };
+use gpui::{AppContext, TestAppContext, WeakEntity};
 
 fn pane(seed: u128) -> PaneId {
     PaneId::from_uuid(Uuid::from_u128(seed))
@@ -76,6 +79,63 @@ fn workspace_with_panes(count: usize) -> PaneWorkspace<(), ()> {
             .expect("test split should fit the model limit");
     }
     workspace
+}
+
+#[gpui::test]
+async fn workspace_persistence_notification_defers_reentrant_reads(cx: &mut TestAppContext) {
+    let root = pane(9);
+    let document_id = DocumentId::new();
+    let document = PaneDocumentRef::from_error(
+        document_id,
+        PathBuf::from("missing.md"),
+        "fixture document is intentionally unavailable",
+        DocumentViewInstanceId::new(),
+        "missing.md",
+    );
+    let mut workspace: PaneWorkspace<DocumentId, PaneDocumentRef> =
+        PaneWorkspace::with_root_id(root);
+    workspace
+        .insert_tab(
+            root,
+            TabView::new(TabId::from_uuid(Uuid::from_u128(9)), document_id, document),
+        )
+        .expect("fixture tab should attach to its root pane");
+
+    // Session capture reads the mounted workspace entity.  Reproduce that read
+    // from inside the notification so a synchronous callback fails with the
+    // same "already being updated" panic users hit when releasing a divider.
+    let target = Rc::new(RefCell::new(None::<WeakEntity<PaneWorkspaceView>>));
+    let callback_target = target.clone();
+    let callback_reads = Rc::new(Cell::new(0_usize));
+    let reads = callback_reads.clone();
+    let controller = PaneWorkspaceController::noop().with_workspace_changed(move |cx| {
+        let entity = callback_target
+            .borrow()
+            .clone()
+            .expect("test installs the workspace handle before notifying");
+        entity
+            .read_with(cx, |_, _| ())
+            .expect("workspace must still be alive");
+        reads.set(reads.get() + 1);
+    });
+    let view = cx.update(|cx| cx.new(|_| PaneWorkspaceView::new(workspace, controller)));
+    *target.borrow_mut() = Some(view.downgrade());
+
+    cx.update(|cx| {
+        view.update(cx, |view, cx| {
+            view.notify_workspace_changed_for_test(cx);
+            assert_eq!(
+                callback_reads.get(),
+                0,
+                "persistence must not read the workspace while its own update is active"
+            );
+        });
+    });
+    assert_eq!(
+        callback_reads.get(),
+        1,
+        "the deferred persistence notification should run exactly once"
+    );
 }
 
 #[test]

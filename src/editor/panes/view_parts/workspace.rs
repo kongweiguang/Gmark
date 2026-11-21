@@ -124,6 +124,16 @@ impl PaneWorkspaceView {
         &self.layout
     }
 
+    /// Exposes the persistence notification to pane tests without making the
+    /// controller field part of the view API.  Tests need to invoke it while
+    /// this entity is being updated to prove the callback never re-enters the
+    /// workspace, which is otherwise only observable in release builds because
+    /// session capture is disabled under `cfg(test)`.
+    #[cfg(test)]
+    pub(in crate::editor::panes) fn notify_workspace_changed_for_test(&self, cx: &mut gpui::App) {
+        self.controller.notify_workspace_changed(cx);
+    }
+
     /// Number of active tab entities mounted in the latest render pass.
     pub fn mounted_view_count(&self) -> usize {
         self.active_views.len()
