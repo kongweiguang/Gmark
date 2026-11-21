@@ -333,16 +333,41 @@ pub(super) fn source_window_start_for_anchor(line_len: u64, relative_byte: u64) 
         .min(line_len.saturating_sub(MAX_RENDERED_LINE_BYTES))
 }
 
+/// 窄窗格也要保留可拖动行程：常规宽度按可见窗口占比缩放，空间不足时至少留半个轨道。
+///
+/// 源码长行只用 64 KiB 窗口虚拟滚动，滑块过短会让极窄分屏的拖动范围退化为零；
+/// 因此只在正常宽度下维持 28px 最小视觉尺寸，窄轨道按比例缩小，避免点击滚动条把
+/// 当前长行窗口重置到首段。
+pub(super) fn source_horizontal_thumb_width(
+    track_width: f32,
+    visible_bytes: u64,
+    total_bytes: u64,
+) -> f32 {
+    if !track_width.is_finite() || track_width <= 0.0 {
+        return 0.0;
+    }
+    if total_bytes <= visible_bytes {
+        return track_width;
+    }
+    let minimum = 28.0_f32.min(track_width * 0.5);
+    let proportional = track_width * visible_bytes as f32 / total_bytes.max(1) as f32;
+    proportional.clamp(minimum, track_width)
+}
+
 pub(super) fn source_window_start_from_pointer(
     pointer_x: gpui::Pixels,
     track_left: gpui::Pixels,
     track_width: f32,
     thumb_width: f32,
     maximum: u64,
+    current: u64,
 ) -> u64 {
-    let travel = (track_width - thumb_width).max(0.0);
-    if travel <= 0.0 || maximum == 0 {
+    if maximum == 0 {
         return 0;
+    }
+    let travel = (track_width - thumb_width).max(0.0);
+    if !travel.is_finite() || travel <= 0.0 {
+        return current.min(maximum);
     }
     let thumb_left = (f32::from(pointer_x - track_left) - thumb_width * 0.5).clamp(0.0, travel);
     ((thumb_left / travel) as f64 * maximum as f64).round() as u64

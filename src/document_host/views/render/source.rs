@@ -452,16 +452,11 @@ impl DocumentHost {
         let source_horizontal_track_width = f32::from(source_scroll_bounds.size.width)
             - source_track_offset
             - (SOURCE_HORIZONTAL_SCROLLBAR_RIGHT_INSET - surface.horizontal_padding);
-        let source_horizontal_thumb_width = if source_max_window_start > 0 {
-            (source_horizontal_track_width * MAX_RENDERED_LINE_BYTES as f32
-                / surface.observed_line_bytes.max(1) as f32)
-                .clamp(
-                    28.0_f32.min(source_horizontal_track_width),
-                    source_horizontal_track_width,
-                )
-        } else {
-            source_horizontal_track_width
-        };
+        let source_horizontal_thumb_width = source_horizontal_thumb_width(
+            source_horizontal_track_width,
+            MAX_RENDERED_LINE_BYTES,
+            surface.observed_line_bytes,
+        );
         let source_horizontal_thumb_left = if source_max_window_start > 0 {
             (source_horizontal_track_width - source_horizontal_thumb_width)
                 * (self.source_window_start as f64 / source_max_window_start as f64) as f32
@@ -489,6 +484,7 @@ impl DocumentHost {
                             source_horizontal_track_width,
                             source_horizontal_thumb_width,
                             source_max_window_start,
+                            this.source_window_start,
                         );
                         this.set_source_window_start(next, cx);
                     }),
@@ -502,6 +498,7 @@ impl DocumentHost {
                                 source_horizontal_track_width,
                                 source_horizontal_thumb_width,
                                 source_max_window_start,
+                                this.source_window_start,
                             );
                             this.set_source_window_start(next, cx);
                         }

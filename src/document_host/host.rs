@@ -419,8 +419,9 @@ mod source_window;
 use source_window::{
     decode_provisional_bytes, read_bounded_line_window, read_provisional_source_rows,
     rendered_line_ending, rendered_line_window_text, shift_source_window_start,
-    source_line_from_scrollbar_pointer, source_list_origin_for_target,
-    source_window_start_for_anchor, source_window_start_from_pointer, text_encoding_label,
+    source_horizontal_thumb_width, source_line_from_scrollbar_pointer,
+    source_list_origin_for_target, source_window_start_for_anchor,
+    source_window_start_from_pointer, text_encoding_label,
 };
 
 fn document_view_state_mut<'a>(

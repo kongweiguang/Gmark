@@ -85,6 +85,31 @@ fn global_scrollbar_pointer_uses_line_space_instead_of_giant_pixel_offsets() {
 }
 
 #[test]
+fn narrow_source_scrollbar_keeps_drag_travel_and_preserves_window() {
+    let track_width = 27.1;
+    let thumb_width = source_horizontal_thumb_width(track_width, MAX_RENDERED_LINE_BYTES, 1 << 20);
+
+    assert!(thumb_width > 0.0);
+    assert!(thumb_width < track_width);
+    assert!(track_width - thumb_width > 1.0);
+    assert_eq!(
+        source_window_start_from_pointer(
+            px(127.1),
+            px(100.0),
+            track_width,
+            thumb_width,
+            900_000,
+            320_000,
+        ),
+        900_000
+    );
+    assert_eq!(
+        source_window_start_from_pointer(px(100.0), px(100.0), 20.0, 20.0, 900_000, 320_000),
+        320_000
+    );
+}
+
+#[test]
 fn bounded_edit_replaces_only_the_visible_window_and_preserves_suffixes() {
     let target = MAX_RENDERED_LINE_BYTES + 4_096;
     let mut original = "p".repeat(target as usize);
