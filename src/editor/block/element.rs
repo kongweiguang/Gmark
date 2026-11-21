@@ -111,14 +111,15 @@ fn source_line_count(text: &str) -> usize {
     text.split('\n').count().max(1)
 }
 
-pub(crate) fn source_line_number_gutter_width(line_count: usize, font_size: Pixels) -> Pixels {
-    let digits = line_count
-        .max(1)
-        .to_string()
-        .len()
-        .max(SOURCE_LINE_NUMBER_MIN_DIGITS);
+/// 按全文件最大行号预留数字宽度，边距由各源码表面独立决定。
+pub(crate) fn source_line_number_digits_width(line_count: usize, font_size: Pixels) -> Pixels {
+    let digits = (line_count.max(1).ilog10() as usize + 1).max(SOURCE_LINE_NUMBER_MIN_DIGITS);
     px(digits as f32 * f32::from(font_size) * SOURCE_LINE_NUMBER_DIGIT_WIDTH_RATIO)
-        + px(SOURCE_LINE_NUMBER_GAP)
+}
+
+/// Block 内的正文测量与绘制共用同一行号槽位和文本间距。
+fn source_line_number_gutter_width(line_count: usize, font_size: Pixels) -> Pixels {
+    source_line_number_digits_width(line_count, font_size) + px(SOURCE_LINE_NUMBER_GAP)
 }
 
 fn source_text_bounds(bounds: Bounds<Pixels>, gutter_width: Pixels) -> Bounds<Pixels> {

@@ -25,7 +25,7 @@ pub(crate) use crate::components::markdown::image::*;
 pub use crate::components::markdown::inline::*;
 pub(crate) use crate::components::markdown::link::*;
 pub(crate) use editing_command::*;
-pub(crate) use element::source_line_number_gutter_width;
+pub(crate) use element::source_line_number_digits_width;
 pub(crate) use input::{BlockImeComposition, BlockImeCompositionOwner};
 pub(crate) use line_edit::{LineOperation, plan_line_operation};
 pub(crate) use pointer_selection::{PointerSelectionGranularity, PointerSelectionSession};

@@ -6,6 +6,11 @@ use super::*;
 use crate::theme::workbench::SurfaceKind;
 use crate::ui::visual_preferences::VisualPreferencesManager;
 
+const SOURCE_GUTTER_NUMBER_GAP: f32 = 6.0;
+const SOURCE_FOLD_LANE_WIDTH: f32 = 18.0;
+const SOURCE_HORIZONTAL_SCROLLBAR_LEFT_GAP: f32 = 2.0;
+const SOURCE_HORIZONTAL_SCROLLBAR_RIGHT_INSET: f32 = 18.0;
+
 #[derive(Clone, Copy)]
 pub(super) struct SourceSurfaceMetrics {
     pub(super) horizontal_padding: f32,
@@ -14,12 +19,12 @@ pub(super) struct SourceSurfaceMetrics {
     pub(super) gutter_width: f32,
     fold_lane_width: f32,
     number_width: f32,
-    content_width: f32,
+    number_text_size: f32,
     observed_line_bytes: u64,
 }
 
 impl DocumentHost {
-    /// Keeps the active native IME row mounted while refreshing Source viewport and layout metrics.
+    /// 保留活动 IME 行，行号按全文件位数定宽，跨位数滚动时正文不会左右跳动。
     pub(super) fn prepare_source_surface(
         &mut self,
         window: &mut Window,
@@ -61,18 +66,17 @@ impl DocumentHost {
             );
         let theme = cx.global::<ThemeManager>().current_arc();
         let dimensions = &theme.dimensions;
-        let viewport_width = f32::from(window.viewport_size().width).max(1.0);
         let (horizontal_padding, top_padding) = source_surface_padding(dimensions);
-        let content_width = (viewport_width - 2.0 * horizontal_padding).max(1.0);
         let row_height =
             (theme.typography.text_line_height * f32::from(window.rem_size())).max(1.0);
         self.source_row_height = row_height;
-        let number_width = f32::from(source_line_number_gutter_width(
+        let number_text_size = theme.typography.text_size * 0.85;
+        let number_width = f32::from(source_line_number_digits_width(
             line_count,
-            px(theme.typography.text_size),
-        ));
+            px(number_text_size),
+        )) + SOURCE_GUTTER_NUMBER_GAP;
         let fold_lane_width = if self.folding_enabled && self.source_language.supports_folding() {
-            20.0
+            SOURCE_FOLD_LANE_WIDTH
         } else {
             0.0
         };
@@ -84,12 +88,12 @@ impl DocumentHost {
             gutter_width: number_width + fold_lane_width,
             fold_lane_width,
             number_width,
-            content_width,
+            number_text_size,
             observed_line_bytes,
         }
     }
 
-    /// 可见行全部挂载后再统一投影选区，避免逐行构建时中间 Block 暂时接管 Host 输入桥。
+    /// 源码列表直接填充窗格的内容宽度，可见行全部挂载后再统一投影选区以保护输入桥。
     pub(super) fn render_source_list(
         &mut self,
         surface: SourceSurfaceMetrics,
@@ -97,7 +101,6 @@ impl DocumentHost {
     ) -> impl IntoElement + use<> {
         let theme = cx.global::<ThemeManager>().current_arc();
         let colors = &theme.colors;
-        let dimensions = &theme.dimensions;
         let source_text_size = theme.typography.text_size;
         let source_line_height = theme.typography.text_line_height;
         let visual_preferences = cx
@@ -199,6 +202,8 @@ impl DocumentHost {
                                 surface.gutter_width,
                                 surface.fold_lane_width,
                                 surface.number_width,
+                                surface.number_text_size,
+                                SOURCE_GUTTER_NUMBER_GAP,
                                 line_number_color,
                                 gutter_separator_color,
                                 active_line_color,
@@ -320,9 +325,7 @@ impl DocumentHost {
         .track_scroll(self.scroll_handle.clone())
         .font_family(source_monospace_font_family())
         .h_full()
-        .w(px(surface.content_width))
-        .max_w(relative(1.0))
-        .px(px(dimensions.block_padding_x))
+        .w_full()
         .bg(source_material.background)
     }
 
@@ -423,6 +426,7 @@ impl DocumentHost {
         })
     }
 
+    /// 轨道和指针映射共用正文起点，并按当前窗格的实际列表宽度计算可拖动范围。
     pub(super) fn render_source_horizontal_scrollbar(
         &mut self,
         surface: SourceSurfaceMetrics,
@@ -430,7 +434,6 @@ impl DocumentHost {
     ) -> Option<impl IntoElement + use<>> {
         let theme = cx.global::<ThemeManager>().current_arc();
         let colors = &theme.colors;
-        let dimensions = &theme.dimensions;
         let visual_preferences = cx
             .try_global::<VisualPreferencesManager>()
             .map(VisualPreferencesManager::current)
@@ -444,14 +447,18 @@ impl DocumentHost {
             .observed_line_bytes
             .saturating_sub(MAX_RENDERED_LINE_BYTES);
         self.source_window_start = self.source_window_start.min(source_max_window_start);
-        let source_horizontal_track_left = source_scroll_bounds.left()
-            + px(dimensions.block_padding_x + surface.gutter_width + 2.0);
-        let source_horizontal_track_width =
-            f32::from((source_scroll_bounds.size.width - px(96.0)).max(px(40.0)));
+        let source_track_offset = surface.gutter_width + SOURCE_HORIZONTAL_SCROLLBAR_LEFT_GAP;
+        let source_horizontal_track_left = source_scroll_bounds.left() + px(source_track_offset);
+        let source_horizontal_track_width = f32::from(source_scroll_bounds.size.width)
+            - source_track_offset
+            - (SOURCE_HORIZONTAL_SCROLLBAR_RIGHT_INSET - surface.horizontal_padding);
         let source_horizontal_thumb_width = if source_max_window_start > 0 {
             (source_horizontal_track_width * MAX_RENDERED_LINE_BYTES as f32
                 / surface.observed_line_bytes.max(1) as f32)
-                .clamp(28.0, source_horizontal_track_width)
+                .clamp(
+                    28.0_f32.min(source_horizontal_track_width),
+                    source_horizontal_track_width,
+                )
         } else {
             source_horizontal_track_width
         };
@@ -462,13 +469,13 @@ impl DocumentHost {
             0.0
         };
 
-        (source_max_window_start > 0).then(|| {
+        (source_max_window_start > 0 && source_horizontal_track_width > 0.0).then(|| {
             div()
                 .id("document-host-horizontal-scrollbar")
                 .debug_selector(|| "document-host-horizontal-scrollbar".to_owned())
                 .absolute()
-                .left(px(dimensions.block_padding_x + surface.gutter_width + 2.0))
-                .right(px(18.0))
+                .left(px(surface.horizontal_padding + source_track_offset))
+                .right(px(SOURCE_HORIZONTAL_SCROLLBAR_RIGHT_INSET))
                 .bottom(px(2.0))
                 .h(px(12.0))
                 .cursor_pointer()

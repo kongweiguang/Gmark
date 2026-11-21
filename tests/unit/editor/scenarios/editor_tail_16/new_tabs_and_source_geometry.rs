@@ -98,12 +98,14 @@ fn new_document_kind_controls_only_missing_save_extensions() {
     assert_eq!(explicit, PathBuf::from("report.txt"));
 }
 
+/// 分页源码在窄窗口为正文保留空间，跳过行号位数变化时也保持正文列对齐。
 #[gpui::test]
 async fn million_line_source_jump_keeps_local_scroll_geometry_exact(cx: &mut TestAppContext) {
     init_editor_test_app(cx);
     let temp = tempfile::tempdir().expect("million-line Source tempdir");
-    let path = temp.path().join("million-lines.txt");
-    let mut text = "x\n".repeat(999_999);
+    let path = temp.path().join("million-lines.md");
+    let mut text = String::from("# Heading\n");
+    text.push_str(&"x\n".repeat(999_998));
     text.push('x');
     fs::write(&path, text).expect("million-line Source fixture");
     let probe = gmark_paged_document::probe_file(
@@ -118,9 +120,19 @@ async fn million_line_source_jump_keeps_local_scroll_geometry_exact(cx: &mut Tes
     let (editor, visual) = cx.add_window_view(move |_window, cx| {
         Editor::from_source_backed_file(cx, path, probe, source)
     });
-    visual.simulate_resize(size(px(960.0), px(640.0)));
+    visual.simulate_resize(size(px(720.0), px(520.0)));
     visual.run_until_parked();
     redraw(visual);
+    let surface = visual
+        .debug_bounds("document-host-source-horizontal-scroll")
+        .expect("Source surface");
+    let first = visual
+        .debug_bounds("document-host-line-body-0")
+        .expect("first global Source line");
+    assert!(
+        first.left() - surface.left() <= px(100.0),
+        "the seven-digit gutter must leave space for the text: {first:?} in {surface:?}"
+    );
     let large_view = editor
         .read_with(visual, |editor, _cx| editor.document_host.clone())
         .expect("million-line large view");
@@ -144,6 +156,8 @@ async fn million_line_source_jump_keeps_local_scroll_geometry_exact(cx: &mut Tes
     let previous = visual
         .debug_bounds("document-host-line-body-999998")
         .expect("previous global Source line");
+    assert_eq!(last.left(), first.left());
+    assert_eq!(previous.left(), last.left());
     let row_height = large_view.read_with(visual, |view, _cx| view.source_row_height_for_test());
     assert!(
         (f32::from(last.top() - previous.top()) - row_height).abs() < 0.5,

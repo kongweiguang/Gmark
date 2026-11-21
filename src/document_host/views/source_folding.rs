@@ -6,6 +6,7 @@ const PAGED_FOLD_OVERSCAN_ROWS: usize = 2_048;
 const PAGED_FOLD_WINDOW_BYTES: u64 = 4 * 1024 * 1024;
 
 impl DocumentHost {
+    /// 折叠按钮紧贴正文，每行保留相同槽位，避免有无折叠标记改变正文起点。
     pub(super) fn render_source_gutter(
         line: usize,
         display_line: usize,
@@ -14,6 +15,8 @@ impl DocumentHost {
         gutter_width: f32,
         fold_lane_width: f32,
         number_width: f32,
+        number_text_size: f32,
+        number_gap: f32,
         text_color: gpui::Hsla,
         separator_color: gpui::Hsla,
         hover_color: gpui::Hsla,
@@ -24,6 +27,7 @@ impl DocumentHost {
         });
         div()
             .w(px(gutter_width))
+            .flex_shrink_0()
             .h_full()
             .flex()
             .items_center()
@@ -32,19 +36,20 @@ impl DocumentHost {
             .text_color(text_color)
             .child(
                 div()
+                    .w(px(number_width))
+                    .pr(px(number_gap))
+                    .text_size(px(number_text_size))
+                    .text_align(gpui::TextAlign::Right)
+                    .child((display_line + 1).to_string()),
+            )
+            .child(
+                div()
                     .w(px(fold_lane_width))
                     .h_full()
                     .flex()
                     .items_center()
                     .justify_center()
                     .children(toggle),
-            )
-            .child(
-                div()
-                    .w(px(number_width))
-                    .pr(px(12.0))
-                    .text_align(gpui::TextAlign::Right)
-                    .child((display_line + 1).to_string()),
             )
             .into_any_element()
     }

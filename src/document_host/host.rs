@@ -58,7 +58,7 @@ use crate::components::{
     SelectDown, SelectEnd, SelectHome, SelectLeft, SelectPageDown, SelectPageUp, SelectRight,
     SelectToDocumentEnd, SelectToDocumentStart, SelectUp, SourceLayoutIdentity, Undo,
     UndoCaptureKind, WordMoveLeft, WordMoveRight, WordSelectLeft, WordSelectRight,
-    source_line_number_gutter_width,
+    source_line_number_digits_width,
 };
 use crate::source_tools::{FoldProjectionIndex, ResidentFoldParser, SourceLanguageId};
 
